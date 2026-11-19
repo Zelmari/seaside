@@ -1,0 +1,148 @@
+# Part 1: build, feasibility and harness foundation
+
+This records the software foundation for the first development part in §14 of
+`SEASIDE_SPEC.md`.
+Requirements covered are the shared event-loop/lifetime boundary (§2), bounded
+test tooling and isolation (§12.2b), and actual build/API evidence for G1 (§13).
+It does not implement a desktop session, window management, production IPC or
+the strict external-service preflight.
+
+## Components
+
+- `src/server.[ch]`: the private Wayland/wlroots lifecycle library. The caller
+  selects the backend and renderer; ownership and teardown order are documented
+  at the interface.
+- `tests/integration/headless.c`: a test-only executable that creates offscreen
+  outputs, connects a real Wayland client, checks submitted SHM content through
+  the renderer, removes/replaces outputs, exercises zero-output survival and
+  releases clients/resources. Its serving mode is a fixture lifecycle aid,
+  not a flag or alternate launcher in a shipped compositor.
+- `tools/run-tests`: the development runner. It coordinates Meson commands,
+  bounds runtime/log capture, cleans up owned processes, classifies actual test
+  outcomes and writes run-specific JSON/human-readable reports. Its subprocess
+  helper requires exclusive serial ownership: it blocks before launching a
+  command if the calling process already has children. A process-local Linux
+  subreaper keeps detached test descendants available for cleanup; it changes
+  no system service or persistent setting.
+- `tools/record-baseline`: records installed package versions, relevant cached
+  package hashes, wlroots headers/libraries, protocol XML hashes, actual Meson
+  build metadata and source fingerprints. Missing inputs are explicit errors or
+  missing values. The record is an observation, not a fabricated Arch snapshot
+  or a guarantee that every old package can be reconstructed indefinitely.
+- `tools/probe-drm.c`: development-only node discovery and inherited-descriptor
+  KMS capability inspection. It makes no modeset, master, cursor or client-cap
+  changes. Inspect `--help` for the exact descriptor preparation contract.
+
+## Environment and qualification boundary
+
+The available development environment on 2026-11-19 is Arch Linux on the
+`6.18.58.1-microsoft-standard-WSL2` kernel. Results from it are labeled
+`arch-wsl2`; they are not full Arch-VM or native Framework/AMD qualification.
+The original VM-first test plan still requires those environments' evidence.
+Available software verification can proceed without representing that evidence
+as present.
+
+The observed package baseline is:
+
+| Component | Installed version |
+|---|---|
+| wlroots | `wlroots0.20 0.20.2-1` (`wlroots-0.20.pc`: `0.20.2`) |
+| Wayland | `1.26.0-1` |
+| Wayland protocols | `1.50-1` |
+| libdrm | `2.4.134-1` |
+| pixman | `0.46.4-1` |
+| Meson | `1.12.1-2` |
+| Ninja | `1.13.2-3` |
+| GCC | `16.2.1+r23+gd564253eb6c8-1` |
+
+The build accepts the wlroots 0.20 API family starting at 0.20.2; each actual
+build's manifest records the precise installed versions, inputs and exact
+compile commands.
+Recording protocol XML hashes does not assert that all those protocols have
+been implemented or passed compatibility tests.
+
+## DRM inspection
+
+Run the observer separately with:
+
+```sh
+build/seaside-probe-drm
+```
+
+Opening a DRM primary node can implicitly acquire master even when opened
+read-only ([kernel DRM master documentation](https://www.kernel.org/doc/html/latest/gpu/drm-uapi.html#primary-nodes-drm-master-and-authentication)).
+The observer therefore does not open primary nodes itself. Default
+discovery can report nodes and sysfs facts, but returns unavailable when safe
+plane inspection is not possible. A session/test supervisor may supply an
+already-open descriptor under the tool's documented preparation contract.
+Caller-supplied assertions are labeled as such rather than treated as verified
+driver state.
+
+Cursor-plane discovery is only a capability observation. A working hardware
+cursor across scale/rotation/VT/resume still needs real display tests. The
+currently exposed `card0` resolves to a `vgem`/faux sysfs device; it is not native
+Framework/AMD evidence. Never interpret a blocked probe as proof that a device
+lacks cursors, and never replace it with a software-cursor qualification.
+
+## Verification status
+
+The software foundation is `implemented`; the available Arch WSL2 checks are
+`automated_verified`. Overall part 1 remains `qualification_pending` until the
+full Arch-VM build/run and guest cursor-capability observation are available.
+The runner's `software_status` and `part1_qualification` fields preserve this
+distinction even when every available software test passes.
+
+Checks run on 2026-11-19:
+
+- `meson setup build --buildtype=debug` and `meson compile -C build`: pass
+  with GCC warnings treated as errors.
+- `tools/run-tests`: three passing Meson entries and one hardware skip
+  (exit 77). These include three real-client lifecycle rounds, 17 runner
+  regression tests and six DRM-probe contract tests.
+- `ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1
+  tools/run-tests --build-dir build-asan`: the same results in the
+  AddressSanitizer/UBSan build, with no sanitizer findings.
+- The baseline collector records 125 wlroots API/library fingerprints and 58
+  protocol XML hashes with no collection errors. A deliberately missing build
+  directory returns exit 1 with valid JSON describing four missing metadata
+  inputs; simulated required hash/tool failures also remain errors.
+- A fresh suite-only Meson invocation builds its required probe executables
+  and passes. `WAYLAND_SOCKET=999999` does not redirect the fixture from its
+  private socket; all three lifecycle rounds still pass.
+
+The normal and sanitizer run IDs are `20261119T232903Z-32b23218` and
+`20261119T232915Z-caee4a00`. Each run's ignored `test-results/<run-id>/`
+directory contains `summary.json`, `summary.txt`, `baseline.json` and bounded
+logs. Rerun the commands to generate evidence on another machine; these local
+artifacts are not required source files.
+
+## Reproduce and extend
+
+Use the commands in the root `README.md`. For a sanitizer build, use Meson's
+built-in sanitizer option in a separate build directory:
+
+```sh
+meson setup build-asan --buildtype=debug -Db_sanitize=address,undefined
+meson compile -C build-asan
+meson test -C build-asan
+```
+
+To collect baseline inputs independently of the runner:
+
+```sh
+tools/record-baseline --build-dir build --output test-results/baseline.json
+```
+
+Add later acceptance cases to the existing production modules, fixture clients
+and Meson suites. Keep controls for simulated time/input/failures in test-only
+adapters. Part 2 should add the TOML/default/state foundation and its regression
+cases; no part 1 placeholder advertises unimplemented user functionality.
+
+## Remaining qualification
+
+- Repeat the clean build/fixture/runner checks in the designated full Arch VM.
+- Obtain an actual guest KMS/cursor capability observation through an authorized
+  descriptor; virtual driver behavior remains distinct from physical hardware.
+- Preserve G2 and the later protocol, session, GPU and native-hardware gates.
+- Establish a fixed Arch snapshot/complete rebuild inputs before describing the
+  baseline as a reproducible release lock.

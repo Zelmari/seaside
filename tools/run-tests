@@ -1,0 +1,538 @@
+#!/usr/bin/env python3
+"""Build and exercise the development fixtures, retaining bounded evidence."""
+
+from __future__ import annotations
+
+import argparse
+from collections import Counter
+import ctypes
+from datetime import datetime, timezone
+import json
+import math
+import os
+from pathlib import Path
+import platform
+import selectors
+import shlex
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+import uuid
+
+
+class InterruptedRun(BaseException):
+    def __init__(self, signum: int):
+        self.signum = signum
+
+
+def process_identity(pid: int) -> tuple[int, str] | None:
+    try:
+        fields = Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1].split()
+        return int(fields[19]), fields[0]
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def child_pids(pid: int) -> list[int]:
+    try:
+        return [int(value) for value in Path(f"/proc/{pid}/task/{pid}/children").read_text().split()]
+    except OSError:
+        return []
+
+
+class OwnedProcessTree:
+    """Exclusive serial ownership, including descendants orphaned by Meson tests."""
+
+    def __init__(self):
+        existing = child_pids(os.getpid())
+        if existing:
+            raise OSError("Exclusive command supervision requires no pre-existing children")
+        self.libc = ctypes.CDLL(None, use_errno=True)
+        self.previous = ctypes.c_int()
+        if self.libc.prctl(37, ctypes.byref(self.previous), 0, 0, 0) != 0:
+            raise OSError(ctypes.get_errno(), "Cannot inspect child-subreaper state")
+        self.owned = {}
+        self.root = None
+        # A process-local subreaper keeps an orphan in our ancestry even when
+        # a short-lived test leader exits between observations or starts a session.
+        if self.libc.prctl(36, 1, 0, 0, 0) != 0:
+            raise OSError(ctypes.get_errno(), "Cannot enable child-subreaper cleanup")
+
+    def refresh(self) -> None:
+        pending = list(self.owned)
+        if self.root is not None:
+            pending.append(self.root)
+        pending.extend(child_pids(os.getpid()))
+        visited = set()
+        while pending:
+            pid = pending.pop()
+            if pid in visited:
+                continue
+            visited.add(pid)
+            identity = process_identity(pid)
+            if identity is None:
+                continue
+            prior = self.owned.get(pid)
+            if prior is not None and identity[0] != prior:
+                continue
+            self.owned[pid] = identity[0]
+            pending.extend(child_pids(pid))
+
+    def signal(self, signum: int) -> None:
+        self.refresh()
+        for pid, started in self.owned.items():
+            identity = process_identity(pid)
+            if identity is not None and identity[0] == started and identity[1] != "Z":
+                try:
+                    os.kill(pid, signum)
+                except ProcessLookupError:
+                    pass
+
+    def alive(self) -> bool:
+        self.refresh()
+        return any(
+            (identity := process_identity(pid)) is not None
+            and identity[0] == started and identity[1] != "Z"
+            for pid, started in self.owned.items()
+        )
+
+    def close(self) -> None:
+        for pid, started in self.owned.items():
+            identity = process_identity(pid)
+            if identity is not None and identity[0] == started:
+                try:
+                    os.waitpid(pid, os.WNOHANG)
+                except ChildProcessError:
+                    pass
+        if self.libc.prctl(36, self.previous.value, 0, 0, 0) != 0:
+            raise OSError(ctypes.get_errno(), "Cannot restore child-subreaper state")
+
+
+class BoundedOutput:
+    def __init__(self, limit: int):
+        self.limit = limit
+        self.total = 0
+        self.head = bytearray()
+        self.tail = bytearray()
+
+    def append(self, chunk: bytes) -> None:
+        self.total += len(chunk)
+        head_size = self.limit // 2
+        take = min(len(chunk), head_size - len(self.head))
+        self.head.extend(chunk[:take])
+        self.tail.extend(chunk[take:])
+        tail_size = self.limit - head_size
+        if len(self.tail) > tail_size:
+            del self.tail[: len(self.tail) - tail_size]
+
+    def bytes(self) -> bytes:
+        if self.total <= self.limit:
+            return bytes(self.head + self.tail)
+        marker = b"\n[output truncated]\n"
+        if self.limit < len(marker):
+            return marker[: self.limit]
+        remaining = self.limit - len(marker)
+        head_size = remaining // 2
+        tail_size = remaining - head_size
+        tail = bytes(self.tail[-tail_size:]) if tail_size else b""
+        return bytes(self.head[:head_size]) + marker + tail
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _stop_process_group(process: subprocess.Popen, grace: float, tree: OwnedProcessTree) -> str | None:
+    # The leader can finish while a child still holds stdout or keeps running.
+    # Its private process group is the cleanup boundary, not just the leader PID.
+    tree.signal(signal.SIGTERM)
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    except OSError as error:
+        return str(error)
+    deadline = time.monotonic() + grace
+    while time.monotonic() < deadline:
+        if process.poll() is not None and not tree.alive():
+            break
+        time.sleep(0.01)
+    tree.signal(signal.SIGKILL)
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    except OSError as error:
+        return str(error)
+    try:
+        process.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        return "Process did not exit after SIGKILL"
+    deadline = time.monotonic() + 1
+    while tree.alive() and time.monotonic() < deadline:
+        tree.signal(signal.SIGKILL)
+        time.sleep(0.01)
+    if tree.alive():
+        return "Owned descendant remained alive after SIGKILL"
+    return None
+
+
+def run_command(
+    command: list[str],
+    *,
+    cwd: Path,
+    log_path: Path,
+    timeout: float,
+    log_limit: int = 1024 * 1024,
+    env: dict[str, str] | None = None,
+    terminate_grace: float = 2.0,
+) -> dict:
+    """Supervise one command exclusively on the main thread, without a shell.
+
+    The standalone runner creates subprocesses serially. Embedding this helper
+    alongside other child owners is unsupported and blocks before starting work.
+    No independent code may create children while the command is active.
+    """
+    if not command or any(not isinstance(arg, str) for arg in command):
+        raise ValueError("command must be a nonempty string argument list")
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("timeout must be finite and positive")
+    if log_limit < 1 or terminate_grace <= 0:
+        raise ValueError("log limit and termination grace must be positive")
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    output = BoundedOutput(log_limit)
+    started = time.monotonic()
+    result = {
+        "command": command,
+        "cwd": str(cwd),
+        "started_at": utc_now(),
+        "status": "blocked",
+        "returncode": None,
+        "timed_out": False,
+        "interrupted_signal": None,
+        "error": None,
+        "cleanup_error": None,
+        "log": str(log_path),
+    }
+    process = None
+    tree = None
+    selector = selectors.DefaultSelector()
+    try:
+        tree = OwnedProcessTree()
+        process = subprocess.Popen(
+            command,
+            cwd=cwd,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        tree.root = process.pid
+        os.set_blocking(process.stdout.fileno(), False)
+        selector.register(process.stdout, selectors.EVENT_READ)
+        while selector.get_map() or process.poll() is None:
+            tree.refresh()
+            remaining = timeout - (time.monotonic() - started)
+            if remaining <= 0:
+                result["timed_out"] = True
+                result["error"] = f"Command exceeded its {timeout:g}s deadline"
+                break
+            for key, _ in selector.select(min(remaining, 0.05)):
+                chunk = os.read(key.fd, 65536)
+                if chunk:
+                    output.append(chunk)
+                else:
+                    selector.unregister(key.fileobj)
+        result["status"] = "fail" if result["timed_out"] else "pass"
+    except (KeyboardInterrupt, InterruptedRun) as error:
+        result["interrupted_signal"] = (
+            error.signum if isinstance(error, InterruptedRun) else signal.SIGINT
+        )
+        result["error"] = "Run interrupted"
+    except OSError as error:
+        result["error"] = str(error)
+    finally:
+        cleanup_handlers = {}
+
+        def defer_interrupt(signum, _frame):
+            result["interrupted_signal"] = signum
+            result["error"] = "Run interrupted"
+            result["status"] = "blocked"
+
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            cleanup_handlers[signum] = signal.signal(signum, defer_interrupt)
+        if process is not None:
+            result["cleanup_error"] = _stop_process_group(process, terminate_grace, tree)
+            drain_until = time.monotonic() + 0.2
+            while selector.get_map() and time.monotonic() < drain_until:
+                for key, _ in selector.select(0.01):
+                    chunk = os.read(key.fd, 65536)
+                    if chunk:
+                        output.append(chunk)
+                    else:
+                        selector.unregister(key.fileobj)
+            if selector.get_map() and result["cleanup_error"] is None:
+                result["cleanup_error"] = "Output pipe remained open after process-group cleanup"
+            process.stdout.close()
+            result["returncode"] = process.returncode
+            if result["cleanup_error"]:
+                result["status"] = "fail"
+            elif result["error"] is None:
+                result["status"] = (
+                    "pass" if process.returncode == 0 else
+                    "skip" if process.returncode == 77 else "fail"
+                )
+        if tree is not None:
+            try:
+                tree.close()
+            except OSError as error:
+                result["cleanup_error"] = str(error)
+                result["status"] = "fail"
+        selector.close()
+        retained = output.bytes()
+        log_path.write_bytes(retained)
+        result.update(
+            finished_at=utc_now(),
+            duration_seconds=round(time.monotonic() - started, 6),
+            output_bytes=output.total,
+            log_bytes=len(retained),
+            log_truncated=output.total > log_limit,
+        )
+        for signum, handler in cleanup_handlers.items():
+            signal.signal(signum, handler)
+    return result
+
+
+def environment_facts() -> dict:
+    try:
+        release = platform.freedesktop_os_release()
+    except OSError:
+        release = {}
+    kernel = platform.uname()
+    wsl = "microsoft" in kernel.release.lower() or "wsl" in kernel.release.lower()
+    return {
+        "classification": "arch-wsl2" if wsl and release.get("ID") == "arch" else
+                          "wsl" if wsl else f"{release.get('ID', 'unknown')}-linux",
+        "os_release": {key: release[key] for key in ("ID", "NAME", "VERSION_ID", "BUILD_ID") if key in release},
+        "kernel": kernel.release,
+        "machine": kernel.machine,
+        "python": platform.python_version(),
+        "physical_gpu_qualification": "not_established",
+        "tty_session_qualification": "not_tested_by_this_runner",
+    }
+
+
+def parse_meson_results(path: Path, run_dir: Path, log_limit: int) -> list[dict]:
+    results = []
+    try:
+        with path.open("rb") as source:
+            while line := source.readline(2 * 1024 * 1024 + 1):
+                if len(line) > 2 * 1024 * 1024:
+                    raise ValueError("Meson result record exceeds 2 MiB")
+                row = json.loads(line)
+                if not isinstance(row, dict) or not isinstance(row.get("name"), str):
+                    raise ValueError("Invalid Meson test-result object")
+                outcome = row.get("result")
+                status = {
+                    "OK": "pass", "EXPECTEDFAIL": "pass",
+                    "SKIP": "skip", "IGNORED": "skip", "INTERRUPT": "blocked",
+                    "FAIL": "fail", "ERROR": "fail", "TIMEOUT": "fail",
+                    "UNEXPECTEDPASS": "fail",
+                }.get(outcome, "blocked")
+                log = BoundedOutput(log_limit)
+                for field in ("stdout", "stderr"):
+                    value = row.get(field, "")
+                    if not isinstance(value, str):
+                        raise ValueError(f"Invalid Meson {field}")
+                    log.append(value.encode("utf-8", errors="replace"))
+                log_path = run_dir / f"test-{len(results) + 1:03d}.log"
+                log_path.write_bytes(log.bytes())
+                results.append({
+                    "test_id": row["name"],
+                    "requirement_sections": ["12.2b", "14 part 1"],
+                    "status": status,
+                    "meson_result": outcome,
+                    "command": row.get("command"),
+                    "returncode": row.get("returncode"),
+                    "duration_seconds": row.get("duration"),
+                    "log": str(log_path),
+                    "log_truncated": log.total > log_limit,
+                    "reason": log.bytes().decode("utf-8", errors="replace")[:512]
+                              if status != "pass" else None,
+                })
+    except (OSError, ValueError, UnicodeError) as error:
+        results.append({
+            "test_id": "meson-result-collection",
+            "requirement_sections": ["12.2b", "14 part 1"],
+            "status": "blocked",
+            "reason": str(error),
+            "log": None,
+        })
+    if not results:
+        results.append({
+            "test_id": "meson-test-discovery",
+            "requirement_sections": ["12.2b", "14 part 1"],
+            "status": "blocked",
+            "reason": "No Meson test results were produced; an empty suite is not a pass",
+            "log": None,
+        })
+    return results
+
+
+def retain_meson_logs(run_dir: Path, log_limit: int) -> list[dict]:
+    artifacts = []
+    for suffix in ("json", "txt", "junit.xml"):
+        path = run_dir / f"meson.{suffix}"
+        if not path.exists():
+            continue
+        output = BoundedOutput(log_limit)
+        with path.open("rb") as source:
+            while chunk := source.read(65536):
+                output.append(chunk)
+        truncated = output.total > log_limit
+        if truncated:
+            # A truncated JSON/XML file is evidence, not a parseable result file.
+            retained = path.with_name(path.name + ".truncated.log")
+            retained.write_bytes(output.bytes())
+            path.unlink()
+        else:
+            retained = path
+        artifacts.append({"path": str(retained), "bytes": output.total, "truncated": truncated})
+    return artifacts
+
+
+def write_report(run_dir: Path, report: dict) -> None:
+    report["counts"] = {status: 0 for status in ("pass", "fail", "skip", "blocked")}
+    report["counts"].update(Counter(row["status"] for row in report["tests"]))
+    command_states = {row["status"] for row in report["commands"]}
+    test_states = {row["status"] for row in report["tests"]}
+    if "fail" in command_states or "fail" in test_states:
+        report["status"] = "fail"
+    elif "blocked" in command_states or "blocked" in test_states or "pass" not in test_states:
+        report["status"] = "blocked"
+    else:
+        report["status"] = "pass"
+    report["software_status"] = report["status"]
+    report["part1_qualification"] = "pending_arch_vm_drm_and_interactive_checks"
+    report["pending_checks"] = [
+        {"test_id": row["test_id"], "status": row["status"], "reason": row.get("reason")}
+        for row in report["tests"] if row["status"] in ("skip", "blocked")
+    ]
+    report["finished_at"] = utc_now()
+    temporary = run_dir / "summary.json.tmp"
+    temporary.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
+    temporary.replace(run_dir / "summary.json")
+    lines = [
+        f"Seaside software checks: {report['software_status'].upper()}",
+        "Part 1 qualification: PENDING Arch VM DRM and interactive checks.",
+        f"Environment: {report['environment']['classification']} ({report['environment']['kernel']})",
+        "This run does not establish physical GPU or real TTY-session qualification.",
+        "Tests: " + ", ".join(f"{count} {status}" for status, count in report["counts"].items()),
+        f"Baseline: {report.get('baseline', 'not collected')}",
+    ]
+    for row in report["commands"]:
+        lines.append(f"{row['status'].upper()}: {row['id']} — {shlex.join(row['command'])}")
+        if row.get("error") or row.get("cleanup_error"):
+            lines.append(f"  {row.get('error') or row.get('cleanup_error')}")
+        lines.append(f"  Log: {row['log']}")
+    for row in report["tests"]:
+        lines.append(f"{row['status'].upper()}: {row['test_id']}")
+        if row.get("reason"):
+            lines.append("  " + row["reason"].replace("\n", " "))
+    (run_dir / "summary.txt").write_text("\n".join(lines) + "\n")
+
+
+def positive_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise argparse.ArgumentTypeError("must be finite and positive")
+    return parsed
+
+
+def main(argv: list[str] | None = None, *, repository_root: Path | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--build-dir", default="build", help="build directory, relative to the repository root")
+    parser.add_argument("--results-dir", default="test-results", help="parent for run-specific evidence directories")
+    parser.add_argument("--timeout", type=positive_float, default=180.0, help="deadline in seconds per setup/build/test command")
+    parser.add_argument("--log-limit", type=int, default=1024 * 1024, help="maximum retained bytes per command/test log")
+    parser.add_argument("--suite", action="append", default=[], help="select a Meson suite; repeat to select several")
+    args = parser.parse_args(argv)
+    if args.log_limit < 1:
+        parser.error("--log-limit must be positive")
+    root = (repository_root or Path(__file__).resolve().parent.parent).resolve()
+    build_dir = (root / args.build_dir).resolve()
+    results_dir = (root / args.results_dir).resolve()
+    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8]
+    run_dir = results_dir / run_id
+    run_dir.mkdir(parents=True, mode=0o700)
+    report = {
+        "v": 1, "part": 1, "run_id": run_id, "started_at": utc_now(),
+        "environment": environment_facts(), "commands": [], "tests": [],
+        "baseline": str(run_dir / "baseline.json"), "artifacts": [],
+    }
+    interrupted = None
+    previous_term_handler = signal.getsignal(signal.SIGTERM)
+
+    def interrupted_by_signal(signum, _frame):
+        raise InterruptedRun(signum)
+
+    signal.signal(signal.SIGTERM, interrupted_by_signal)
+    try:
+        with tempfile.TemporaryDirectory(prefix="seaside-tests-") as temporary:
+            fixture_root = Path(temporary)
+            child_env = os.environ.copy()
+            for key in ("WAYLAND_DISPLAY", "WAYLAND_SOCKET", "DISPLAY", "SEASIDE_SOCKET"):
+                child_env.pop(key, None)
+            for key, leaf in (("XDG_RUNTIME_DIR", "runtime"), ("XDG_STATE_HOME", "state"), ("XDG_CONFIG_HOME", "config")):
+                directory = fixture_root / leaf
+                directory.mkdir(mode=0o700)
+                child_env[key] = str(directory)
+
+            def execute(name: str, command: list[str]) -> dict:
+                nonlocal interrupted
+                row = run_command(command, cwd=root, log_path=run_dir / f"{name}.log", timeout=args.timeout, log_limit=args.log_limit, env=child_env)
+                row["id"] = name
+                report["commands"].append(row)
+                interrupted = row["interrupted_signal"] or interrupted
+                print(f"{name}: {row['status'].upper()} ({row['duration_seconds']:.2f}s)", flush=True)
+                return row
+
+            setup = ["meson", "setup"]
+            if (build_dir / "meson-private/coredata.dat").is_file():
+                setup.append("--reconfigure")
+            setup.extend([str(build_dir), str(root)])
+            if "--reconfigure" not in setup:
+                setup.append("--buildtype=debug")
+            configured = execute("configure", setup)
+            compiled = None
+            if configured["status"] == "pass" and not interrupted:
+                compiled = execute("compile", ["meson", "compile", "-C", str(build_dir)])
+            if not interrupted:
+                execute("baseline", [sys.executable, str(root / "tools/record-baseline"), "--build-dir", str(build_dir), "--output", report["baseline"]])
+            if compiled is not None and compiled["status"] == "pass" and not interrupted:
+                command = ["meson", "test", "-C", str(build_dir), "--no-rebuild", "--print-errorlogs", "--logbase", str(run_dir / "meson")]
+                for suite in args.suite:
+                    command.extend(["--suite", suite])
+                execute("test", command)
+                report["tests"] = parse_meson_results(run_dir / "meson.json", run_dir, args.log_limit)
+            else:
+                report["tests"] = [{"test_id": "test-execution", "status": "blocked", "reason": "Setup/build did not pass or the run was interrupted", "log": None}]
+    except (KeyboardInterrupt, InterruptedRun) as error:
+        interrupted = error.signum if isinstance(error, InterruptedRun) else signal.SIGINT
+        report["tests"].append({"test_id": "test-run-interruption", "status": "blocked", "reason": "Run interrupted", "log": None})
+    finally:
+        signal.signal(signal.SIGTERM, previous_term_handler)
+        report["interrupted_signal"] = interrupted
+        report["artifacts"] = retain_meson_logs(run_dir, args.log_limit)
+        write_report(run_dir, report)
+        print(f"Report: {run_dir / 'summary.txt'}", flush=True)
+    if interrupted:
+        return 128 + interrupted
+    return {"pass": 0, "fail": 1, "blocked": 2}[report["status"]]
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

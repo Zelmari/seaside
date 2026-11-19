@@ -1,0 +1,217 @@
+#!/usr/bin/env python3
+"""Record observed build inputs without claiming a reproducible Arch snapshot."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import platform
+import subprocess
+import sys
+import tempfile
+from datetime import datetime, timezone
+
+
+ROOT = Path(__file__).resolve().parent.parent
+DEPENDENCIES = (
+    'wlroots-0.20', 'wayland-server', 'wayland-client',
+    'wayland-protocols', 'libdrm', 'pixman-1',
+)
+PACKAGES = (
+    'gcc', 'glibc', 'binutils', 'pkgconf', 'meson', 'ninja', 'python',
+    'wlroots0.20', 'wayland', 'wayland-protocols', 'libdrm', 'pixman',
+    'libinput', 'libxkbcommon', 'mesa', 'seatd',
+)
+
+
+def command(argv: list[str]) -> dict:
+    try:
+        process = subprocess.run(
+            argv, cwd=ROOT, text=True, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, timeout=10, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return {'argv': argv, 'returncode': None, 'error': str(error)}
+    return {
+        'argv': argv, 'returncode': process.returncode,
+        'stdout': process.stdout[:1048576], 'stderr': process.stderr[:65536],
+    }
+
+
+def digest(path: Path) -> dict:
+    try:
+        with path.open('rb') as stream:
+            checksum = hashlib.file_digest(stream, 'sha256').hexdigest()
+        record = {'path': str(path), 'sha256': checksum}
+        if path.is_symlink():
+            record['symlink_target'] = os.readlink(path)
+        return record
+    except OSError as error:
+        return {'path': str(path), 'sha256': None, 'error': str(error)}
+
+
+def collect(build_dir: Path) -> dict:
+    errors = []
+    dependency_versions = {}
+    for dependency in DEPENDENCIES:
+        observation = command(['pkg-config', '--modversion', dependency])
+        dependency_versions[dependency] = observation
+        if observation['returncode'] != 0:
+            errors.append(f'Cannot observe required dependency {dependency}')
+
+    installed = command(['pacman', '-Q'])
+    installed_versions = {}
+    if installed['returncode'] == 0:
+        installed_versions = dict(
+            line.split(maxsplit=1) for line in installed['stdout'].splitlines()
+        )
+    else:
+        errors.append('Cannot record Arch installed-package versions')
+
+    package_archives = {}
+    cache = Path('/var/cache/pacman/pkg')
+    for package in PACKAGES:
+        version = installed_versions.get(package)
+        archives = []
+        if version:
+            # Retain observed filenames with an epoch and cache layouts that
+            # omit it; both refer to the same installed package version.
+            archive_versions = {version, version.split(':', maxsplit=1)[-1]}
+            paths = {
+                path for archive_version in archive_versions
+                for path in cache.glob(f'{package}-{archive_version}-*.pkg.tar.*')
+            }
+            for path in sorted(paths):
+                if not path.name.endswith('.sig'):
+                    archives.append(digest(path))
+        package_archives[package] = {'version': version, 'cached_archives': archives}
+
+    wlroots_paths = command(['pacman', '-Qlq', 'wlroots0.20'])
+    api_files = []
+    if wlroots_paths['returncode'] == 0:
+        for line in wlroots_paths['stdout'].splitlines():
+            path = Path(line)
+            if path.is_file() and (path.suffix in ('.h', '.pc') or '.so' in path.name):
+                api_files.append(digest(path))
+    else:
+        errors.append('Cannot hash installed wlroots API/library files')
+    if not api_files:
+        errors.append('No installed wlroots API/library artifacts were found')
+
+    protocol_dir_result = command(['pkg-config', '--variable=pkgdatadir', 'wayland-protocols'])
+    protocol_xml = []
+    if protocol_dir_result['returncode'] == 0 and protocol_dir_result.get('stdout', '').strip():
+        protocol_dir = Path(protocol_dir_result['stdout'].strip())
+        for path in sorted(protocol_dir.rglob('*.xml')):
+            item = digest(path)
+            item['relative_path'] = str(path.relative_to(protocol_dir))
+            protocol_xml.append(item)
+    if not protocol_xml:
+        errors.append('Cannot record installed protocol XML hashes')
+
+    source_files = [ROOT / 'meson.build']
+    for directory in ('src', 'tests', 'tools'):
+        source_files.extend(
+            path for path in (ROOT / directory).rglob('*')
+            if path.is_file() and '__pycache__' not in path.parts
+        )
+    source_hashes = []
+    for path in sorted(source_files):
+        item = digest(path)
+        item['path'] = str(path.relative_to(ROOT))
+        source_hashes.append(item)
+
+    build_metadata = {}
+    for name in ('intro-buildoptions.json', 'intro-compilers.json', 'intro-dependencies.json', 'compile_commands.json'):
+        path = build_dir / name if name == 'compile_commands.json' else build_dir / 'meson-info' / name
+        try:
+            build_metadata[name] = json.loads(path.read_text())
+        except (OSError, ValueError) as error:
+            build_metadata[name] = {'error': str(error)}
+            errors.append(f'Cannot record {name}')
+
+    observations = {
+        'git_head': command(['git', 'rev-parse', 'HEAD']),
+        'git_worktree': command(['git', 'status', '--porcelain=v1']),
+        'compiler': command(['cc', '--version']),
+        'meson': command(['meson', '--version']),
+        'ninja': command(['ninja', '--version']),
+    }
+    for name, observation in observations.items():
+        if observation['returncode'] != 0:
+            errors.append(f'Cannot record required {name} observation')
+    repository_databases = [digest(path) for path in sorted(Path('/var/lib/pacman/sync').glob('*.db'))]
+    for artifact in api_files + protocol_xml + source_hashes + repository_databases:
+        if artifact['sha256'] is None:
+            errors.append(f"Cannot hash required artifact {artifact['path']}")
+    for package, artifacts in package_archives.items():
+        for artifact in artifacts['cached_archives']:
+            if artifact['sha256'] is None:
+                errors.append(f"Cannot hash available {package} archive {artifact['path']}")
+
+    kernel = platform.release()
+    kind = 'arch-wsl2' if 'microsoft' in kernel.lower() else 'linux-unqualified'
+    return {
+        'schema_version': 1,
+        'recorded_at': datetime.now(timezone.utc).isoformat(),
+        'environment': {
+            'kind': kind, 'kernel': kernel, 'architecture': platform.machine(),
+            'os_release': Path('/etc/os-release').read_text(),
+            'python': platform.python_version(),
+            'native_hardware_qualified': False,
+            'arch_vm_qualified': False,
+        },
+        'git': {
+            'head': observations['git_head'],
+            'worktree': observations['git_worktree'],
+        },
+        'compiler': observations['compiler'],
+        'meson': observations['meson'],
+        'ninja': observations['ninja'],
+        'dependency_versions': dependency_versions,
+        'installed_package_versions': installed_versions,
+        'package_artifacts': package_archives,
+        'wlroots_api_artifacts': api_files,
+        'protocol_xml_artifacts': protocol_xml,
+        'repository_databases': repository_databases,
+        'build_metadata': build_metadata,
+        'source_artifacts': source_hashes,
+        'reproducibility': {
+            'status': 'observed_inputs_not_a_rebuild_lock',
+            'arch_snapshot': None,
+            'note': 'Missing archive hashes and a fixed Arch snapshot remain explicit; versions alone are not a rebuild guarantee.',
+        },
+        'errors': errors,
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--build-dir', type=Path, default=ROOT / 'build')
+    parser.add_argument('--output', type=Path)
+    args = parser.parse_args()
+    build_dir = args.build_dir if args.build_dir.is_absolute() else ROOT / args.build_dir
+    result = collect(build_dir)
+    serialized = json.dumps(result, indent=2, sort_keys=True) + '\n'
+    if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(mode='w', dir=args.output.parent, delete=False) as stream:
+            temporary = Path(stream.name)
+            try:
+                stream.write(serialized)
+                stream.flush()
+                os.fsync(stream.fileno())
+                stream.close()
+                os.replace(temporary, args.output)
+            finally:
+                temporary.unlink(missing_ok=True)
+    else:
+        sys.stdout.write(serialized)
+    return 1 if result['errors'] else 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

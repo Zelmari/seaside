@@ -973,7 +973,7 @@ The following sequence verifies the **existing approved** contract. It does not 
 
 ## 14. Ten development parts and coding-agent handoff
 
-Use **10 development parts**, each ending in concrete test evidence. A part may contain several small implementation tasks/changes; it is not a requirement to produce one large diff or stop for approval after every part. The harness starts in part 1 and grows with the code under §12.2b. These are incremental engineering milestones, not authorization to invent features. The current workspace contains design/reference material, not a built compositor; no compile, runtime or GPU result is implied by this handoff.
+Use **10 development parts**, each ending in concrete test evidence. A part may contain several small implementation tasks/changes; it is not a requirement to produce one large diff or stop for approval after every part. The harness starts in part 1 and grows with the code under §12.2b. These are incremental engineering milestones, not authorization to invent features. The workspace now contains the part 1 software foundation; [the part 1 handoff](PART1.md) records actual checks separately from pending full Arch-VM and hardware qualification. It is not yet an installable desktop compositor.
 
 **Build convention (ENGINEERING CHOICE):** Use Meson/Ninja, a pinned Arch C toolchain targeting C17 with the Linux/POSIX interfaces required by wlroots, and separate compositor/CLI/test targets. Choose the TOML 1.0 parser and small image decoder as build dependencies after checking their real APIs and licences. Keep layout/focus/config state tests independent of physical DRM outputs. Standard build commands, to be provided by the initial implementation, are:
 
@@ -983,7 +983,7 @@ meson compile -C build
 meson test -C build
 ```
 
-These commands are a handoff contract, **not commands successfully run against this workspace**. [Meson build/test reference](https://mesonbuild.com/Running-Meson.html).
+These commands build and test the part 1 foundation in the recorded Arch WSL2 environment; passing headless checks does not close the full Arch-VM or native-hardware gates. [Meson build/test reference](https://mesonbuild.com/Running-Meson.html).
 
 | Part | Dependencies / modules | Concrete completion evidence |
 |---|---|---|
@@ -1074,3 +1074,5 @@ The supplied draft referenced `SEASIDE_DECISION_ARCHIVE.md` for a full chronolog
 **Engineering handoff cleanup — 2026-11-19:** Separated scoped development readiness from prototype/release qualification; documented the absence of historical references; extracted the standalone TOML reference; added ordinary state/ownership/transaction rules, typed IPC result shapes, subscription watermarks and dependency-ordered milestones. These are implementation contracts for existing scope. Static documentation checks do not establish an Arch build, running compositor, portal compatibility or hardware qualification.
 
 **Owner-directed development workflow — 2026-11-19:** Develop in testable parts with a harness built alongside the implementation, minimizing human involvement to checks that genuinely need it. Code comments explain decisions, non-obvious behavior and difficult reasoning rather than pure syntax. The engineering plan uses 10 parts (§14), each with concrete evidence and explicit remaining verification; this adds development tooling and standards, not runtime product functionality.
+
+**Part 1 implementation evidence — 2026-11-19:** The Meson build, private server lifecycle, real-client headless fixture, development runner and safe DRM observer are implemented. Software checks run in Arch WSL2, including sanitizer builds; [the handoff](PART1.md) records their results. Full Arch-VM execution, an actual guest cursor-plane observation and native hardware/session qualification remain pending. No installable compositor, preflight bypass or additional product functionality is introduced.
