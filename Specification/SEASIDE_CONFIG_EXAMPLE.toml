@@ -1,0 +1,155 @@
+# Seaside v1 — ~/.config/seaside/config.toml
+# Every setting is documented here. Edit and save to live-reload unless noted.
+# Invalid edits preserve the last valid config and display a persistent error.
+
+[autostart]
+# List of shell commands; [] = start nothing (default). Commands run ONCE
+# after session preflight. Changing this list needs a Seaside restart.
+commands = []
+
+[wallpaper]
+# Absolute path to an image. Default is the bundled solid-black image.
+# Uses fixed aspect-preserving cover/crop; no wallpaper fit option in v1.
+path = "/usr/share/seaside/wallpapers/black.png"
+
+[window]
+# true = globally tile ordinary windows; false = globally float.
+# Changing tiling or layout clears temporary per-window tiling overrides.
+tiling = true
+# Layout options: "dwindle" (default), "scrolling".
+layout = "dwindle"
+# User-configurable defaults in logical pixels (see spec for scale behavior):
+# outer/inner 0..512; border width 0..64. Borders are square.
+gaps_outer = 10
+gaps_inner = 5
+border_width = 2
+
+[workspaces]
+# "global" (default) or "per-monitor". THIS KEY NEEDS A RESTART.
+mode = "global"
+
+[monitors]
+# Primary: "auto" (highest supported Hz, then resolution, then connector)
+# or a selector: "identity:<as-reported>" / "connector:<output-name>".
+# Use `seasidectl outputs` to discover valid monitor selectors.
+primary = "auto"
+# Mode: "auto" = preferred/native resolution + highest Hz at that res.
+# Resolution override: "WIDTHxHEIGHT", e.g. "2560x1440".
+# Refresh rate override: positive Hz number, e.g. 165.0 or 59.94.
+resolution = "auto"
+refresh_rate = "auto"
+# Fractional scale: finite number 0.5..4.0; 1.0 means 100% (default).
+scale = 1.0
+# Degrees clockwise: 0 (default), 90, 180, 270.
+rotation = 0
+# "auto" = auto horizontal layout, or [x, y] logical coords, e.g. [0,0].
+position = "auto"
+
+# Optional per-monitor overrides. Repeat this [[monitors.output]] table.
+# Exact match options: identity:<as-reported> or connector:<output-name>.
+# Omitted fields inherit the corresponding [monitors] defaults.
+# [[monitors.output]]
+# match = "connector:DP-1"
+# resolution = "2560x1440"  # "auto" or WIDTHxHEIGHT
+# refresh_rate = 165.0       # "auto" or positive Hz number
+# scale = 1.25               # 0.5..4.0, fractions allowed
+# rotation = 90              # 0, 90, 180, 270
+# position = [1920, 0]       # "auto" or [x, y] logical px
+
+[dwindle]
+# New-window target: "focused" (default) or "largest".
+insertion = "focused"
+# Initial new split allocation ratio: finite 0.05..0.95.
+# Existing split orientations recalculate automatically; new side right/bottom.
+split_ratio = 0.5
+
+[scrolling]
+# New column width as fraction of usable output logical width: 0.10..4.0.
+# 0.5 = 50% by default. Per-window minimum widths still take precedence.
+default_column_width = 0.5
+
+[input.mouse]
+# Pointer profile: "flat" only in v1 (no pointer acceleration).
+profile = "flat"
+# libinput normalized speed: -1.0..1.0; 0.0 = neutral default.
+sensitivity = 0.0
+
+[idle]
+# Minutes with no activity before display power-off: 0..1440; 0 disables.
+# Visible fullscreen apps and client idle inhibition prevent display-off.
+display_off_after_minutes = 15
+
+[render]
+# true = attempt direct scanout for eligible frames; false = compose.
+# Explicit synchronization is automatically supported as appropriate;
+# it is NOT user-configurable. Hardware cursors are mandatory, no option.
+direct_scanout = true
+# "off" (default), "fullscreen", "always".
+adaptive_sync = "off"
+# false (default) or true: allow client-requested tearing in fullscreen only.
+allow_tearing = false
+# "preserve" (default) for aspect ratio / bars, or "stretch" to fill.
+fullscreen_aspect = "preserve"
+
+[night_light]
+# false (default) or true; manual global hardware-only night light.
+# No schedule, per-monitor setting or GPU post-processing fallback.
+# Shortcut/IPC changes survive unrelated config edits for this session.
+# Changing this enabled value applies it; a new session uses the config value.
+enabled = false
+# Kelvin 1000..10000 (engineering validation range); default 4500 K APPROVED.
+# Disabled by default, so this has no effect until explicitly enabled.
+temperature_kelvin = 4500
+
+[keybinds]
+# A binding is "Modifier+XKB_Key" = "action [args]"; modifiers are optional.
+# Modifiers: Super, Ctrl, Alt, Shift. Examples: Left, Tab, D, Return, F12.
+# Drag gestures: Super+MouseLeftDrag and Super+MouseRightDrag.
+# All default bindings can be removed or remapped.
+# This table is the complete active map: delete/comment an entry to disable it.
+# An empty [keybinds] table disables all bindings; omitting the table uses defaults.
+"Super+D" = "toggle_window_tiling"
+"Super+Left" = "focus left"
+"Super+Right" = "focus right"
+"Super+Up" = "focus up"
+"Super+Down" = "focus down"
+"Alt+Tab" = "cycle_focus_mru"
+"Super+MouseLeftDrag" = "move_window"
+"Super+MouseRightDrag" = "resize_window"
+"Super+Return" = "exec foot"  # Default terminal; installed through Seaside package dependencies.
+# Standard media events, including those produced by Fn on supported keyboards.
+# Fn/Fn-Lock and physical key positions are keyboard-specific; Fn is not a modifier here.
+# External wpctl controls the current default playback device; 5% steps, max 100%.
+"XF86AudioLowerVolume" = "exec wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-"
+"XF86AudioRaiseVolume" = "exec wpctl set-volume --limit 1 @DEFAULT_AUDIO_SINK@ 5%+"
+"XF86AudioMute" = "exec wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle"
+
+# ALL OTHER APPROVED ACTIONS ARE UNBOUND BY DEFAULT.
+# Available action forms (choose your own chords; no hidden defaults):
+#   toggle_window_tiling; focus DIR; cycle_focus_mru
+#   move_window (mouse drag only); resize_window (mouse drag only)
+#   move_window DIR; swap_window DIR; resize_window DIR [DISTANCE]
+#   workspace ID; move_to_workspace ID; transfer_workspace SELECTOR
+# Moving a window to another workspace follows it and focuses that window.
+#   toggle_window_pin; toggle_window_maximize; toggle_window_fullscreen
+#   close_window; night_light on; night_light off; night_light toggle
+#   exit; exec SHELL_COMMAND
+# DIR = left/right/up/down; ID = positive integer, globally unique.
+# SELECTOR = identity:<as-reported> or connector:<output-name>.
+# DISTANCE = optional positive logical pixels, default 32.
+# Optional examples (uncomment ONLY those you want):
+# "Super+Q" = "close_window"
+# "Super+1" = "workspace 1"
+# "Super+Shift+1" = "move_to_workspace 1"
+# "Super+Alt+1" = "transfer_workspace connector:DP-1"
+# "Super+Shift+Left" = "move_window left"
+# "Super+Alt+Left" = "swap_window left"
+# "Super+Ctrl+Left" = "resize_window left 32"
+# "Super+P" = "toggle_window_pin"
+# "Super+M" = "toggle_window_maximize"
+# "Super+F" = "toggle_window_fullscreen"
+# "Super+N" = "night_light toggle"
+# "Super+Shift+E" = "exit"
+# System actions are EXTERNAL commands, e.g.:
+# "Super+Shift+R" = "exec systemctl reboot"
+# No dedicated power command, confirmation UI or automatic boot into Seaside.

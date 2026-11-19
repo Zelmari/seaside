@@ -1,0 +1,37 @@
+# Meson build trees and generated editor tooling
+/build/
+/build-*/
+/builddir/
+/compile_commands.json
+/.cache/
+
+# Test-run output; keep test sources and fixtures trackable
+/test-results/
+/test-artifacts/
+
+# Python test-runner caches and local environment
+__pycache__/
+*.py[cod]
+/.venv/
+
+# Arch makepkg output; src/ is deliberately kept for project source code
+/pkg/
+*.pkg.tar
+*.pkg.tar.*
+*.src.tar
+*.src.tar.*
+
+# Local editor backups and KDE folder metadata
+*~
+*.swp
+*.swo
+.directory
+
+# Windows download and Explorer metadata
+*:Zone.Identifier
+Thumbs.db
+Desktop.ini
+
+# Core dumps written into the repository root
+/core
+/core.[0-9]*
