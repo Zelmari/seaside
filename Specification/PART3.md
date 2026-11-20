@@ -144,12 +144,13 @@ the guest seat through wlroots, starts the DRM and libinput backends, uses the
 existing scene to render black, and moves a hardware cursor from real pointer
 events. It checks presentation and records the DRM connector and cursor plane.
 It uses a fixture-specific Wayland socket and leaves user service activation
-for the graphical session milestone. Run the following from the active guest
-console as the logged-in user:
+for the graphical session milestone. From the active guest console, refresh
+the existing Meson build directory before compiling the newly added target:
 
 ```sh
-meson compile -C build seaside-tty-fixture
-build/seaside-tty-fixture
+meson setup --reconfigure build &&
+  meson compile -C build seaside-tty-fixture &&
+  build/seaside-tty-fixture
 ```
 
 Move the pointer across the black screen for a few seconds. Wait for the
