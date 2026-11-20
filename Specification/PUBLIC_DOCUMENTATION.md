@@ -25,6 +25,10 @@ distinguish selected, implemented and
 verified behavior. WSL/headless results do not qualify physical AMD outputs
 or establish input-to-screen latency.
 
+[Part 2 is planned](PART2_PLAN.md), with configuration/state acceptance cases
+and harness improvements delivered alongside each step. Implementation has
+not started; the specification retains the requirements.
+
 ## Approved technology choices
 
 | Area | Selected approach | Specification |
