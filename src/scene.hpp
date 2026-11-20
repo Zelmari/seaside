@@ -23,6 +23,8 @@ class Scene final {
 
     std::expected<void, SceneError> add_output(wlr_output *output) noexcept;
     seaside_scene_snapshot snapshot() const noexcept;
+    bool watch_client(pid_t pid, seaside_scene_focus_fn focus, void *data) noexcept;
+    void clear_client_watch() noexcept;
 
   private:
     explicit Scene(seaside_scene_bridge *bridge) noexcept : bridge_(bridge) {}

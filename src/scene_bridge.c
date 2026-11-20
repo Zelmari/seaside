@@ -18,6 +18,10 @@ struct seaside_scene_bridge {
     struct wl_listener new_popup;
     struct wl_listener shell_destroy;
     struct seaside_scene_snapshot snapshot;
+    struct scene_view *focused_view;
+    pid_t watched_pid;
+    seaside_scene_focus_fn focus;
+    void *focus_data;
     bool attached;
 };
 
@@ -43,6 +47,33 @@ struct scene_output {
     struct wl_listener destroy;
 };
 
+static void end_focus(struct seaside_scene_bridge *scene, bool deactivate) {
+    struct scene_view *view = scene->focused_view;
+    if (!view) {
+        return;
+    }
+    scene->focused_view = NULL;
+    if (deactivate && view->toplevel->base->initialized) {
+        wlr_xdg_toplevel_set_activated(view->toplevel, false);
+    }
+    scene->focus(scene->focus_data, NULL);
+}
+
+static void consider_focus(struct scene_view *view) {
+    struct seaside_scene_bridge *scene = view->owner;
+    if (scene->watched_pid == 0 || scene->focused_view) {
+        return;
+    }
+    pid_t pid = 0;
+    wl_client_get_credentials(wl_resource_get_client(view->toplevel->resource), &pid, NULL, NULL);
+    if (pid != scene->watched_pid) {
+        return;
+    }
+    scene->focused_view = view;
+    wlr_xdg_toplevel_set_activated(view->toplevel, true);
+    scene->focus(scene->focus_data, view->toplevel->base->surface);
+}
+
 static void view_map(struct wl_listener *listener, void *data) {
     (void)data;
     struct scene_view *view = wl_container_of(listener, view, map);
@@ -52,6 +83,7 @@ static void view_map(struct wl_listener *listener, void *data) {
         view->owner->snapshot.map_events++;
     }
     wlr_scene_node_set_enabled(&view->tree->node, true);
+    consider_focus(view);
 }
 
 static void view_unmap(struct wl_listener *listener, void *data) {
@@ -63,6 +95,11 @@ static void view_unmap(struct wl_listener *listener, void *data) {
         view->owner->snapshot.unmap_events++;
     }
     wlr_scene_node_set_enabled(&view->tree->node, false);
+    if (view->owner->focused_view == view) {
+        // Unmap resets the XDG configure sequence. The next initial commit
+        // will establish inactive state before another map can take focus.
+        end_focus(view->owner, false);
+    }
 }
 
 static void view_commit(struct wl_listener *listener, void *data) {
@@ -73,6 +110,7 @@ static void view_commit(struct wl_listener *listener, void *data) {
          * later parts; advertised capabilities must match this minimal stage. */
         wlr_xdg_toplevel_set_wm_capabilities(view->toplevel, 0);
         wlr_xdg_toplevel_set_size(view->toplevel, 0, 0);
+        wlr_xdg_toplevel_set_activated(view->toplevel, false);
         view->owner->snapshot.initial_configures++;
     }
     if (wlr_surface_has_buffer(view->toplevel->base->surface)) {
@@ -99,6 +137,9 @@ static void view_request_fullscreen(struct wl_listener *listener, void *data) {
 }
 
 static void destroy_view(struct scene_view *view) {
+    if (view->owner->focused_view == view) {
+        end_focus(view->owner, false);
+    }
     if (view->mapped) {
         view->owner->snapshot.mapped_toplevels--;
     }
@@ -197,6 +238,10 @@ static void detach(struct seaside_scene_bridge *scene) {
     if (!scene->attached) {
         return;
     }
+    end_focus(scene, false);
+    scene->watched_pid = 0;
+    scene->focus = NULL;
+    scene->focus_data = NULL;
     wl_list_remove(&scene->new_toplevel.link);
     wl_list_remove(&scene->new_popup.link);
     wl_list_remove(&scene->shell_destroy.link);
@@ -285,4 +330,24 @@ bool seaside_scene_add_output(struct seaside_scene_bridge *scene, struct wlr_out
 
 struct seaside_scene_snapshot seaside_scene_get_snapshot(const struct seaside_scene_bridge *scene) {
     return scene ? scene->snapshot : (struct seaside_scene_snapshot){0};
+}
+
+bool seaside_scene_watch_client(struct seaside_scene_bridge *scene, pid_t pid,
+                                seaside_scene_focus_fn focus, void *data) {
+    if (!scene || !scene->attached || scene->watched_pid != 0 || pid <= 0 || !focus) {
+        return false;
+    }
+    scene->watched_pid = pid;
+    scene->focus = focus;
+    scene->focus_data = data;
+    return true;
+}
+
+void seaside_scene_clear_client_watch(struct seaside_scene_bridge *scene) {
+    if (scene) {
+        end_focus(scene, true);
+        scene->watched_pid = 0;
+        scene->focus = NULL;
+        scene->focus_data = NULL;
+    }
 }

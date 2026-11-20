@@ -37,4 +37,12 @@ seaside_scene_snapshot Scene::snapshot() const noexcept {
     return seaside_scene_get_snapshot(bridge_);
 }
 
+bool Scene::watch_client(pid_t pid, seaside_scene_focus_fn focus, void *data) noexcept {
+    return seaside_scene_watch_client(bridge_, pid, focus, data);
+}
+
+void Scene::clear_client_watch() noexcept {
+    seaside_scene_clear_client_watch(bridge_);
+}
+
 } // namespace seaside

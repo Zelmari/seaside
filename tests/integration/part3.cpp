@@ -76,6 +76,8 @@ struct Client {
     xdg_surface *xdg = nullptr;
     unsigned configures = 0;
     unsigned frames = 0;
+    unsigned activations = 0;
+    bool expect_focus = false;
     bool invalid_configure = false;
 };
 
@@ -112,8 +114,14 @@ const xdg_surface_listener surface_listener{.configure = surface_configure};
 void toplevel_configure(void *data, xdg_toplevel *, std::int32_t width, std::int32_t height,
                         wl_array *states) {
     auto &client = *static_cast<Client *>(data);
-    client.invalid_configure =
-        client.invalid_configure || width != 0 || height != 0 || states->size != 0;
+    const bool activated =
+        states->size == sizeof(std::uint32_t) &&
+        *static_cast<const std::uint32_t *>(states->data) == XDG_TOPLEVEL_STATE_ACTIVATED;
+    if (activated) {
+        ++client.activations;
+    }
+    client.invalid_configure = client.invalid_configure || width != 0 || height != 0 ||
+                               (states->size != 0 && !(client.expect_focus && activated));
     if (client.invalid_configure) {
         std::fprintf(stderr, "part3 client configure width=%d height=%d state-bytes=%zu\n", width,
                      height, states->size);
@@ -192,7 +200,7 @@ bool exercise_client(const char *socket, bool abrupt, bool hold, int completion_
     if (unsetenv("WAYLAND_SOCKET") < 0) {
         return false;
     }
-    Client client;
+    Client client{.expect_focus = !abrupt || hold};
     client.display = wl_display_connect(socket);
     if (!client.display) {
         return false;
@@ -236,12 +244,16 @@ bool exercise_client(const char *socket, bool abrupt, bool hold, int completion_
     }
     const unsigned rounds = abrupt ? 1 : 2;
     for (unsigned i = 0; passed && i < rounds; i++) {
+        const unsigned activations_before_map = client.activations;
         auto *frame = wl_surface_frame(surface);
         wl_callback_add_listener(frame, &frame_listener, &client);
         wl_surface_attach(surface, buffer, 0, 0);
         wl_surface_damage_buffer(surface, 0, 0, client_width, client_height);
         wl_surface_commit(surface);
-        passed = wait_for(client, [&] { return client.frames >= i + 1; });
+        passed = wait_for(client, [&] {
+            return client.frames >= i + 1 &&
+                   (!client.expect_focus || client.activations > activations_before_map);
+        });
         if (abrupt) {
             break;
         }
@@ -258,7 +270,8 @@ bool exercise_client(const char *socket, bool abrupt, bool hold, int completion_
             passed = passed && wait_for(client, [&] { return client.configures > prior; });
         }
     }
-    passed = passed && !client.invalid_configure;
+    passed =
+        passed && !client.invalid_configure && (client.activations != 0) == client.expect_focus;
     if (hold) {
         const unsigned char result = passed;
         ssize_t count;
@@ -322,6 +335,24 @@ struct RunState {
     wl_event_source *done = nullptr;
 };
 
+struct FocusObservation {
+    wlr_surface *surface = nullptr;
+    unsigned focused = 0;
+    unsigned cleared = 0;
+    bool valid = true;
+};
+
+void focus_changed(void *data, wlr_surface *surface) {
+    auto &observation = *static_cast<FocusObservation *>(data);
+    observation.valid &= (observation.surface == nullptr) != (surface == nullptr);
+    observation.surface = surface;
+    if (surface) {
+        ++observation.focused;
+    } else {
+        ++observation.cleared;
+    }
+}
+
 int deadline(void *data) {
     auto &state = *static_cast<RunState *>(data);
     state.expired = true;
@@ -347,6 +378,7 @@ int child_done(int fd, std::uint32_t, void *data) {
 
 bool run_round(bool abrupt, int stop_signal, bool hold = false) {
     RuntimeDirectory directory;
+    FocusObservation focus;
     const std::filesystem::path runtime(directory.path());
     auto created = seaside::Server::create();
     if (!created) {
@@ -414,6 +446,11 @@ bool run_round(bool abrupt, int stop_signal, bool hold = false) {
         _exit(2);
     }
     close(pipe[1]);
+    // Register before dispatch can accept the child connection. The abrupt
+    // round deliberately uses the wrong PID for a client with the same UID.
+    const bool expect_focus = !abrupt || hold;
+    const bool watched =
+        child > 0 && scene->watch_client(expect_focus ? child : getpid(), focus_changed, &focus);
     // Mask installation precedes every helper thread. Keeping one alive while
     // the process receives SIGTERM/SIGINT exercises the signalfd delivery
     // contract that a single-threaded shutdown test cannot establish.
@@ -437,8 +474,7 @@ bool run_round(bool abrupt, int stop_signal, bool hold = false) {
     RunState state{.server = server.get(), .signal = stop_signal};
     state.done = wl_event_loop_add_fd(loop, pipe[0], WL_EVENT_READABLE, child_done, &state);
     auto *timer = wl_event_loop_add_timer(loop, deadline, &state);
-    bool passed =
-        child > 0 && state.done && timer && wl_event_source_timer_update(timer, 15000) >= 0;
+    bool passed = watched && state.done && timer && wl_event_source_timer_update(timer, 15000) >= 0;
     if (passed) {
         passed = server->run().has_value() && state.client_passed && !state.expired;
     }
@@ -453,9 +489,10 @@ bool run_round(bool abrupt, int stop_signal, bool hold = false) {
     }
     close(pipe[0]);
     if (hold) {
-        passed = passed && scene->snapshot().mapped_toplevels == 1;
+        passed = passed && scene->snapshot().mapped_toplevels == 1 && focus.surface;
         server->finish();
     }
+    scene->clear_client_watch();
     if (child > 0) {
         if (!passed) {
             kill(child, SIGKILL);
@@ -477,6 +514,9 @@ bool run_round(bool abrupt, int stop_signal, bool hold = false) {
     const auto snapshot = scene->snapshot();
     const auto pixels = part3_output_get_snapshot(output.get());
     const unsigned expected = abrupt ? 1 : 2;
+    const unsigned expected_focus_events = expect_focus ? expected : 0;
+    passed = passed && focus.valid && focus.surface == nullptr &&
+             focus.focused == expected_focus_events && focus.cleared == expected_focus_events;
     passed = passed && snapshot.live_toplevels == 0 && snapshot.mapped_toplevels == 0 &&
              snapshot.map_events == expected && snapshot.unmap_events == expected &&
              snapshot.destroyed_toplevels == 1 && snapshot.buffer_commits == expected &&
@@ -486,13 +526,15 @@ bool run_round(bool abrupt, int stop_signal, bool hold = false) {
     if (!passed) {
         std::fprintf(stderr,
                      "part3 fixture failed: abrupt=%d child=%d expired=%d live=%zu maps=%llu "
-                     "unmaps=%llu configures=%llu commits=%llu black=%u client=%u invalid=%u\n",
+                     "unmaps=%llu configures=%llu commits=%llu black=%u client=%u invalid=%u "
+                     "focus=%u clear=%u focus-valid=%d\n",
                      abrupt, state.client_passed, state.expired, snapshot.live_toplevels,
                      static_cast<unsigned long long>(snapshot.map_events),
                      static_cast<unsigned long long>(snapshot.unmap_events),
                      static_cast<unsigned long long>(snapshot.initial_configures),
                      static_cast<unsigned long long>(snapshot.buffer_commits), pixels.black_frames,
-                     pixels.client_frames, pixels.invalid_frames);
+                     pixels.client_frames, pixels.invalid_frames, focus.focused, focus.cleared,
+                     focus.valid);
     }
     output.reset();
     passed = passed && scene->snapshot().outputs == 0;
