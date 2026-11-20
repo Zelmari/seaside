@@ -267,6 +267,13 @@ retry returned `session core systemd=PASS(0) pipewire=PASS(0)`. This confirms
 both services answered on retry. The first attempt did not establish why the
 systemd name was missing.
 
+The systemd probe allows up to one second for the manager's name to appear
+on the login bus within its existing deadline. The private D-Bus tests check
+delayed registration, permanent absence, cancellation and deadline expiry
+during the retry. All eight Part 3 entries passed after the change in the
+normal and ASan/UBSan builds. A fresh VM login remains the check for this path
+with Arch's normal bus.
+
 The regression harness passed 15 entries and all 148 GoogleTest cases, with
 the DRM discovery probe skipped in WSL. The report is
 `test-results/20261120T181715Z-554be2dd/summary.txt`. All eight Part 3 entries

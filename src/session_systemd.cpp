@@ -2,12 +2,14 @@
 
 #include "session_bus.hpp"
 
+#include <algorithm>
 #include <cerrno>
 #include <cstdint>
 #include <optional>
 #include <string_view>
 #include <systemd/sd-bus.h>
 #include <utility>
+#include <wayland-server-core.h>
 
 namespace seaside {
 namespace {
@@ -19,6 +21,8 @@ constexpr char bus_name[] = "org.freedesktop.DBus";
 constexpr char bus_path[] = "/org/freedesktop/DBus";
 constexpr ServiceReport malformed{ServiceFailure::incompatible, -EBADMSG};
 constexpr ServiceReport expired{ServiceFailure::timeout, -ETIMEDOUT};
+constexpr auto registration_grace = std::chrono::seconds(1);
+constexpr auto registration_interval = std::chrono::milliseconds(100);
 
 ServiceReport transport_failure(BusError error) noexcept {
     switch (error) {
@@ -115,7 +119,10 @@ struct SystemdUserProbe::Impl final : std::enable_shared_from_this<Impl> {
     const uid_t expected_uid;
     Completion completion;
     const Clock::time_point deadline;
+    Clock::time_point registration_deadline = Clock::time_point::max();
     std::optional<SessionBus::CallId> pending;
+    wl_event_source *registration_timer = nullptr;
+    ServiceReport last_missing{};
 
     ServiceReport request(const char *reply_owner = nullptr) noexcept {
         sd_bus *connection = bus.native_handle();
@@ -173,19 +180,84 @@ struct SystemdUserProbe::Impl final : std::enable_shared_from_this<Impl> {
     }
 
     void finish(ServiceReport report) {
+        remove_registration_timer();
         if (auto callback = std::exchange(completion, {})) {
             callback(report);
         }
     }
 
+    void remove_registration_timer() noexcept {
+        if (auto *timer = std::exchange(registration_timer, nullptr)) {
+            wl_event_source_remove(timer);
+        }
+    }
+
+    ServiceReport retry_missing_name(ServiceReport report, Clock::time_point now) noexcept {
+        registration_deadline =
+            std::min({registration_deadline, deadline, now + registration_grace});
+        if (now + registration_interval >= registration_deadline) {
+            return report;
+        }
+        if (!registration_timer) {
+            registration_timer =
+                wl_event_loop_add_timer(bus.event_loop(), on_registration_timer, this);
+            if (!registration_timer) {
+                return {ServiceFailure::internal_error, -errno};
+            }
+        }
+        last_missing = report;
+        if (wl_event_source_timer_update(registration_timer, registration_interval.count()) < 0) {
+            return {ServiceFailure::internal_error, -errno};
+        }
+        return {};
+    }
+
+    static int on_registration_timer(void *data) noexcept {
+        const auto self = static_cast<Impl *>(data)->weak_from_this().lock();
+        if (!self) {
+            return 0;
+        }
+        // Completion can destroy the probe and dispatch the loop again.
+        // Keep this timer out of the loop's destroy list until callbacks return.
+        std::unique_ptr<wl_event_source, decltype(&wl_event_source_remove)> timer(
+            std::exchange(self->registration_timer, nullptr), wl_event_source_remove);
+        const auto now = Clock::now();
+        auto result = self->last_missing;
+        if (now >= self->deadline) {
+            result = expired;
+        } else if (now < self->registration_deadline) {
+            result = self->request();
+        }
+        try {
+            if (result.failure == ServiceFailure::none) {
+                self->registration_timer = timer.release();
+            } else {
+                self->finish(result);
+            }
+        } catch (...) {
+            // A completion callback must not throw across the Wayland C interface.
+        }
+        return 0;
+    }
+
     void receive(const BusReply &reply, bool checking_owner) {
         pending.reset();
-        if (Clock::now() >= deadline) {
+        const auto now = Clock::now();
+        if (now >= deadline) {
             finish(expired);
             return;
         }
         if (reply.error != BusError::none) {
-            finish(reply_failure(reply, checking_owner));
+            auto result = reply_failure(reply, checking_owner);
+            const auto *sender = reply.message ? sd_bus_message_get_sender(reply.message) : nullptr;
+            if (result.failure == ServiceFailure::missing && sender &&
+                std::string_view(sender) == bus_name) {
+                // Ownership can lag behind socket activation of the login bus.
+                result = retry_missing_name(result, now);
+            }
+            if (result.failure != ServiceFailure::none) {
+                finish(result);
+            }
             return;
         }
         if (!reply.message) {
@@ -213,6 +285,7 @@ struct SystemdUserProbe::Impl final : std::enable_shared_from_this<Impl> {
     }
 
     void abandon() noexcept {
+        remove_registration_timer();
         auto id = std::exchange(pending, std::nullopt);
         completion = {};
         if (id) {

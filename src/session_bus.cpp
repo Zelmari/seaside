@@ -396,6 +396,10 @@ sd_bus *SessionBus::native_handle() const noexcept {
                                                                                      : nullptr;
 }
 
+wl_event_loop *SessionBus::event_loop() const noexcept {
+    return impl_->owns_thread() ? impl_->loop : nullptr;
+}
+
 bool SessionBus::ready() const noexcept {
     return native_handle() && sd_bus_is_ready(impl_->bus) > 0;
 }

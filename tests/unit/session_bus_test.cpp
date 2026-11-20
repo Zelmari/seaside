@@ -265,18 +265,22 @@ class SystemdUserProbeTest : public SessionBusTest {
     unsigned version_requests = 0;
     bool manager_named = false;
 
-    bool start_manager() {
+    bool prepare_manager() {
         if (!start_service()) {
             return false;
         }
-        auto *handle = service->native_handle();
-        if (sd_bus_add_filter(handle, nullptr, get_version, this) < 0 ||
-            sd_bus_request_name_async(handle, nullptr, "org.freedesktop.systemd1", 0, name_acquired,
-                                      this) < 0) {
+        return sd_bus_add_filter(service->native_handle(), nullptr, get_version, this) >= 0;
+    }
+
+    bool register_manager() {
+        if (sd_bus_request_name_async(service->native_handle(), nullptr, "org.freedesktop.systemd1",
+                                      0, name_acquired, this) < 0) {
             return false;
         }
         return pump_until([&] { return manager_named; });
     }
+
+    bool start_manager() { return prepare_manager() && register_manager(); }
 
     static int name_acquired(sd_bus_message *message, void *data, sd_bus_error *) noexcept {
         std::uint32_t result = 0;
@@ -358,6 +362,67 @@ TEST_F(SystemdUserProbeTest, ReportsAMissingManager) {
     ASSERT_TRUE(probe);
     ASSERT_TRUE(pump_until([&] { return outcome.has_value(); }));
     EXPECT_EQ(outcome->failure, ServiceFailure::missing);
+    EXPECT_LT(outcome->native_error, 0);
+}
+
+TEST_F(SystemdUserProbeTest, RetriesWhenTheManagerRegistersAfterTheFirstRequest) {
+    ASSERT_TRUE(connect());
+    ASSERT_TRUE(prepare_manager());
+    std::optional<ServiceReport> outcome;
+    auto probe =
+        SystemdUserProbe::start(*bus, geteuid(), [&](ServiceReport result) { outcome = result; });
+    ASSERT_TRUE(probe);
+    ASSERT_EQ(bus->pending(), 1U);
+    // Drain the first reply while the well-known name is still unowned.
+    ASSERT_TRUE(pump_until([&] { return bus->pending() == 0; }));
+    ASSERT_FALSE(outcome);
+    ASSERT_TRUE(register_manager());
+    ASSERT_TRUE(pump_until([&] { return outcome.has_value(); }));
+    EXPECT_EQ(outcome->failure, ServiceFailure::none);
+    EXPECT_EQ(version_requests, 1U);
+}
+
+TEST_F(SystemdUserProbeTest, DestructionCancelsTheArmedRegistrationRetry) {
+    ASSERT_TRUE(connect());
+    ASSERT_TRUE(prepare_manager());
+    unsigned completions = 0;
+    auto probe = SystemdUserProbe::start(*bus, geteuid(), [&](ServiceReport) { ++completions; });
+    ASSERT_TRUE(probe);
+    ASSERT_EQ(bus->pending(), 1U);
+    ASSERT_TRUE(pump_until([&] { return bus->pending() == 0; }));
+    ASSERT_EQ(completions, 0U);
+    probe->reset();
+    ASSERT_TRUE(register_manager());
+    const auto observation_end = std::chrono::steady_clock::now() + 200ms;
+    ASSERT_TRUE(pump_until([&] { return std::chrono::steady_clock::now() >= observation_end; }));
+    EXPECT_EQ(completions, 0U);
+    EXPECT_EQ(version_requests, 0U);
+    EXPECT_EQ(bus->pending(), 0U);
+}
+
+TEST_F(SystemdUserProbeTest, OverdueRegistrationRetryTimesOutAndCanDestroyTheProbe) {
+    ASSERT_TRUE(connect());
+    std::optional<ServiceReport> outcome;
+    std::unique_ptr<SystemdUserProbe> probe;
+    auto started = SystemdUserProbe::start(
+        *bus, geteuid(),
+        [&](ServiceReport result) {
+            probe.reset();
+            EXPECT_EQ(wl_event_loop_dispatch(loop, 0), 0);
+            outcome = result;
+        },
+        300ms);
+    ASSERT_TRUE(started);
+    probe = std::move(*started);
+    ASSERT_EQ(bus->pending(), 1U);
+    ASSERT_TRUE(pump_until([&] { return bus->pending() == 0; }));
+    ASSERT_FALSE(outcome);
+    // Stall dispatch so the armed retry is first delivered after the deadline.
+    std::this_thread::sleep_for(300ms);
+    ASSERT_TRUE(pump_until([&] { return outcome.has_value(); }));
+    EXPECT_EQ(outcome->failure, ServiceFailure::timeout);
+    EXPECT_FALSE(probe);
+    EXPECT_EQ(bus->pending(), 0U);
 }
 
 TEST_F(SystemdUserProbeTest, RejectsAnIncompatibleVersionAndDistinguishesAccessDenial) {

@@ -62,6 +62,8 @@ class SessionBus final {
     // Construction initiates authentication without waiting for the daemon.
     // This borrowed handle supports typed message creation, not synchronous I/O.
     sd_bus *native_handle() const noexcept;
+    // The borrowed event loop is available on its owning thread.
+    wl_event_loop *event_loop() const noexcept;
     bool ready() const noexcept;
     BusError last_error() const noexcept;
     std::size_t pending() const noexcept;
