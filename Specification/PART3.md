@@ -258,7 +258,14 @@ activation. Record the final `session core` line. Both services must report
 Arch WSL2 returned `systemd=PASS(0)` using the login bus and `pipewire=PASS(0)`
 using a private native PipeWire server. A missing socket, a silent server and
 a daemon-mode override produced distinct failures in both the normal and
-ASan/UBSan builds. The VM run covers the guest's regular PipeWire endpoint.
+ASan/UBSan builds.
+
+The Arch VirtualBox guest at `cc40d8b` first reported
+`systemd=missing(-6) pipewire=PASS(0)`. The next command,
+`systemctl --user show -p Version`, returned `262.2-1-arch`, and the immediate
+retry returned `session core systemd=PASS(0) pipewire=PASS(0)`. This confirms
+both services answered on retry. The first attempt did not establish why the
+systemd name was missing.
 
 The regression harness passed 15 entries and all 148 GoogleTest cases, with
 the DRM discovery probe skipped in WSL. The report is
