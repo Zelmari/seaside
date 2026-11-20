@@ -14,6 +14,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest.mock import patch
@@ -303,9 +304,189 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(report["commands"][0]["returncode"], 4)
         self.assertTrue(Path(report["baseline"]).is_file())
         self.assertEqual(report["tests"][0]["status"], "blocked")
+        self.assertEqual(report["tests"][0]["part"], 0)
+        self.assertEqual(report["parts"], [])
         self.assertFalse(Path(runtime_path.read_text()).exists())
         self.assertEqual(os.environ.get("XDG_RUNTIME_DIR"), original_runtime)
         self.assertEqual(os.environ.get("HOME"), original_home)
+
+    def test_preexisting_worker_thread_child_blocks_without_being_touched(self):
+        ready = threading.Event()
+        release = threading.Event()
+        children = []
+
+        def own_child():
+            process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"])
+            children.append(process)
+            ready.set()
+            release.wait(timeout=5)
+            process.wait(timeout=3)
+
+        worker = threading.Thread(target=own_child)
+        worker.start()
+        try:
+            self.assertTrue(ready.wait(timeout=3))
+            result = self.command("raise AssertionError('must not execute')")
+            self.assertEqual(result["status"], "blocked")
+            self.assertIn("pre-existing children", result["error"])
+            self.assertIsNone(children[0].poll())
+        finally:
+            if children:
+                children[0].terminate()
+            release.set()
+            worker.join(timeout=4)
+            self.assertFalse(worker.is_alive())
+
+    def test_thread_spawned_new_session_descendant_receives_graceful_cleanup(self):
+        leaf = (
+            "import pathlib,signal,sys,time; "
+            "signal.signal(signal.SIGTERM,lambda *_:(pathlib.Path('term-observed').write_text('yes'),sys.exit(0))); "
+            "pathlib.Path('leaf-ready').write_text('yes'); time.sleep(300)"
+        )
+        parent = (
+            "import pathlib,signal,subprocess,sys,threading,time\n"
+            "signal.signal(signal.SIGTERM,signal.SIG_IGN)\n"
+            "def child():\n"
+            f"    p=subprocess.Popen([sys.executable,'-c',{leaf!r}],start_new_session=True)\n"
+            "    pathlib.Path('pids').write_text(str(p.pid))\n"
+            "    p.wait()\n"
+            "threading.Thread(target=child).start()\n"
+            "time.sleep(300)\n"
+        )
+        wrapper = (
+            "import importlib.machinery,importlib.util,json,pathlib,sys; "
+            f"loader=importlib.machinery.SourceFileLoader('runner',{str(ROOT / 'tools/run-tests')!r}); "
+            "spec=importlib.util.spec_from_loader(loader.name,loader); "
+            "runner=importlib.util.module_from_spec(spec); loader.exec_module(runner); "
+            f"result=runner.run_command([sys.executable,'-c',{parent!r}],cwd=pathlib.Path.cwd(),"
+            "log_path=pathlib.Path('threaded.log'),timeout=30,terminate_grace=.25); "
+            "pathlib.Path('result.json').write_text(json.dumps(result))"
+        )
+        process = subprocess.Popen([sys.executable, "-c", wrapper], cwd=self.root, start_new_session=True)
+        try:
+            wait_for_file(self.root / "leaf-ready", process)
+            process.send_signal(signal.SIGINT)
+            self.assertEqual(process.wait(timeout=5), 0)
+            result = json.loads((self.root / "result.json").read_text())
+            self.assertEqual(result["status"], "blocked")
+            self.assertIsNone(result["cleanup_error"])
+            self.assertEqual((self.root / "term-observed").read_text(), "yes")
+            self.assert_processes_gone([int((self.root / "pids").read_text())])
+        finally:
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait(timeout=2)
+
+    def test_late_adopted_zombie_is_refreshed_and_reaped_before_next_command(self):
+        tree = runner.OwnedProcessTree()
+        child = None
+        process = None
+        descriptor = None
+        closed = False
+        leaf = "import pathlib,time\nwhile not pathlib.Path('release').exists():\n    time.sleep(.01)\n"
+        source = ("import pathlib,subprocess,sys; "
+                  f"p=subprocess.Popen([sys.executable,'-c',{leaf!r}],start_new_session=True); "
+                  "pathlib.Path('adopted-pid').write_text(str(p.pid))")
+        try:
+            process = subprocess.Popen([sys.executable, "-c", source], cwd=self.root)
+            tree.root = process.pid
+            wait_for_file(self.root / "adopted-pid", process)
+            child = int((self.root / "adopted-pid").read_text())
+            descriptor = os.pidfd_open(child)
+            process.wait(timeout=3)
+            (self.root / "release").touch()
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                identity = runner.process_identity(child)
+                if identity is not None and identity[1] == "Z":
+                    break
+                time.sleep(.01)
+            self.assertEqual(runner.process_identity(child)[1], "Z")
+            # No refresh has run since the child was spawned/adopted. close()
+            # itself must discover and reap this zombie before restoring state.
+            tree.close()
+            closed = True
+            self.assertNotIn(child, runner.child_pids(os.getpid()))
+            result = self.command("pass")
+            self.assertEqual(result["status"], "pass")
+        finally:
+            (self.root / "release").touch()
+            if descriptor is not None:
+                try:
+                    signal.pidfd_send_signal(descriptor, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                os.close(descriptor)
+            if process is not None:
+                process.wait(timeout=3)
+            if not closed:
+                tree.close()
+            if child is not None:
+                try:
+                    os.waitpid(child, 0)
+                except ChildProcessError:
+                    pass
+
+    def test_cleanup_uses_pinned_processes_without_numeric_process_group_signals(self):
+        with patch.object(runner.os, "killpg", side_effect=AssertionError("unsafe numeric PGID")), \
+             patch.object(runner.os, "kill", side_effect=AssertionError("unsafe numeric PID")):
+            result = self.command("pass")
+        self.assertEqual(result["status"], "pass")
+        self.assertIsNone(result["cleanup_error"])
+
+    def test_signal_error_does_not_abandon_other_descendant_cleanup(self):
+        actual_signal = signal.pidfd_send_signal
+        failed = False
+
+        def once(descriptor, signum):
+            nonlocal failed
+            if not failed and signum == signal.SIGTERM:
+                failed = True
+                raise PermissionError("deliberate pinned-signal error")
+            return actual_signal(descriptor, signum)
+
+        with patch.object(runner.signal, "pidfd_send_signal", side_effect=once):
+            result = self.command(self.tree_source(), timeout=.75)
+        self.assertEqual(result["status"], "fail")
+        self.assertIn("deliberate pinned-signal error", result["cleanup_error"])
+        pids = [int(value) for value in (self.root / "pids").read_text().split()]
+        self.assert_processes_gone(pids)
+
+    def test_completed_descendants_do_not_accumulate_pinned_descriptors(self):
+        tree = runner.OwnedProcessTree()
+        process = None
+        source = (
+            "import pathlib,subprocess,sys,time\n"
+            "for index in range(4):\n"
+            "    p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(300)'])\n"
+            "    pathlib.Path(f'ready-{index}').write_text(str(p.pid))\n"
+            "    while not pathlib.Path(f'go-{index}').exists():\n"
+            "        time.sleep(.01)\n"
+            "    p.wait()\n"
+            "    pathlib.Path(f'done-{index}').write_text('yes')\n"
+        )
+        try:
+            process = subprocess.Popen([sys.executable, "-c", source], cwd=self.root)
+            tree.root = process.pid
+            for index in range(4):
+                ready = self.root / f"ready-{index}"
+                wait_for_file(ready, process)
+                pid = int(ready.read_text())
+                tree.refresh()
+                self.assertIn(pid, tree.pidfds)
+                signal.pidfd_send_signal(tree.pidfds[pid], signal.SIGKILL)
+                (self.root / f"go-{index}").touch()
+                wait_for_file(self.root / f"done-{index}", process)
+                tree.refresh()
+                self.assertNotIn(pid, tree.pidfds)
+                # The parent may already have launched the next gated child.
+                self.assertLessEqual(len(tree.pidfds), 2)
+            process.wait(timeout=3)
+        finally:
+            tree.signal(signal.SIGKILL)
+            if process is not None:
+                process.wait(timeout=3)
+            tree.close()
 
 
 class ResultEvidenceTests(unittest.TestCase):
@@ -387,6 +568,9 @@ class ResultEvidenceTests(unittest.TestCase):
 
     def test_declared_filters_shards_and_output_cannot_shrink_owned_discovery(self):
         for key, value in (("GTEST_FILTER", "OnlyOne.*"), ("GTEST_TOTAL_SHARDS", "2"),
+                           ("TESTBRIDGE_TEST_ONLY", "OnlyOne.*"), ("TEST_TOTAL_SHARDS", "2"),
+                           ("TEST_SHARD_INDEX", "1"), ("TEST_SHARD_STATUS_FILE", "/tmp/shard-status"),
+                           ("XML_OUTPUT_FILE", "/tmp/result.xml"), ("TEST_PREMATURE_EXIT_FILE", "/tmp/exit-status"),
                            ("GTEST_OUTPUT", "xml:/elsewhere")):
             row = self.declaration()
             row["env"][key] = value
@@ -594,7 +778,7 @@ class ResultEvidenceTests(unittest.TestCase):
         gtest.write_text(
             f"#!{sys.executable}\nimport os,pathlib,sys\n"
             "assert sys.argv[1:] == ['--gtest_list_tests']\n"
-            "assert not any(key.startswith('GTEST_') and key != 'GTEST_OUTPUT' for key in os.environ)\n"
+            "assert not any((key.startswith('GTEST_') and key != 'GTEST_OUTPUT') or key in ('TESTBRIDGE_TEST_ONLY','TEST_TOTAL_SHARDS','TEST_SHARD_INDEX','TEST_SHARD_STATUS_FILE','XML_OUTPUT_FILE','TEST_PREMATURE_EXIT_FILE') for key in os.environ)\n"
             f"pathlib.Path(os.environ['GTEST_OUTPUT'][4:]).write_text({xml!r})\n"
         )
         gtest.chmod(0o700)
@@ -604,7 +788,7 @@ class ResultEvidenceTests(unittest.TestCase):
             "    build=pathlib.Path(sys.argv[2]); (build/'meson-info').mkdir(parents=True)\n"
             f"    (build/'meson-info/intro-tests.json').write_text({json.dumps([declaration])!r})\n"
             "elif sys.argv[1] == 'test':\n"
-            "    assert not any(key.startswith('GTEST_') and key != 'GTEST_OUTPUT' for key in os.environ)\n"
+            "    assert not any((key.startswith('GTEST_') and key != 'GTEST_OUTPUT') or key in ('TESTBRIDGE_TEST_ONLY','TEST_TOTAL_SHARDS','TEST_SHARD_INDEX','TEST_SHARD_STATUS_FILE','XML_OUTPUT_FILE','TEST_PREMATURE_EXIT_FILE') for key in os.environ)\n"
             "    output=os.environ['GTEST_OUTPUT']; assert output.startswith('xml:')\n"
             "    directory=pathlib.Path(output[4:]); assert directory.is_dir()\n"
             f"    (directory/'config-tests.xml').write_text({xml!r})\n"
@@ -618,7 +802,11 @@ class ResultEvidenceTests(unittest.TestCase):
             "import pathlib,sys\npathlib.Path(sys.argv[sys.argv.index('--output')+1]).write_text('{}')\n"
         )
         with patch.dict(os.environ, {"PATH": str(binary_dir) + os.pathsep + os.environ.get("PATH", ""),
-                                     "GTEST_FILTER": "NoSuchCases.*", "GTEST_TOTAL_SHARDS": "4"}), redirect_stdout(io.StringIO()):
+                                     "GTEST_FILTER": "NoSuchCases.*", "GTEST_TOTAL_SHARDS": "4",
+                                     "TESTBRIDGE_TEST_ONLY": "NoSuchCases.*", "TEST_TOTAL_SHARDS": "4",
+                                     "TEST_SHARD_INDEX": "2", "TEST_SHARD_STATUS_FILE": str(self.root / "outside-shard-status"),
+                                     "XML_OUTPUT_FILE": str(self.root / "outside.xml"),
+                                     "TEST_PREMATURE_EXIT_FILE": str(self.root / "outside-premature")}), redirect_stdout(io.StringIO()):
             self.assertEqual(runner.main(["--suite", "unit"], repository_root=self.root), 0)
         path = next((self.root / "test-results").glob("*/summary.json"))
         report = json.loads(path.read_text())
@@ -629,6 +817,35 @@ class ResultEvidenceTests(unittest.TestCase):
         self.assertTrue(any("config-tests.xml" in row["path"] for row in report["artifacts"]))
         self.assertTrue(any(row["id"].startswith("discover-gtest-") for row in report["commands"]))
         self.assertTrue(any("gtest-discovery" in row["path"] for row in report["artifacts"]))
+
+    def test_nonfatal_failure_followed_by_skip_retains_failure_diagnostics(self):
+        mixed = self.case(contents='<failure message="failed assertion"/><skipped message="later skip"/>')
+        xml = self.xml([mixed], failures=1).replace('<testsuite name="ConfigTest">',
+            '<testsuite name="ConfigTest" tests="1" failures="1" skipped="0">')
+        report = self.report(self.parse(xml))
+        self.assertEqual(report["status"], "fail")
+        self.assertEqual(report["case_counts"]["fail"], 1)
+        self.assertIn("failed assertion", report["tests"][0]["cases"][0]["reason"])
+
+    def test_global_interruption_does_not_invent_part_one_or_leave_part_two_passed(self):
+        rows = self.parse(self.xml([self.case()]))
+        rows.append(runner.collection_failure("test-run-interruption", "Run interrupted"))
+        report = self.report(rows)
+        self.assertEqual(report["parts"], [2])
+        self.assertEqual(report["part_results"]["2"]["software_status"], "blocked")
+        self.assertEqual(report["status"], "blocked")
+
+    def test_exit_77_on_non_test_command_or_with_passing_rows_cannot_pass(self):
+        passed = self.parse(self.xml([self.case()]))
+        for name in ("baseline", "configure", "compile", "gtest-discovery-000", "test"):
+            with self.subTest(command=name):
+                command = {"id": name, "status": "skip", "returncode": 77,
+                           "command": ["tool"], "log": "test.log"}
+                self.assertEqual(self.report(passed, [command])["status"], "fail")
+        skipped = [{"test_id": "hardware", "part": 2, "status": "skip", "reason": "unavailable"}]
+        command = {"id": "test", "status": "skip", "returncode": 77,
+                   "command": ["meson", "test"], "log": "test.log"}
+        self.assertEqual(self.report(skipped, [command])["status"], "blocked")
 
 
 class CodeCheckDiscoveryTests(unittest.TestCase):
@@ -642,6 +859,8 @@ class CodeCheckDiscoveryTests(unittest.TestCase):
         loader.exec_module(self.check)
         self.build = self.root / "build"
         self.build.mkdir()
+        (self.root / "src").mkdir()
+        (self.root / "src/main.cpp").write_text("int main() { return 0; }\n")
 
     def test_missing_empty_malformed_or_inapplicable_database_never_runs_tools(self):
         samples = [None, "[]", "{}", "[", '[{"file":"test.cpp"}]', json.dumps([
@@ -655,6 +874,17 @@ class CodeCheckDiscoveryTests(unittest.TestCase):
                 with patch.object(self.check, "ROOT", self.root), patch.object(sys, "argv", ["check-code", "--build-dir", str(self.build)]), patch.object(self.check.subprocess, "run") as run, redirect_stdout(io.StringIO()):
                     self.assertEqual(self.check.main(), 1)
                     run.assert_not_called()
+
+    def test_empty_format_targets_cannot_pass_with_an_applicable_compilation_database(self):
+        (self.root / "src/main.cpp").unlink()
+        source = self.root / "legacy/probe.c"
+        source.parent.mkdir()
+        source.write_text("int main(void) { return 0; }\n")
+        (self.build / "compile_commands.json").write_text(json.dumps([
+            {"directory": str(self.root), "file": str(source), "command": "cc probe.c"}]))
+        with patch.object(self.check, "ROOT", self.root), patch.object(sys, "argv", ["check-code", "--build-dir", str(self.build)]), patch.object(self.check.subprocess, "run") as run, redirect_stdout(io.StringIO()):
+            self.assertEqual(self.check.main(), 1)
+            run.assert_not_called()
 
 
 class HeadlessFixtureTests(unittest.TestCase):

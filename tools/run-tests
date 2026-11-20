@@ -26,6 +26,16 @@ import uuid
 import xml.etree.ElementTree as ET
 
 
+FORBIDDEN_GTEST_ENV = frozenset({
+    "TESTBRIDGE_TEST_ONLY", "TEST_TOTAL_SHARDS", "TEST_SHARD_INDEX",
+    "TEST_SHARD_STATUS_FILE", "XML_OUTPUT_FILE", "TEST_PREMATURE_EXIT_FILE",
+})
+
+
+def gtest_environment_override(key: str) -> bool:
+    return key.startswith("GTEST_") or key in FORBIDDEN_GTEST_ENV
+
+
 class InterruptedRun(BaseException):
     def __init__(self, signum: int):
         self.signum = signum
@@ -39,11 +49,29 @@ def process_identity(pid: int) -> tuple[int, str] | None:
         return None
 
 
-def child_pids(pid: int) -> list[int]:
+def process_parent(pid: int) -> int | None:
     try:
-        return [int(value) for value in Path(f"/proc/{pid}/task/{pid}/children").read_text().split()]
+        fields = Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1].split()
+        return int(fields[1])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def child_pids(pid: int) -> list[int]:
+    # Linux attributes children to the thread that forked, not necessarily the
+    # thread-group leader. Worker-thread compilers/tests must remain supervised.
+    children = set()
+    try:
+        threads = list(Path(f"/proc/{pid}/task").iterdir())
     except OSError:
         return []
+    for thread in threads:
+        try:
+            children.update(int(value) for value in (thread / "children").read_text().split())
+        except (OSError, ValueError):
+            # Threads can disappear between directory enumeration and reading.
+            continue
+    return sorted(children)
 
 
 class OwnedProcessTree:
@@ -53,11 +81,15 @@ class OwnedProcessTree:
         existing = child_pids(os.getpid())
         if existing:
             raise OSError("Exclusive command supervision requires no pre-existing children")
+        if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
+            raise OSError("PID-safe command supervision requires Linux pidfd support")
         self.libc = ctypes.CDLL(None, use_errno=True)
         self.previous = ctypes.c_int()
         if self.libc.prctl(37, ctypes.byref(self.previous), 0, 0, 0) != 0:
             raise OSError(ctypes.get_errno(), "Cannot inspect child-subreaper state")
         self.owned = {}
+        self.pidfds = {}
+        self.errors = []
         self.root = None
         # A process-local subreaper keeps an orphan in our ancestry even when
         # a short-lived test leader exits between observations or starts a session.
@@ -65,13 +97,26 @@ class OwnedProcessTree:
             raise OSError(ctypes.get_errno(), "Cannot enable child-subreaper cleanup")
 
     def refresh(self) -> None:
-        pending = list(self.owned)
+        # Long builds can create thousands of short-lived descendants. Retain
+        # pidfds only while their original process can still receive signals.
+        for pid, started in list(self.owned.items()):
+            identity = process_identity(pid)
+            retired = identity is None or identity[0] != started
+            if retired or identity[1] == "Z":
+                descriptor = self.pidfds.pop(pid, None)
+                if descriptor is not None:
+                    os.close(descriptor)
+            if retired:
+                del self.owned[pid]
+                if self.root == pid:
+                    self.root = None
+        pending = [(pid, None) for pid in self.owned]
         if self.root is not None:
-            pending.append(self.root)
-        pending.extend(child_pids(os.getpid()))
+            pending.append((self.root, os.getpid()))
+        pending.extend((pid, os.getpid()) for pid in child_pids(os.getpid()))
         visited = set()
         while pending:
-            pid = pending.pop()
+            pid, expected_parent = pending.pop()
             if pid in visited:
                 continue
             visited.add(pid)
@@ -81,18 +126,52 @@ class OwnedProcessTree:
             prior = self.owned.get(pid)
             if prior is not None and identity[0] != prior:
                 continue
+            if prior is None and not self.parent_matches(pid, expected_parent):
+                continue
             self.owned[pid] = identity[0]
-            pending.extend(child_pids(pid))
+            if identity[1] == "Z":
+                continue
+            if pid not in self.pidfds:
+                try:
+                    descriptor = os.pidfd_open(pid, 0)
+                except ProcessLookupError:
+                    continue
+                except OSError as error:
+                    self.record_error(f"Cannot pin owned process {pid}: {error}")
+                    continue
+                confirmed = process_identity(pid)
+                if (confirmed is None or confirmed[0] != identity[0]
+                        or (prior is None and not self.parent_matches(pid, expected_parent))):
+                    os.close(descriptor)
+                    continue
+                self.pidfds[pid] = descriptor
+            self.owned[pid] = identity[0]
+            pending.extend((child, pid) for child in child_pids(pid))
+
+    def parent_matches(self, pid: int, expected_parent: int | None) -> bool:
+        parent = process_parent(pid)
+        if parent == os.getpid():
+            return True  # Includes descendants adopted by our subreaper.
+        if parent != expected_parent or parent not in self.owned:
+            return False
+        identity = process_identity(parent)
+        return identity is not None and identity[0] == self.owned[parent]
+
+    def record_error(self, message: str) -> None:
+        if message not in self.errors and len(self.errors) < 16:
+            self.errors.append(message)
 
     def signal(self, signum: int) -> None:
         self.refresh()
-        for pid, started in self.owned.items():
-            identity = process_identity(pid)
-            if identity is not None and identity[0] == started and identity[1] != "Z":
-                try:
-                    os.kill(pid, signum)
-                except ProcessLookupError:
-                    pass
+        for pid, descriptor in self.pidfds.items():
+            try:
+                # A pidfd still denotes the original process after numeric PID
+                # reuse. Never fall back to signaling an unverified PID/PGID.
+                signal.pidfd_send_signal(descriptor, signum)
+            except ProcessLookupError:
+                pass
+            except OSError as error:
+                self.record_error(f"Cannot signal owned process {pid}: {error}")
 
     def alive(self) -> bool:
         self.refresh()
@@ -103,6 +182,8 @@ class OwnedProcessTree:
         )
 
     def close(self) -> None:
+        # A child can reparent and become a zombie after the final liveness scan.
+        self.refresh()
         for pid, started in self.owned.items():
             identity = process_identity(pid)
             if identity is not None and identity[0] == started:
@@ -110,8 +191,13 @@ class OwnedProcessTree:
                     os.waitpid(pid, os.WNOHANG)
                 except ChildProcessError:
                     pass
+        for descriptor in self.pidfds.values():
+            os.close(descriptor)
+        self.pidfds.clear()
         if self.libc.prctl(36, self.previous.value, 0, 0, 0) != 0:
             raise OSError(ctypes.get_errno(), "Cannot restore child-subreaper state")
+        if self.errors:
+            raise OSError("; ".join(self.errors))
 
 
 class BoundedOutput:
@@ -148,39 +234,28 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _stop_process_group(process: subprocess.Popen, grace: float, tree: OwnedProcessTree) -> str | None:
-    # The leader can finish while a child still holds stdout or keeps running.
-    # Its private process group is the cleanup boundary, not just the leader PID.
+def _stop_owned_processes(process: subprocess.Popen, grace: float, tree: OwnedProcessTree) -> str | None:
     tree.signal(signal.SIGTERM)
-    try:
-        os.killpg(process.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        pass
-    except OSError as error:
-        return str(error)
     deadline = time.monotonic() + grace
     while time.monotonic() < deadline:
         if process.poll() is not None and not tree.alive():
             break
         time.sleep(0.01)
-    tree.signal(signal.SIGKILL)
-    try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    except OSError as error:
-        return str(error)
+    if process.poll() is None or tree.alive():
+        tree.signal(signal.SIGKILL)
+    wait_error = None
     try:
         process.wait(timeout=1)
     except subprocess.TimeoutExpired:
-        return "Process did not exit after SIGKILL"
+        wait_error = "Process did not exit after SIGKILL"
     deadline = time.monotonic() + 1
     while tree.alive() and time.monotonic() < deadline:
         tree.signal(signal.SIGKILL)
         time.sleep(0.01)
     if tree.alive():
-        return "Owned descendant remained alive after SIGKILL"
-    return None
+        wait_error = "Owned descendant remained alive after SIGKILL"
+    errors = [*tree.errors, *([wait_error] if wait_error else [])]
+    return "; ".join(errors) if errors else None
 
 
 def run_command(
@@ -269,7 +344,7 @@ def run_command(
         for signum in (signal.SIGINT, signal.SIGTERM):
             cleanup_handlers[signum] = signal.signal(signum, defer_interrupt)
         if process is not None:
-            result["cleanup_error"] = _stop_process_group(process, terminate_grace, tree)
+            result["cleanup_error"] = _stop_owned_processes(process, terminate_grace, tree)
             drain_until = time.monotonic() + 0.2
             while selector.get_map() and time.monotonic() < drain_until:
                 for key, _ in selector.select(0.01):
@@ -381,7 +456,7 @@ def load_test_manifest(build_dir: Path, suites: list[str]) -> list[dict]:
             raise ValueError("Invalid GoogleTest marker")
         gtest_name = Path(command[0]).name if env.get("SEASIDE_GTEST") == "1" else None
         if gtest_name:
-            if any(key.startswith("GTEST_") for key in env) or any(
+            if any(gtest_environment_override(key) for key in env) or any(
                 argument.startswith("--gtest_") for argument in command[1:]
             ):
                 raise ValueError("GoogleTest filters/output/sharding flags must not override run-owned discovery")
@@ -502,7 +577,8 @@ def parse_gtest_results(path: Path, parent: dict, log_limit: int,
             suite_counts["failures"] += bool(entry.findall("failure"))
             suite_counts["errors"] += bool(entry.findall("error"))
             suite_counts["disabled"] += disabled_gtest_name(entry.get("classname", ""), entry.get("name", ""))
-            suite_counts["skipped"] += bool(entry.findall("skipped")) or entry.get("result") == "skipped"
+            suite_counts["skipped"] += not (entry.findall("failure") or entry.findall("error")) and (
+                bool(entry.findall("skipped")) or entry.get("result") == "skipped")
         validate_gtest_counts(suite, suite_counts)
         totals.update(suite_counts)
     validate_gtest_counts(root, totals, require_tests=True)
@@ -680,6 +756,9 @@ def write_report(run_dir: Path, report: dict) -> None:
     if any(row.get("cleanup_error") for row in report["commands"]):
         command_states.add("fail")
     test_states = {row["status"] for row in report["tests"]}
+    if any(row["status"] == "skip" and (row.get("id") != "test" or "pass" in test_states)
+           for row in report["commands"]):
+        command_states.add("fail")
     if "fail" in command_states or "fail" in test_states:
         report["status"] = "fail"
     elif "blocked" in command_states or "blocked" in test_states or "pass" not in test_states:
@@ -783,7 +862,7 @@ def main(argv: list[str] | None = None, *, repository_root: Path | None = None) 
             fixture_root = Path(temporary)
             child_env = os.environ.copy()
             for key in list(child_env):
-                if key in ("WAYLAND_DISPLAY", "WAYLAND_SOCKET", "DISPLAY", "SEASIDE_SOCKET") or key.startswith("GTEST_"):
+                if key in ("WAYLAND_DISPLAY", "WAYLAND_SOCKET", "DISPLAY", "SEASIDE_SOCKET") or gtest_environment_override(key):
                     child_env.pop(key, None)
             gtest_dir = run_dir / "gtest"
             gtest_dir.mkdir(mode=0o700)
@@ -833,10 +912,10 @@ def main(argv: list[str] | None = None, *, repository_root: Path | None = None) 
                         execute("test", command)
                         report["tests"] = parse_meson_results(run_dir / "meson.json", run_dir, args.log_limit, manifest)
             else:
-                report["tests"] = [{"test_id": "test-execution", "status": "blocked", "reason": "Setup/build did not pass or the run was interrupted", "log": None}]
+                report["tests"] = [collection_failure("test-execution", "Setup/build did not pass or the run was interrupted")]
     except (KeyboardInterrupt, InterruptedRun) as error:
         interrupted = error.signum if isinstance(error, InterruptedRun) else signal.SIGINT
-        report["tests"].append({"test_id": "test-run-interruption", "status": "blocked", "reason": "Run interrupted", "log": None})
+        report["tests"].append(collection_failure("test-run-interruption", "Run interrupted"))
     finally:
         signal.signal(signal.SIGTERM, previous_term_handler)
         report["interrupted_signal"] = interrupted

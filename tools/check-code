@@ -23,6 +23,8 @@ def main():
         if path.suffix in ('.c', '.h', '.cpp', '.hpp')
     )
     try:
+        if not formatted:
+            raise ValueError('No source files found for formatting check')
         commands = json.loads((build_dir / 'compile_commands.json').read_text())
         if not isinstance(commands, list) or not commands:
             raise ValueError('Compilation database must contain project translation units')
