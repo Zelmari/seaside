@@ -26,7 +26,8 @@ verified behavior. WSL/headless results do not qualify physical AMD outputs
 or establish input-to-screen latency.
 
 [Part 2's configuration/state foundations](PART2.md) are implemented, with
-integrated verification/review in progress. The [plan](PART2_PLAN.md) retains
+normal/sanitizer verification and external static review completed in Arch WSL2.
+Designated VM/native qualification remains pending. The [plan](PART2_PLAN.md) retains
 the acceptance cases and scope; the specification retains the requirements.
 
 ## Approved technology choices

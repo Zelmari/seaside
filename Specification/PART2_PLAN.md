@@ -1,6 +1,7 @@
 # Part 2 plan: configuration and state foundations
 
-Status: implemented; integrated verification/review in progress. Actual modules,
+Status: implemented and software-verified in Arch WSL2; static review completed.
+Designated VM/native qualification remains pending. Actual modules,
 commands, evidence and limitations are recorded in [the Part 2 handoff](PART2.md).
 
 This implements the existing [specification](SEASIDE_SPEC.md), especially
