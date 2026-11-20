@@ -2,9 +2,10 @@
 
 Status: headless milestone software-verified in Arch WSL2. The Arch VirtualBox
 guest passed the original harness and the live console fixture with Pixman.
-Automatic renderer selection failed on this guest. Part 3 and release
-qualification remain pending. The keyboard and terminal trial passed both the
-offscreen software checks and the VirtualBox run.
+Automatic renderer selection failed on this guest. The keyboard and terminal
+trial passed offscreen and in VirtualBox. Systemd and PipeWire passed on the
+first run after a fresh VM login. Full session startup and release
+qualification remain pending.
 
 This implements the bounded [Part 3 plan](PART3_PLAN.md) against specification
 §§2.1–2.2, 3–3.1, 12.2b and 14. The checks below cover the headless milestone
@@ -271,8 +272,11 @@ The systemd probe allows up to one second for the manager's name to appear
 on the login bus within its existing deadline. The private D-Bus tests check
 delayed registration, permanent absence, cancellation and deadline expiry
 during the retry. All eight Part 3 entries passed after the change in the
-normal and ASan/UBSan builds. A fresh VM login remains the check for this path
-with Arch's normal bus.
+normal and ASan/UBSan builds.
+
+At `bd95b0d`, the Arch VirtualBox guest logged in on `tty1` and ran
+`build/seaside-session-check` as its first check, before any `systemctl` call.
+It returned `session core systemd=PASS(0) pipewire=PASS(0)` on the first run.
 
 The regression harness passed 15 entries and all 148 GoogleTest cases, with
 the DRM discovery probe skipped in WSL. The report is
