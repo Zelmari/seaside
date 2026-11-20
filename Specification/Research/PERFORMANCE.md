@@ -13,6 +13,9 @@ It is not a promise of lower latency or a request for additional functionality.
   libwayland's main event loop, and Meson/Ninja.
 - Automatic production renderer selection through `wlr_renderer_autocreate`.
   Record the renderer actually selected on each tested machine.
+- Standard C++ `std::jthread` workers with a small bounded task queue for slow
+  file/configuration/image work; results return to the owning main event loop.
+  Queue submission must not block dispatch, and stale results are discarded.
 - Existing window-management behavior, hardware-cursor enforcement, capture
   behavior, night-light policy and configurable presentation settings.
 - Bounded, opt-in diagnostics under §12.1; ordinary operation does not acquire
@@ -61,7 +64,7 @@ remaining entries as the corresponding modules exist and profiles justify it.
 |---|---|---|
 | P01 | **Automatic selection versus OpenGL ES/Vulkan** | Record the automatic result, then compare supported renderer paths using development-only controls available in the pinned wlroots build. Include composition workloads; direct scanout can bypass compositor drawing. Compare latency distributions, GPU time, buffer import/synchronization, capture and stability. Automatic selection remains the agreed production policy; no renderer TOML option is proposed. |
 | P02 | **Frame scheduling and queued work** | Locate avoidable waits between input, buffer readiness and presentation. Measure queue depth where observable, deadline misses and tail latency under desktop and fullscreen loads. Exercise the existing VRR/tearing policies and fixed-refresh operation separately; do not change their approved defaults or synchronization semantics to improve a result. |
-| P03 | **Main event-loop stalls** | Measure long callbacks and delays caused by config reload, image decoding, IPC, logging, external command startup and service communication. Move or bound proven blocking work through internal mechanisms while preserving ordering, recovery and responsiveness. This does not select a new threading framework or additional process. |
+| P03 | **Main event-loop stalls** | Measure long callbacks and delays caused by config reload, image decoding, IPC, logging, external command startup and service communication. Use the approved bounded C++ workers for slow file/configuration/image work and asynchronous service integration, preserving ordering and recovery. Measure queue saturation, result-handoff costs and shutdown behavior before tuning internal limits. |
 | P04 | **Direct scanout eligibility and transitions** | Count eligible fullscreen presentations that actually scan out and record observable fallback reasons. Compare scale/rotation, capture, overlays and hardware night light. Verify correct composition fallback and prompt recovery when eligibility changes. Required drawing or capture must not be omitted merely to improve scanout statistics. |
 | P05 | **Copies, buffer imports and synchronization** | Trace avoidable buffer copies, CPU readbacks and blocking fence waits. Check supported formats/modifiers and buffer reuse, retaining correct acquire/release synchronization. Measure native and satellite-backed clients; a path is not zero-copy just because it uses DMA-BUF. |
 | P06 | **Damage, visibility and idle rendering** | Compare partial/full damage, unchanged desktops and covered wallpaper. Check frame scheduling and CPU/GPU wakeups when no redraw is needed. Actively captured hidden windows must continue producing live frames; visibility optimizations must preserve that requirement. |
