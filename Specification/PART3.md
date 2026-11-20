@@ -4,9 +4,9 @@ Status: headless milestone software-verified in Arch WSL2. The Arch VirtualBox
 guest passed the original harness and the live console fixture with Pixman.
 Automatic renderer selection failed on this guest. The keyboard and terminal
 trial passed offscreen and in VirtualBox. Systemd and PipeWire passed on the
-first run after a fresh VM login. The full TTY entrypoint and portal checks
-are implemented. Their combined Arch VM trial and native qualification remain
-pending.
+first run after a fresh VM login. The full TTY entrypoint produced valid
+monitor captures and returned to the VM console on a forced PipeWire failure.
+The VT round-trip observation and native qualification remain open.
 
 This implements the bounded [Part 3 plan](PART3_PLAN.md) against specification
 §§2.1–2.2, 3–3.1, 12.2b and 14. The checks below cover the headless milestone
@@ -347,6 +347,18 @@ From the original shell, run
 a missing required service. It should print `seaside FAIL service=pipewire`
 and return to that shell. A normal launch again demonstrates that the
 previous run released its resources.
+
+#### Observed VM results
+
+The Arch VirtualBox guest used Pixman with `vmwgfx`. The interactive `foot`
+session produced two valid 1280 × 839 PNGs, `seaside.png` and `seaside-vt.png`.
+Direct confirmation of the cursor and terminal after the VT round trip is
+still pending.
+
+The forced PipeWire failure printed `seaside FAIL service=pipewire
+reason=missing(-112)` and returned to the logged-in shell. A separate launch
+while a capture portal name was already owned also returned to the shell with
+`seaside FAIL service=capture-backend reason=wrong-environment(-98)`.
 
 Native hardware cursor, latency, VRR, tearing, colour and suspend/resume evidence
 remain separate. Later window/workspace/layout/IPC/compatibility parts have not
