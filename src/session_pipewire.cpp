@@ -3,8 +3,11 @@
 #include <algorithm>
 #include <cerrno>
 #include <climits>
+#include <cstdlib>
 #include <mutex>
+#include <pipewire/extensions/protocol-native.h>
 #include <pipewire/pipewire.h>
+#include <string_view>
 #include <thread>
 #include <wayland-server-core.h>
 
@@ -180,6 +183,10 @@ struct PipeWireProbe::Impl : std::enable_shared_from_this<Impl> {
 
     std::expected<void, PipeWireError> initialize(const Options &options) noexcept {
         deadline = std::chrono::steady_clock::now() + options.timeout;
+        const auto *daemon = std::getenv("PIPEWIRE_DAEMON");
+        if (daemon && pw_properties_parse_bool(daemon)) {
+            return std::unexpected(PipeWireError{PipeWireFailure::connection, -EINVAL});
+        }
         pipewire_loop = pw_loop_new(nullptr);
         if (!pipewire_loop) {
             return std::unexpected(PipeWireError{PipeWireFailure::loop_creation, -errno});
@@ -197,11 +204,21 @@ struct PipeWireProbe::Impl : std::enable_shared_from_this<Impl> {
         if (!context) {
             return std::unexpected(PipeWireError{PipeWireFailure::context_creation, -errno});
         }
-        auto *connection_properties =
-            options.remote.empty()
-                ? nullptr
-                : pw_properties_new(PW_KEY_REMOTE_NAME, options.remote.c_str(), nullptr);
-        if (!options.remote.empty() && !connection_properties) {
+        const auto *context_properties = pw_context_get_properties(context);
+        const char *remote = options.remote.empty()
+                                 ? pw_properties_get(context_properties, PW_KEY_REMOTE_NAME)
+                                 : options.remote.c_str();
+        // An internal client can complete a roundtrip against this process.
+        // Use PipeWire's normal native socket resolution without its internal
+        // or portal connection modes.
+        if (pw_properties_get_bool(context_properties, PW_KEY_CORE_DAEMON, false) ||
+            (remote && std::string_view(remote) == "internal")) {
+            return std::unexpected(PipeWireError{PipeWireFailure::connection, -EINVAL});
+        }
+        auto *connection_properties = pw_properties_new(
+            PW_KEY_PROTOCOL, PW_TYPE_INFO_PROTOCOL_Native, PW_KEY_REMOTE_INTENTION, "generic",
+            PW_KEY_REMOTE_NAME, remote ? remote : "", nullptr);
+        if (!connection_properties) {
             return std::unexpected(PipeWireError{PipeWireFailure::allocation, -ENOMEM});
         }
         core = pw_context_connect(context, connection_properties, 0);

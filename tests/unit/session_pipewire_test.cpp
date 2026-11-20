@@ -16,6 +16,7 @@
 #include <poll.h>
 #include <spawn.h>
 #include <string>
+#include <string_view>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/wait.h>
@@ -78,7 +79,7 @@ class ClientEnvironment {
                 saved_.emplace(key, entry.substr(equals + 1));
             }
         }
-        for (const auto *key : {"PIPEWIRE_CONFIG_DIR", "PIPEWIRE_CONFIG_NAME",
+        for (const auto *key : {"PIPEWIRE_CONFIG_DIR", "PIPEWIRE_CONFIG_NAME", "PIPEWIRE_DAEMON",
                                 "PIPEWIRE_RUNTIME_DIR", "XDG_RUNTIME_DIR", "XDG_CONFIG_HOME"}) {
             const auto *value = getenv(key);
             saved_.try_emplace(key, value ? std::optional<std::string>(value) : std::nullopt);
@@ -136,12 +137,7 @@ class PipeWireProbeTest : public testing::Test {
     void SetUp() override {
         RecordProperty("part", "3");
         RecordProperty("requirement", "spec-3.1-pipewire-core-roundtrip");
-        std::ofstream config(directory.path() / "seaside-probe-client.conf");
-        config << "context.properties = { support.dbus = false mem.allow-mlock = false }\n"
-                  "context.spa-libs = { support.* = support/libspa-support }\n"
-                  "context.modules = [ { name = libpipewire-module-protocol-native } ]\n";
-        config.close();
-        ASSERT_TRUE(config);
+        ASSERT_TRUE(write_client_config());
         client_environment = std::make_unique<ClientEnvironment>(directory.path());
         loop = wl_event_loop_create();
         ASSERT_NE(loop, nullptr);
@@ -166,6 +162,17 @@ class PipeWireProbeTest : public testing::Test {
     }
 
     std::string socket() const { return (directory.path() / "seaside-test").string(); }
+
+    bool write_client_config(std::string_view extra_properties = {}) {
+        std::ofstream config(directory.path() / "seaside-probe-client.conf");
+        config << "context.properties = { support.dbus = false mem.allow-mlock = false "
+               << extra_properties
+               << " }\n"
+                  "context.spa-libs = { support.* = support/libspa-support }\n"
+                  "context.modules = [ { name = libpipewire-module-protocol-native } ]\n";
+        config.close();
+        return static_cast<bool>(config);
+    }
 
     std::string server_log() const {
         std::ifstream stream(directory.path() / "server.log");
@@ -340,6 +347,45 @@ TEST_F(PipeWireProbeTest, MissingSocketFailsWithoutClaimingRoundtripSuccess) {
     EXPECT_LT(result.error().system_error, 0);
     dispatch_quietly();
     EXPECT_EQ(completions, 0U);
+}
+
+TEST_F(PipeWireProbeTest, ClientConfigCannotSubstituteAnInProcessCore) {
+    for (const auto *properties :
+         {"remote.intention = internal", "remote.name = internal",
+          "core.daemon = true core.name = seaside-test remote.name = seaside-test"}) {
+        SCOPED_TRACE(properties);
+        ASSERT_TRUE(write_client_config(properties));
+        auto result = PipeWireProbe::create(loop, {}, [&](auto) { ++completions; });
+        ASSERT_FALSE(result);
+        EXPECT_EQ(result.error().code, PipeWireFailure::connection);
+        EXPECT_LT(result.error().system_error, 0);
+        dispatch_quietly();
+        EXPECT_EQ(completions, 0U);
+    }
+}
+
+TEST_F(PipeWireProbeTest, DaemonEnvironmentCannotOpenAProbeSocket) {
+    ASSERT_EQ(setenv("PIPEWIRE_DAEMON", "true", 1), 0);
+    ASSERT_TRUE(write_client_config("core.name = seaside-test remote.name = seaside-test"));
+    auto result = PipeWireProbe::create(loop, {}, [&](auto) { ++completions; });
+    EXPECT_FALSE(std::filesystem::exists(socket()));
+    ASSERT_FALSE(result);
+    EXPECT_EQ(result.error().code, PipeWireFailure::connection);
+    EXPECT_LT(result.error().system_error, 0);
+    EXPECT_EQ(completions, 0U);
+}
+
+TEST_F(PipeWireProbeTest, DefaultProbeUsesConfiguredNativeSocketWithoutPortal) {
+    ASSERT_TRUE(start_server()) << server_log();
+    ASSERT_TRUE(write_client_config("remote.name = seaside-test remote.intention = screencast"));
+    auto result = PipeWireProbe::create(loop, {}, [&](auto value) {
+        completed = value;
+        ++completions;
+    });
+    ASSERT_TRUE(result);
+    probe = std::move(*result);
+    ASSERT_TRUE(dispatch_until([&] { return completions != 0; })) << server_log();
+    EXPECT_EQ(completed.status, PipeWireStatus::ready);
 }
 
 TEST_F(PipeWireProbeTest, PrivateRealServerCompletesCoreRoundtrip) {
