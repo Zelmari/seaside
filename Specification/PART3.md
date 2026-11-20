@@ -3,8 +3,8 @@
 Status: headless milestone software-verified in Arch WSL2. The Arch VirtualBox
 guest passed the original harness and the live console fixture with Pixman.
 Automatic renderer selection failed on this guest. Part 3 and release
-qualification remain pending. The keyboard and terminal trial passed offscreen
-software checks and is ready for its VirtualBox run.
+qualification remain pending. The keyboard and terminal trial passed both the
+offscreen software checks and the VirtualBox run.
 
 This implements the bounded [Part 3 plan](PART3_PLAN.md) against specification
 §§2.1–2.2, 3–3.1, 12.2b and 14. Work stops at the first Arch-VM qualification
@@ -218,12 +218,19 @@ console. Record that observation and the final `TTY terminal` result line. A
 pass requires a hardware cursor presentation, a mapped terminal, at least one
 forwarded key press and a clean exit from the owned child.
 
+The VirtualBox run at `8c47639` reported `TTY terminal PASS`,
+`stop=terminal-exited`, `mapped=yes`, `keys=56` and `cursor-plane=40` with
+Pixman. The guest returned to the original shell, and the owner confirmed
+typing in `foot` worked. The fixture sends keyboard events to the terminal
+and draws the cursor through DRM. Client mouse buttons and window dragging
+remain in the window and input milestone.
+
 An offscreen run with Arch `foot` 1.28.0-2 and DejaVu Sans Mono used the new code
 with a synthetic keyboard and a test shell. Super+Return opened the real
 terminal, the watched surface mapped, and three key presses delivered `ab`
 followed by Enter to that shell. It returned zero after checking the exact
-received line. The guest trial still needs physical key input and visible
-terminal output.
+received line. The VirtualBox run supplied the physical keyboard and terminal
+observation separately.
 
 `tools/run-tests --build-dir build` passed 15 Meson entries, all 139 GoogleTest
 cases and the formatting and static analysis checks. The discovery-only DRM
