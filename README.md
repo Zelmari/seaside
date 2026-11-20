@@ -12,6 +12,8 @@ The product contract is in [the design](Specification/SEASIDE_SPEC.md). Build an
 verification details are in [the part 1 handoff](Specification/PART1.md).
 Future latency investigations are tracked in
 [the performance research notes](Specification/Research/PERFORMANCE.md).
+Approved choices and documentation needs for users and contributors are also
+recorded in [the public documentation record](Specification/PUBLIC_DOCUMENTATION.md).
 
 ## Build and test
 
