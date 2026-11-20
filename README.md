@@ -43,3 +43,8 @@ is explicitly reported as skipped; it does not qualify a cursor plane or GPU.
 The headless fixture uses an offscreen pixman renderer and never controls a
 physical display. None of the part 1 executables is installed as `seaside` or
 adds a way to bypass the production session/preflight requirements.
+
+## Licence
+
+Seaside is licensed under the [MIT License](LICENSE). Third-party dependencies
+retain their own licences.

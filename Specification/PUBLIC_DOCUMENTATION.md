@@ -2,7 +2,8 @@
 
 Updated: 2026-11-20
 
-Seaside is intended to be an open-source Arch Linux Wayland compositor.
+Seaside is an open-source Arch Linux Wayland compositor project, licensed
+under the [MIT License](../LICENSE).
 This document collects approved decisions and material to explain to users
 and contributors. Keep the same requirements in the
 [specification](SEASIDE_SPEC.md); this companion record supplements it.
@@ -38,6 +39,7 @@ or establish input-to-screen latency.
 | Configuration-error banner | Pango and Cairo/PangoCairo text rendering; wlroots displays the cached image | §8.1 |
 | Tests | GoogleTest for C++ unit/component tests, Meson execution, Python-standard-library supervision and useful C fixtures | §12.2b |
 | Dependencies | Arch packages by default, compatible version constraints, exact tested manifests; explicit bundled-copy exceptions and no silent downloads | §11.1 |
+| Project licence | MIT only, without additional commercial-use or proprietary-derivative restrictions; third-party licences remain applicable | §11.1 |
 | Error handling | `std::expected` for recoverable failures, RAII cleanup, exceptions contained at C callback and worker boundaries | §2.2 |
 | Development tools | clang-format, clang-tidy, GDB and AddressSanitizer/UndefinedBehaviorSanitizer test builds; GCC remains primary | §14.3 |
 
@@ -76,7 +78,7 @@ that their checks already run.
 | Troubleshooting and diagnostics | §§3/8/10/12; document startup errors, persistent config errors, bounded opt-in diagnostics and reproducible bug-report information |
 | Performance and hardware support | §12 and [performance investigations](Research/PERFORMANCE.md); publish measured results with methodology and limitations when available |
 | Packaging and releases | §§11/14; document clean-install dependencies, tested versions and remaining limits once packaging is verified |
-| Licence and third-party notices | Project licence is not yet selected and no root licence file exists; record the owner's choice and preserve dependency/asset notices when preparing the release |
+| Licence and third-party notices | MIT selected and recorded in the root [LICENSE](../LICENSE); preserve its notice and applicable third-party dependency/asset notices when preparing the release |
 
 These entries track documentation for existing scope. They do not approve new
 features, a documentation website, a hosting service or a new release workflow.
