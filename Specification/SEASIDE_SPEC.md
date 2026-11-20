@@ -51,7 +51,7 @@ xdg-desktop-portal frontend + tested portal backend.
 ```
 
 - **APPROVED:** No second compositor, web service, GUI daemon, persistent Conch process, or custom session manager. `xwayland-satellite` and the approved OS integrations are separate *existing* software, not code copied into Seaside.
-- **APPROVED:** Seaside presents desktop wallpaper (the shipped default asset is a fully black image) without an external shell. A configurable absolute wallpaper path selects a different image. Covered wallpaper must not be needlessly drawn in fullscreen.
+- **APPROVED:** Seaside presents desktop wallpaper (the shipped default asset is a fully black image) without an external shell. A configurable absolute wallpaper path selects a different image. Support static PNG, JPEG and WebP wallpaper images in v1; the decoder-library choice remains pending. Covered wallpaper must not be needlessly drawn in fullscreen.
 - **APPROVED:** `wlr-layer-shell` support permits external panels, overlays and launchers; nonessential shell overlays are suppressed on an output with fullscreen content. This is not a blanket promise to hide security-critical or protocol-required surfaces.
 - **APPROVED:** Unix-socket IPC is served inside the compositor, without a separate daemon. No IPC work may block the render/input event loop.
 
@@ -379,7 +379,7 @@ Use the approved state model with standard protocol lifetimes, rather than addin
 | TOML key | Accepted values (exact v1 parser) | Default | Apply |
 |---|---|---|---|
 | `autostart.commands` | array of 0–128 nonempty shell-command strings; individual command max 4096 UTF-8 bytes | `[]` | startup only |
-| `wallpaper.path` | absolute path to a readable/decodable local image, max 4096 bytes | `/usr/share/seaside/wallpapers/black.png` | live |
+| `wallpaper.path` | absolute path to a readable/decodable static PNG, JPEG or WebP local image, max 4096 bytes | `/usr/share/seaside/wallpapers/black.png` | live |
 | `window.tiling` | boolean | `true` | live + override reset if changed |
 | `window.layout` | `"dwindle"`, `"scrolling"` | `"dwindle"` | live + rebuild/reset if changed |
 | `window.gaps_outer` | integer 0–512 logical px | `10` | live |
@@ -1118,3 +1118,5 @@ The supplied draft referenced `SEASIDE_DECISION_ARCHIVE.md` for a full chronolog
 **Owner decision — 2026-11-20 (D-Bus integration):** Accept the original direct sd-bus/libsystemd proposal with small C++ ownership wrappers. The sdbus-c++ wrapper and Niri's Rust zbus were discussed as examples, not selected. This supplies existing system-service/portal integration without expanding the approved D-Bus functionality or replacing the selected main event loop.
 
 **Owner decision — 2026-11-20 (PipeWire connection check):** Use libpipewire with small C++ ownership wrappers for the already-required startup connection check. Audio routing stays in PipeWire/WirePlumber and capture streaming stays with the external portal integration. No new audio feature or successful session qualification is inferred from selecting the client API.
+
+**Owner decision — 2026-11-20 (wallpaper formats):** Support static PNG, JPEG and WebP wallpaper images in v1. Keep the approved absolute-path configuration, fixed aspect-preserving cover/crop behavior and black default asset. The decoding libraries remain to be selected; this does not add animated wallpaper, additional image formats or a new setting.
