@@ -147,9 +147,9 @@ renderer selection. The owner reran the same fixture with
 1280 × 800 and 60 Hz, with DRM connector 44 and hardware cursor plane 40.
 The report counted 5,565 presented frames and 5,564 presented position changes
 from 5,575 accepted moves, then printed `PASS stop=observation-ended` and returned
-to the same shell. Visual confirmation of the moving cross is pending. The
-explicit renderer choice applies to this VM check. Automatic renderer selection
-remains a separate qualification item.
+to the same shell. The owner confirmed that the visible white cross followed
+their pointer. The explicit renderer choice applies to this VM check. Automatic
+renderer selection remains a separate qualification item.
 
 `seaside-tty-fixture` is a development executable for one DRM output. It opens
 the guest seat through wlroots, starts the DRM and libinput backends, uses the
