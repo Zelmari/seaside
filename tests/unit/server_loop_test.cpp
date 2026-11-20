@@ -13,6 +13,21 @@ namespace {
 using seaside::Server;
 using seaside::ServerError;
 
+struct ShutdownMaskProbe {
+    wl_listener listener{};
+    bool blocked_during_display_destroy = false;
+
+    ShutdownMaskProbe() {
+        listener.notify = [](wl_listener *listener, void *) noexcept {
+            ShutdownMaskProbe *probe = wl_container_of(listener, probe, listener);
+            sigset_t mask;
+            probe->blocked_during_display_destroy =
+                pthread_sigmask(SIG_SETMASK, nullptr, &mask) == 0 &&
+                sigismember(&mask, SIGTERM) == 1 && sigismember(&mask, SIGINT) == 1;
+        };
+    }
+};
+
 class ServerLoopTest : public testing::Test {
   protected:
     seaside::test::Directory directory;
@@ -108,7 +123,23 @@ TEST_F(ServerLoopTest, RunRequiresLivePublishedDisplayAndTerminatesThroughLoopCa
     EXPECT_EQ(stopped.error(), ServerError::invalid_state);
 }
 
+TEST_F(ServerLoopTest, ShutdownSignalDispatchedDuringStartupPreventsRun) {
+    auto created = Server::create();
+    ASSERT_TRUE(created);
+    auto &server = **created;
+    ASSERT_TRUE(server.listen());
+    ASSERT_TRUE(server.install_shutdown_signals());
+    ASSERT_EQ(raise(SIGTERM), 0);
+    auto *loop = wl_display_get_event_loop(server.display());
+    ASSERT_EQ(wl_event_loop_dispatch(loop, 0), 0);
+    ASSERT_TRUE(server.shutdown_requested());
+    auto result = server.run();
+    ASSERT_FALSE(result);
+    EXPECT_EQ(result.error(), ServerError::shutdown_requested);
+}
+
 TEST_F(ServerLoopTest, SignalRegistrationRestoresOriginalMaskAndRejectsDuplicates) {
+    ShutdownMaskProbe probe;
     sigset_t unblocked;
     sigemptyset(&unblocked);
     sigaddset(&unblocked, SIGTERM);
@@ -131,7 +162,9 @@ TEST_F(ServerLoopTest, SignalRegistrationRestoresOriginalMaskAndRejectsDuplicate
     ASSERT_EQ(pthread_sigmask(SIG_SETMASK, nullptr, &during), 0);
     EXPECT_EQ(sigismember(&during, SIGTERM), 1);
     EXPECT_EQ(sigismember(&during, SIGINT), 1);
+    wl_display_add_destroy_listener(server.display(), &probe.listener);
     server.finish();
+    EXPECT_TRUE(probe.blocked_during_display_destroy);
     sigset_t after;
     ASSERT_EQ(pthread_sigmask(SIG_SETMASK, nullptr, &after), 0);
     EXPECT_EQ(sigismember(&after, SIGTERM), 1);

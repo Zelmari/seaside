@@ -27,6 +27,7 @@ enum class ServerError {
     backend_start,
     socket_creation,
     signal_registration,
+    shutdown_requested,
 };
 
 // All methods and borrowed handles belong to the owning event-loop thread.
@@ -52,6 +53,7 @@ class Server final {
     std::expected<void, ServerError> install_shutdown_signals() noexcept;
     std::expected<void, ServerError> run() noexcept;
     void terminate() noexcept;
+    bool shutdown_requested() const noexcept { return shutdown_requested_; }
     // Finish only after run returns, never from inside a dispatch callback.
     void finish() noexcept;
 
@@ -64,7 +66,8 @@ class Server final {
   private:
     Server() noexcept = default;
     static int on_shutdown_signal(int signal, void *data) noexcept;
-    void release_shutdown_signals() noexcept;
+    void remove_shutdown_signal_sources() noexcept;
+    void restore_shutdown_signal_mask() noexcept;
     struct DisplayDeleter {
         void operator()(wl_display *) const noexcept;
     };
@@ -90,6 +93,7 @@ class Server final {
     sigset_t previous_signal_mask_{};
     bool owns_signal_mask_ = false;
     bool running_ = false;
+    bool shutdown_requested_ = false;
 };
 
 } // namespace seaside

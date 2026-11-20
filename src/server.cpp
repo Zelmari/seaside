@@ -108,13 +108,14 @@ std::expected<void, ServerError> Server::install_shutdown_signals() noexcept {
     terminate_signal_ = wl_event_loop_add_signal(loop, SIGTERM, on_shutdown_signal, this);
     interrupt_signal_ = wl_event_loop_add_signal(loop, SIGINT, on_shutdown_signal, this);
     if (!terminate_signal_ || !interrupt_signal_) {
-        release_shutdown_signals();
+        remove_shutdown_signal_sources();
+        restore_shutdown_signal_mask();
         return std::unexpected(ServerError::signal_registration);
     }
     return {};
 }
 
-void Server::release_shutdown_signals() noexcept {
+void Server::remove_shutdown_signal_sources() noexcept {
     if (terminate_signal_) {
         wl_event_source_remove(terminate_signal_);
         terminate_signal_ = nullptr;
@@ -123,6 +124,9 @@ void Server::release_shutdown_signals() noexcept {
         wl_event_source_remove(interrupt_signal_);
         interrupt_signal_ = nullptr;
     }
+}
+
+void Server::restore_shutdown_signal_mask() noexcept {
     if (owns_signal_mask_) {
         // Preserve the caller's mask across explicit signal-source ownership;
         // changing unrelated signal bits could interfere with another subsystem.
@@ -141,6 +145,11 @@ std::expected<void, ServerError> Server::run() noexcept {
     if (!display_ || !socket_name_ || running_) {
         return std::unexpected(ServerError::invalid_state);
     }
+    // Startup may briefly dispatch the loop to acquire an active seat. A
+    // shutdown observed there must survive wl_display_run resetting its flag.
+    if (shutdown_requested_) {
+        return std::unexpected(ServerError::shutdown_requested);
+    }
     running_ = true;
     wl_display_run(display_.get());
     running_ = false;
@@ -149,12 +158,13 @@ std::expected<void, ServerError> Server::run() noexcept {
 
 void Server::terminate() noexcept {
     if (display_) {
+        shutdown_requested_ = true;
         wl_display_terminate(display_.get());
     }
 }
 
 void Server::finish() noexcept {
-    release_shutdown_signals();
+    remove_shutdown_signal_sources();
     // Disconnect clients while their surface listeners and renderer still live.
     // Backend teardown releases output swapchains before allocator destruction.
     if (display_) {
@@ -164,6 +174,9 @@ void Server::finish() noexcept {
     allocator_.reset();
     renderer_.reset();
     display_.reset();
+    // The display loop may still own the console seat. A second signal must
+    // remain blocked until loop destruction has released the seat as well.
+    restore_shutdown_signal_mask();
     compositor_ = nullptr;
     socket_name_ = nullptr;
     named_socket_.clear();
