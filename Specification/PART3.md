@@ -4,9 +4,10 @@ Status: headless milestone software-verified in Arch WSL2. The Arch VirtualBox
 guest passed the original harness and the live console fixture with Pixman.
 Automatic renderer selection failed on this guest. The keyboard and terminal
 trial passed offscreen and in VirtualBox. Systemd and PipeWire passed on the
-first run after a fresh VM login. The full TTY entrypoint produced valid
-monitor captures and returned to the VM console on a forced PipeWire failure.
-The VT round-trip observation and native qualification remain open.
+first run after a fresh VM login. The Part 3 VM functional trial passed with
+Pixman, including monitor capture, the VT round trip and the required-service
+failure path. The intermittent terminal stalls and native qualification
+remain open.
 
 This implements the bounded [Part 3 plan](PART3_PLAN.md) against specification
 §§2.1–2.2, 3–3.1, 12.2b and 14. The checks below cover the headless milestone
@@ -352,13 +353,17 @@ previous run released its resources.
 
 The Arch VirtualBox guest used Pixman with `vmwgfx`. The interactive `foot`
 session produced two valid 1280 × 839 PNGs, `seaside.png` and `seaside-vt.png`.
-Direct confirmation of the cursor and terminal after the VT round trip is
-still pending.
+After switching to TTY 2 and back to TTY 1, the owner confirmed that the same
+terminal still accepted typing and the cursor moved.
 
 The forced PipeWire failure printed `seaside FAIL service=pipewire
 reason=missing(-112)` and returned to the logged-in shell. A separate launch
 while a capture portal name was already owned also returned to the shell with
 `seaside FAIL service=capture-backend reason=wrong-environment(-98)`.
+
+The owner also observed intermittent pauses of about half a second before
+typed characters appeared together in `foot`. See the
+[performance investigation](Research/PERFORMANCE.md#virtualbox-terminal-stalls).
 
 Native hardware cursor, latency, VRR, tearing, colour and suspend/resume evidence
 remain separate. Later window/workspace/layout/IPC/compatibility parts have not

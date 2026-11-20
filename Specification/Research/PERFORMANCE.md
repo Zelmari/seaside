@@ -89,6 +89,23 @@ change. A measured gain does not itself approve a new setting, changed default,
 weakened synchronization/cursor rule or replacement architecture. Routine
 internal fixes that preserve the contract follow the normal development rules.
 
+### VirtualBox terminal stalls
+
+During the Part 3 VM trial at `ae05938`, the owner reported intermittent
+pauses of about half a second while typing in `foot`. The entered characters
+then appeared together. The Arch VirtualBox guest used `vmwgfx`, Pixman and
+a 1280 × 839 mode near 60 Hz. The duration is a user estimate. The cursor and
+terminal worked after the VT round trip.
+
+The keyboard handler forwards accepted events to the focused Wayland client
+as they are dispatched. The scene sends frame callbacks after output commits.
+The first Arch VM harness run also reported guest watchdog stalls. Correlation
+with the terminal pauses remains open. Track under P02 and P03. Compare the
+same typing workload in `foot` and the plain VM TTY.
+If the stall recurs, record whether the cursor freezes at the same time, then
+correlate guest scheduling, keyboard delivery, client commits and DRM
+presentation. The cause and the native timing remain unmeasured.
+
 ## Primary API references
 
 These identify mechanisms to investigate, not measured advantages. Match them
