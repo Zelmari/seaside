@@ -9,7 +9,8 @@ It is not a promise of lower latency or a request for additional functionality.
 
 ## Selected baseline
 
-- C++23, wlroots, its existing scene graph and renderers, and Meson/Ninja.
+- C++23 with GCC, wlroots, its existing scene graph and renderers,
+  libwayland's main event loop, and Meson/Ninja.
 - Automatic production renderer selection through `wlr_renderer_autocreate`.
   Record the renderer actually selected on each tested machine.
 - Existing window-management behavior, hardware-cursor enforcement, capture
