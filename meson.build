@@ -1,11 +1,12 @@
 project(
   'seaside',
   'c',
+  'cpp',
   version: '0.1.0-dev',
   license: 'MIT',
   license_files: 'LICENSE',
   meson_version: '>=1.3.0',
-  default_options: ['c_std=c17', 'warning_level=3', 'werror=true'],
+  default_options: ['c_std=c17', 'cpp_std=c++23', 'warning_level=3', 'werror=true', 'wrap_mode=nodownload'],
 )
 
 if host_machine.system() != 'linux'
@@ -22,12 +23,25 @@ pixman = dependency('pixman-1')
 libdrm = dependency('libdrm')
 threads = dependency('threads')
 python = import('python').find_installation('python3')
+gtest = dependency('gtest_main', version: '>=1.14.0', method: 'pkg-config')
+
+cpp = meson.get_compiler('cpp')
+if get_option('cpp_std') != 'c++23'
+  error('Reconfigure the legacy build with -Dcpp_std=c++23; the core now requires C++23.')
+endif
+if not cpp.compiles('''
+  #include <expected>
+  #include <thread>
+  int main() { std::expected<int, int> value{1}; std::jthread worker; return *value - 1; }
+''', args: ['-std=c++23'], name: 'C++23 expected and jthread')
+  error('Seaside requires C++23 std::expected and std::jthread support.')
+endif
 
 core = static_library(
   'seaside-core',
-  'src/server.c',
+  ['src/server.cpp', 'src/server_c.cpp', 'src/wlroots_bridge.c'],
   include_directories: include_directories('src'),
-  dependencies: [wlroots, wayland_server, pixman],
+  dependencies: [wlroots, wayland_server, pixman, threads],
   install: false,
 )
 
@@ -55,6 +69,33 @@ drm_report_fixture = executable(
 )
 
 test('headless-lifecycle', headless_fixture, suite: 'integration', timeout: 30)
+
+wrapped_functions = [
+  'wl_display_create', 'wl_display_destroy',
+  'seaside_wlr_allocator_create', 'seaside_wlr_renderer_init_display',
+  'seaside_wlr_compositor_create', 'seaside_wlr_backend_start',
+  'seaside_wlr_backend_destroy', 'seaside_wlr_allocator_destroy',
+  'seaside_wlr_renderer_destroy',
+]
+wrap_arguments = []
+foreach function : wrapped_functions
+  wrap_arguments += '-Wl,--wrap=' + function
+endforeach
+server_tests = executable(
+  'seaside-server-tests',
+  ['tests/unit/server_test.cpp', 'tests/unit/wlroots_fixture.c'],
+  include_directories: include_directories('src', 'tests/unit'),
+  dependencies: [wlroots, wayland_server, pixman, threads, gtest],
+  link_with: core,
+  link_args: wrap_arguments,
+  install: false,
+)
+test('server-ownership', server_tests, suite: 'unit', timeout: 30)
+test(
+  'code-quality', python,
+  args: [files('tools/check-code'), '--build-dir', meson.current_build_dir()],
+  suite: 'quality', timeout: 120, is_parallel: false,
+)
 test(
   'runner',
   python,
@@ -85,4 +126,6 @@ summary({
   'libdrm': libdrm.version(),
   'Fixture renderer': 'pixman, offscreen tests only',
   'Installed product targets': 'none in part 1',
+  'C++ standard': 'C++23',
+  'GoogleTest': gtest.version(),
 }, section: 'Part 1 build baseline')

@@ -3,10 +3,11 @@
 This records the software foundation for the first development part in §14 of
 `SEASIDE_SPEC.md`.
 
-This is the original C/wlroots/Meson prototype and its historical verification
-record. On 2026-11-20 the owner selected C++23 with wlroots for future
-implementation; the remaining stack and language migration are pending. The
-results below do not establish a C++ build.
+The foundation was originally implemented in C/wlroots/Meson. On 2026-11-20
+the lifecycle core was migrated to C++23 with a narrow C interoperability bridge,
+RAII ownership, typed errors, GoogleTest and development code checks. The
+original 2026-11-19 evidence below remains historical; see the C++ migration
+section for current verification. Part 2 has not been started.
 
 Requirements covered are the shared event-loop/lifetime boundary (§2), bounded
 test tooling and isolation (§12.2b), and actual build/API evidence for G1 (§13).
@@ -15,9 +16,20 @@ the strict external-service preflight.
 
 ## Components
 
-- `src/server.[ch]`: the private Wayland/wlroots lifecycle library. The caller
+- `src/server.hpp` / `server.cpp`: the private C++ lifecycle owner. The caller
   selects the backend and renderer; ownership and teardown order are documented
   at the interface.
+- `src/wlroots_bridge.[ch]`: thin C wrappers around the wlroots calls needed by
+  the owner. wlroots 0.20.2 headers contain C-only array parameter syntax, so C++
+  uses forward declarations instead of including or modifying those headers.
+- `src/server.h` / `server_c.cpp`: a nonthrowing C facade with borrowed handles,
+  allowing the retained real-client fixture to exercise the C++ implementation.
+- `tests/unit/server_test.cpp`: GoogleTest cases for real headless/Pixman startup,
+  typed failures, ownership transfer and ordered/idempotent teardown. GNU linker
+  wrapping injects failures only into this executable, not into the core API.
+- `tools/check-code`, `.clang-format`, `.clang-tidy`: formatting checks for the
+  migrated core/new unit fixtures and static analysis of all project translation
+  units. The code checks run through the normal Meson/runner path.
 - `tests/integration/headless.c`: a test-only executable that creates offscreen
   outputs, connects a real Wayland client, checks submitted SHM content through
   the renderer, removes/replaces outputs, exercises zero-output survival and
@@ -122,6 +134,58 @@ directory contains `summary.json`, `summary.txt`, `baseline.json` and bounded
 logs. Rerun the commands to generate evidence on another machine; these local
 artifacts are not required source files.
 
+## C++23 migration — 2026-11-20
+
+The lifecycle owner is now C++23, using `std::expected` for startup failures and
+RAII for display/backend/renderer/allocator ownership. The thin C bridge builds
+the installed wlroots headers as C17. This resolves their incompatible C array
+parameter syntax without modifying headers or redefining language keywords.
+The existing C integration fixture links the C++ core through the C facade.
+Backend/renderer selection remains the caller's responsibility; headless/Pixman
+selection stays test-only.
+
+Current additional tool/dependency versions:
+
+| Component | Tested version |
+|---|---|
+| C and C++ compiler | GCC `16.2.1+r23+gd564253eb6c8-1` |
+| Standard library | `gcc-libs 16.2.1+r23+gd564253eb6c8-1`; recorded `libstdc++.so.6.0.36` artifact |
+| GoogleTest | `1.18.0-1` |
+| clang-format / clang-tidy | `clang 23.1.5-1` |
+| GDB | `18.1-2` (version recorded; no interactive debugging needed) |
+
+Verification:
+
+- `tools/run-tests --build-dir build-cpp`: clean configure/build, baseline
+  collection and tests passed. **Five Meson entries passed, one hardware probe
+  skipped**, with no failures or blocked software checks.
+- `meson setup --reconfigure build-asan --buildtype=debug -Dcpp_std=c++23
+  -Dwrap_mode=nodownload -Db_sanitize=address,undefined`, followed by
+  `ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1
+  tools/run-tests --build-dir build-asan`: the same result, with no sanitizer
+  findings.
+- These runs include six GoogleTest cases, three real-client lifecycle rounds,
+  the retained 17 Python runner cases and six DRM-probe cases, plus formatting
+  and static analysis. Test-only linker wrapping simulates display/startup
+  failures and observes teardown order; it does not qualify hardware failures.
+- `meson setup build-default-check --buildtype=debug`: fresh configuration
+  selected C++23 and disabled dependency downloads without extra flags.
+- Both baseline reports contain configured C/C++ compiler observations, the C++
+  standard-library hash, GoogleTest/tool versions and check-configuration hashes,
+  with no collection errors.
+
+Normal run: `20261120T125935Z-3278cedc`; sanitizer run:
+`20261120T125939Z-2634efa4`. Evidence remains under ignored `test-results/`.
+Initial legacy-build compilation failed because Meson retained `cpp_std=none`;
+the runner now explicitly reconfigures it to C++23. Initial static analysis
+flagged ordinary C `fprintf`/`memset` calls under its blanket Annex K migration
+check. That specific check is excluded with a configuration comment because
+glibc does not supply those `_s` APIs; the other analyzer checks remain enabled.
+
+The C++ migration is implemented and software-verified in Arch WSL2. The
+full-VM, actual guest cursor observation, native hardware and session gates
+remain pending. **Part 2 is not started.**
+
 ## Reproduce and extend
 
 Use the commands in the root `README.md`. For a sanitizer build, use Meson's
@@ -132,6 +196,9 @@ meson setup build-asan --buildtype=debug -Db_sanitize=address,undefined
 meson compile -C build-asan
 meson test -C build-asan
 ```
+
+When reusing a pre-migration build directory, reconfigure it with
+`-Dcpp_std=c++23 -Dwrap_mode=nodownload`; the test runner does this automatically.
 
 To collect baseline inputs independently of the runner:
 

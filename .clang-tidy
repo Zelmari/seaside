@@ -1,0 +1,5 @@
+# glibc does not provide Annex K *_s functions; blanket warnings about ordinary
+# fprintf/memset are not actionable here. Keep data-flow and other API checks.
+Checks: '-*,clang-analyzer-*,-clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling,bugprone-use-after-move,bugprone-dangling-handle,bugprone-unused-raii,bugprone-exception-escape,bugprone-narrowing-conversions,performance-move-const-arg'
+WarningsAsErrors: '*'
+HeaderFilterRegex: '(^|/)(src|tests)/'

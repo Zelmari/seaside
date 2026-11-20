@@ -1,0 +1,47 @@
+#!/usr/bin/env python3
+"""Check migrated core formatting and analyze the actual project compile commands."""
+
+import argparse
+import json
+from pathlib import Path
+import subprocess
+import sys
+
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--build-dir', type=Path, default=ROOT / 'build')
+    args = parser.parse_args()
+    build_dir = args.build_dir.resolve()
+    formatted = sorted(
+        path for directory in ('src', 'tests/unit')
+        for path in (ROOT / directory).rglob('*')
+        if path.suffix in ('.c', '.h', '.cpp', '.hpp')
+    )
+    try:
+        commands = json.loads((build_dir / 'compile_commands.json').read_text())
+        sources = sorted({
+            (Path(row['directory']) / row['file']).resolve() for row in commands
+            if (Path(row['directory']) / row['file']).resolve().is_relative_to(ROOT)
+            and not (Path(row['directory']) / row['file']).resolve().is_relative_to(build_dir)
+        })
+        # Retained legacy C clients/probes keep their existing formatting; all
+        # translation units still receive static analysis, including those C files.
+        checks = [['clang-format', '--dry-run', '--Werror', *map(str, formatted)]]
+        checks.extend(['clang-tidy', '--quiet', '-p', str(build_dir), str(path)] for path in sources)
+        for command in checks:
+            print(f"Checking: {command[0]} {command[-1]}", flush=True)
+            result = subprocess.run(command, cwd=ROOT, timeout=60, check=False)
+            if result.returncode:
+                return 1
+    except (OSError, ValueError, KeyError, subprocess.TimeoutExpired) as error:
+        print(f'Code checks unavailable or failed: {error}', file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

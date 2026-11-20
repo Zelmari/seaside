@@ -18,10 +18,11 @@ from datetime import datetime, timezone
 ROOT = Path(__file__).resolve().parent.parent
 DEPENDENCIES = (
     'wlroots-0.20', 'wayland-server', 'wayland-client',
-    'wayland-protocols', 'libdrm', 'pixman-1',
+    'wayland-protocols', 'libdrm', 'pixman-1', 'gtest_main',
 )
 PACKAGES = (
-    'gcc', 'glibc', 'binutils', 'pkgconf', 'meson', 'ninja', 'python',
+    'gcc', 'gcc-libs', 'glibc', 'binutils', 'pkgconf', 'meson', 'ninja', 'python',
+    'gtest', 'clang', 'gdb',
     'wlroots0.20', 'wayland', 'wayland-protocols', 'libdrm', 'pixman',
     'libinput', 'libxkbcommon', 'mesa', 'seatd',
 )
@@ -112,7 +113,7 @@ def collect(build_dir: Path) -> dict:
     if not protocol_xml:
         errors.append('Cannot record installed protocol XML hashes')
 
-    source_files = [ROOT / 'meson.build']
+    source_files = [ROOT / name for name in ('meson.build', '.clang-format', '.clang-tidy', 'LICENSE')]
     for directory in ('src', 'tests', 'tools'):
         source_files.extend(
             path for path in (ROOT / directory).rglob('*')
@@ -133,18 +134,42 @@ def collect(build_dir: Path) -> dict:
             build_metadata[name] = {'error': str(error)}
             errors.append(f'Cannot record {name}')
 
+    compilers = {}
+    compiler_metadata = build_metadata.get('intro-compilers.json', {}).get('host', {})
+    for language in ('c', 'cpp'):
+        executable = compiler_metadata.get(language, {}).get('exelist')
+        if not executable:
+            errors.append(f'Cannot determine configured {language} compiler')
+            continue
+        observation = command([*executable, '--version'])
+        compilers[language] = observation
+        if observation['returncode'] != 0:
+            errors.append(f'Cannot record configured {language} compiler')
+
+    standard_library = []
+    cpp_executable = compiler_metadata.get('cpp', {}).get('exelist')
+    if cpp_executable:
+        library = command([*cpp_executable, '-print-file-name=libstdc++.so'])
+        path = Path(library.get('stdout', '').strip())
+        if library['returncode'] == 0 and path.is_absolute() and path.is_file():
+            standard_library.append(digest(path))
+        else:
+            errors.append('Cannot locate configured C++ standard library')
+
     observations = {
         'git_head': command(['git', 'rev-parse', 'HEAD']),
         'git_worktree': command(['git', 'status', '--porcelain=v1']),
-        'compiler': command(['cc', '--version']),
         'meson': command(['meson', '--version']),
         'ninja': command(['ninja', '--version']),
+        'clang-format': command(['clang-format', '--version']),
+        'clang-tidy': command(['clang-tidy', '--version']),
+        'gdb': command(['gdb', '--version']),
     }
     for name, observation in observations.items():
         if observation['returncode'] != 0:
             errors.append(f'Cannot record required {name} observation')
     repository_databases = [digest(path) for path in sorted(Path('/var/lib/pacman/sync').glob('*.db'))]
-    for artifact in api_files + protocol_xml + source_hashes + repository_databases:
+    for artifact in api_files + protocol_xml + source_hashes + repository_databases + standard_library:
         if artifact['sha256'] is None:
             errors.append(f"Cannot hash required artifact {artifact['path']}")
     for package, artifacts in package_archives.items():
@@ -168,7 +193,10 @@ def collect(build_dir: Path) -> dict:
             'head': observations['git_head'],
             'worktree': observations['git_worktree'],
         },
-        'compiler': observations['compiler'],
+        'compiler': compilers.get('c'),
+        'compilers': compilers,
+        'cpp_standard_library_artifacts': standard_library,
+        'development_tools': {name: observations[name] for name in ('clang-format', 'clang-tidy', 'gdb')},
         'meson': observations['meson'],
         'ninja': observations['ninja'],
         'dependency_versions': dependency_versions,

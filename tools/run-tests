@@ -504,6 +504,7 @@ def main(argv: list[str] | None = None, *, repository_root: Path | None = None) 
             if (build_dir / "meson-private/coredata.dat").is_file():
                 setup.append("--reconfigure")
             setup.extend([str(build_dir), str(root)])
+            setup.extend(["-Dcpp_std=c++23", "-Dwrap_mode=nodownload"])
             if "--reconfigure" not in setup:
                 setup.append("--buildtype=debug")
             configured = execute("configure", setup)

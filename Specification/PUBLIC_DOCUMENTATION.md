@@ -12,15 +12,16 @@ remain proposals until approved.
 
 ## Current implementation status
 
-The repository currently contains the original C/wlroots part 1 foundation:
-a private server lifecycle library, real-client headless fixture, bounded
-Python test runner and safe DRM inspection tool. See the
+The repository contains the part 1 foundation with a C++23 RAII lifecycle owner,
+a narrow C bridge for wlroots, GoogleTest ownership/failure cases, development
+code checks, a retained real-client C headless fixture, bounded Python test
+runner and safe DRM inspection tool. See the
 [README](../README.md) for current commands and the
 [part 1 handoff](PART1.md) for evidence and pending checks.
 
-The C++23 stack below is selected for development. Migration, later compositor
-features, an installable desktop session and native hardware qualification
-remain pending. Documentation must distinguish selected, implemented and
+The foundation uses C++23; later compositor features, an installable desktop
+session and native hardware qualification remain pending. Documentation must
+distinguish selected, implemented and
 verified behavior. WSL/headless results do not qualify physical AMD outputs
 or establish input-to-screen latency.
 
@@ -43,8 +44,8 @@ or establish input-to-screen latency.
 | Error handling | `std::expected` for recoverable failures, RAII cleanup, exceptions contained at C callback and worker boundaries | §2.2 |
 | Development tools | clang-format, clang-tidy, GDB and AddressSanitizer/UndefinedBehaviorSanitizer test builds; GCC remains primary | §14.3 |
 
-The exact compatible versions and tool configurations must be qualified during
-implementation. The specification retains library-specific constraints,
+The [part 1 handoff](PART1.md) records qualified foundation versions and commands;
+later feature libraries still need integration qualification. The specification retains library-specific constraints,
 including the initial toml++ release to qualify. The portal backend/chooser
 and font baseline still need resolution and evidence.
 
@@ -61,9 +62,10 @@ and font baseline still need resolution and evidence.
   coherent local commits and genuine human attribution. Agents do not add
   themselves as contributors. External Git actions need task authorization.
 
-Formatting rules, static-analysis configuration and exact tool versions are
-still to be established during implementation; selecting tools is not evidence
-that their checks already run.
+The committed formatting/static-analysis configurations and `tools/check-code`
+now run through Meson. Formatting covers the migrated core and new unit fixtures;
+all compiled project translation units receive static analysis. GCC remains the
+build compiler. The part 1 handoff records tool versions and actual results.
 
 ## Public documentation work to carry forward
 

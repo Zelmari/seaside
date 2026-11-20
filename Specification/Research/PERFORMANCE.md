@@ -21,10 +21,10 @@ It is not a promise of lower latency or a request for additional functionality.
 - Bounded, opt-in diagnostics under §12.1; ordinary operation does not acquire
   continuous performance tracing or an overlay.
 
-The current implementation is the original C/headless part 1 prototype.
-Its Arch WSL2 software results do not measure a C++23 compositor, native AMD
-presentation or physical input-to-screen response. No comparative latency
-results are available yet.
+The part 1 lifecycle owner now uses C++23 with a thin C bridge to wlroots; the
+real-client headless fixture and probes retain C. Arch WSL2 software checks do
+not measure a complete desktop compositor, native AMD presentation or physical
+input-to-screen response. No comparative latency results are available yet.
 
 ## Measurements needed first
 
