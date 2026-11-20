@@ -1,4 +1,5 @@
 #include "session_bus.hpp"
+#include "session_systemd.hpp"
 #include "test_directory.hpp"
 
 #include <algorithm>
@@ -12,10 +13,12 @@
 #include <functional>
 #include <gtest/gtest.h>
 #include <memory>
+#include <optional>
 #include <poll.h>
 #include <spawn.h>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <sys/eventfd.h>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -32,7 +35,10 @@ namespace {
 using namespace std::chrono_literals;
 using seaside::BusError;
 using seaside::BusReply;
+using seaside::ServiceFailure;
+using seaside::ServiceReport;
 using seaside::SessionBus;
+using seaside::SystemdUserProbe;
 bool fail_bus_wakes = false;
 bool fail_bus_timer_updates = false;
 
@@ -251,6 +257,169 @@ class SessionBusTest : public testing::Test {
         held.clear();
     }
 };
+
+class SystemdUserProbeTest : public SessionBusTest {
+  protected:
+    enum class VersionReply { valid, wrong_type, access_denied, held };
+    VersionReply version_reply = VersionReply::valid;
+    unsigned version_requests = 0;
+    bool manager_named = false;
+
+    bool start_manager() {
+        if (!start_service()) {
+            return false;
+        }
+        auto *handle = service->native_handle();
+        if (sd_bus_add_filter(handle, nullptr, get_version, this) < 0 ||
+            sd_bus_request_name_async(handle, nullptr, "org.freedesktop.systemd1", 0, name_acquired,
+                                      this) < 0) {
+            return false;
+        }
+        return pump_until([&] { return manager_named; });
+    }
+
+    static int name_acquired(sd_bus_message *message, void *data, sd_bus_error *) noexcept {
+        std::uint32_t result = 0;
+        static_cast<SystemdUserProbeTest *>(data)->manager_named =
+            sd_bus_message_read(message, "u", &result) > 0 && result == 1;
+        return 1;
+    }
+
+    static int get_version(sd_bus_message *message, void *data, sd_bus_error *) {
+        if (sd_bus_message_is_method_call(message, "org.freedesktop.DBus.Properties", "Get") <= 0) {
+            return 0;
+        }
+        auto &test = *static_cast<SystemdUserProbeTest *>(data);
+        ++test.version_requests;
+        EXPECT_STREQ(sd_bus_message_get_path(message), "/org/freedesktop/systemd1");
+        EXPECT_EQ(sd_bus_message_get_auto_start(message), 0);
+        EXPECT_EQ(sd_bus_message_get_allow_interactive_authorization(message), 0);
+        const char *interface = nullptr;
+        const char *property = nullptr;
+        if (sd_bus_message_read(message, "ss", &interface, &property) <= 0) {
+            return -EINVAL;
+        }
+        EXPECT_STREQ(interface, "org.freedesktop.systemd1.Manager");
+        EXPECT_STREQ(property, "Version");
+        switch (test.version_reply) {
+        case VersionReply::valid:
+            return sd_bus_reply_method_return(message, "v", "s", "262-test");
+        case VersionReply::wrong_type:
+            return sd_bus_reply_method_return(message, "v", "u", 262U);
+        case VersionReply::access_denied:
+            return sd_bus_reply_method_errorf(message, SD_BUS_ERROR_ACCESS_DENIED, "test denial");
+        case VersionReply::held:
+            return hold(message, static_cast<SessionBusTest *>(&test), nullptr);
+        }
+        return -EINVAL;
+    }
+};
+
+TEST_F(SystemdUserProbeTest, ReadsTheManagerAndChecksRealBusCredentialsAsynchronously) {
+    ASSERT_TRUE(start_manager());
+    auto connected = SessionBus::connect(loop, address);
+    ASSERT_TRUE(connected);
+    bus = std::move(*connected);
+    EXPECT_FALSE(bus->ready());
+    std::optional<ServiceReport> outcome;
+    std::unique_ptr<SystemdUserProbe> probe;
+    auto started = SystemdUserProbe::start(*bus, geteuid(), [&](ServiceReport result) {
+        outcome = result;
+        probe.reset();
+    });
+    ASSERT_TRUE(started);
+    probe = std::move(*started);
+    EXPECT_FALSE(outcome);
+    ASSERT_TRUE(pump_until([&] { return outcome.has_value(); }));
+    EXPECT_EQ(outcome->failure, ServiceFailure::none);
+    EXPECT_FALSE(probe);
+    EXPECT_EQ(version_requests, 1U);
+    EXPECT_EQ(bus->pending(), 0U);
+}
+
+TEST_F(SystemdUserProbeTest, RejectsAManagerOwnedByAnotherUid) {
+    ASSERT_TRUE(connect());
+    ASSERT_TRUE(start_manager());
+    std::optional<ServiceReport> outcome;
+    const uid_t other_uid = geteuid() == 0 ? 1 : 0;
+    auto probe =
+        SystemdUserProbe::start(*bus, other_uid, [&](ServiceReport result) { outcome = result; });
+    ASSERT_TRUE(probe);
+    ASSERT_TRUE(pump_until([&] { return outcome.has_value(); }));
+    EXPECT_EQ(outcome->failure, ServiceFailure::wrong_environment);
+    EXPECT_EQ(version_requests, 1U);
+}
+
+TEST_F(SystemdUserProbeTest, ReportsAMissingManager) {
+    ASSERT_TRUE(connect());
+    std::optional<ServiceReport> outcome;
+    auto probe =
+        SystemdUserProbe::start(*bus, geteuid(), [&](ServiceReport result) { outcome = result; });
+    ASSERT_TRUE(probe);
+    ASSERT_TRUE(pump_until([&] { return outcome.has_value(); }));
+    EXPECT_EQ(outcome->failure, ServiceFailure::missing);
+}
+
+TEST_F(SystemdUserProbeTest, RejectsAnIncompatibleVersionAndDistinguishesAccessDenial) {
+    ASSERT_TRUE(connect());
+    ASSERT_TRUE(start_manager());
+    std::optional<ServiceReport> outcome;
+    version_reply = VersionReply::wrong_type;
+    auto capture = [&](ServiceReport result) { outcome = result; };
+    auto incompatible = SystemdUserProbe::start(*bus, geteuid(), capture);
+    ASSERT_TRUE(incompatible);
+    ASSERT_TRUE(pump_until([&] { return outcome.has_value(); }));
+    EXPECT_EQ(outcome->failure, ServiceFailure::incompatible);
+
+    version_reply = VersionReply::access_denied;
+    outcome.reset();
+    auto denied = SystemdUserProbe::start(*bus, geteuid(), capture);
+    ASSERT_TRUE(denied);
+    ASSERT_TRUE(pump_until([&] { return outcome.has_value(); }));
+    EXPECT_EQ(outcome->failure, ServiceFailure::activation_failed);
+}
+
+TEST_F(SystemdUserProbeTest, TimesOutAndSilentlyCancelsAnUnansweredProbe) {
+    ASSERT_TRUE(connect());
+    ASSERT_TRUE(start_manager());
+    version_reply = VersionReply::held;
+
+    std::optional<ServiceReport> outcome;
+    auto capture = [&](ServiceReport result) { outcome = result; };
+    auto timed = SystemdUserProbe::start(*bus, geteuid(), capture, 30ms);
+    ASSERT_TRUE(timed);
+    ASSERT_TRUE(pump_until([&] { return outcome.has_value(); }));
+    EXPECT_EQ(outcome->failure, ServiceFailure::timeout);
+    EXPECT_EQ(bus->pending(), 0U);
+    release_held();
+
+    outcome.reset();
+    auto cancelled = SystemdUserProbe::start(*bus, geteuid(), capture);
+    ASSERT_TRUE(cancelled);
+    ASSERT_TRUE(pump_until([&] { return held.size() == 1; }));
+    cancelled->reset();
+    EXPECT_EQ(bus->pending(), 0U);
+    release_held();
+    bool ping_completed = false;
+    ASSERT_TRUE(request("Ping", [&](const BusReply &) { ping_completed = true; }));
+    ASSERT_TRUE(pump_until([&] { return ping_completed; }));
+    EXPECT_FALSE(outcome);
+}
+
+TEST_F(SystemdUserProbeTest, ReportsLiveBusDisconnect) {
+    ASSERT_TRUE(connect());
+    ASSERT_TRUE(start_manager());
+    version_reply = VersionReply::held;
+    std::optional<ServiceReport> outcome;
+    auto probe =
+        SystemdUserProbe::start(*bus, geteuid(), [&](ServiceReport result) { outcome = result; });
+    ASSERT_TRUE(probe);
+    ASSERT_TRUE(pump_until([&] { return held.size() == 1; }));
+    daemon->stop();
+    ASSERT_TRUE(pump_until([&] { return outcome.has_value(); }));
+    EXPECT_EQ(outcome->failure, ServiceFailure::disconnected);
+    EXPECT_EQ(bus->pending(), 0U);
+}
 
 TEST_F(SessionBusTest, RejectsInvalidSetupWithoutStartingAConnection) {
     expect_error(SessionBus::connect(nullptr, address), BusError::invalid_arguments);

@@ -110,10 +110,18 @@ config_foundation = static_library(
 
 session_foundation = static_library(
   'seaside-session-foundation',
-  ['src/session_bus.cpp', 'src/session_pipewire.cpp', 'src/startup_gate.cpp'],
+  ['src/session_bus.cpp', 'src/session_pipewire.cpp', 'src/session_systemd.cpp',
+   'src/startup_gate.cpp'],
   include_directories: include_directories('src'),
   dependencies: [systemd, pipewire, wayland_server, threads],
   install: false,
+)
+
+executable(
+  'seaside-session-check', 'tests/integration/session_services.cpp',
+  include_directories: include_directories('src'),
+  dependencies: [systemd, pipewire, wayland_server, threads],
+  link_with: session_foundation, install: false,
 )
 
 startup_gate_tests = executable(

@@ -7,8 +7,9 @@ qualification remain pending. The keyboard and terminal trial passed both the
 offscreen software checks and the VirtualBox run.
 
 This implements the bounded [Part 3 plan](PART3_PLAN.md) against specification
-§§2.1–2.2, 3–3.1, 12.2b and 14. Work stops at the first Arch-VM qualification
-boundary. There is no installed `seaside` TTY entrypoint yet.
+§§2.1–2.2, 3–3.1, 12.2b and 14. The checks below cover the headless milestone
+and the subsequent Arch VM checkpoints. The TTY entrypoint is a development
+fixture.
 
 ## Implemented mechanisms
 
@@ -17,8 +18,9 @@ boundary. There is no installed `seaside` TTY entrypoint yet.
 | `server.hpp/.cpp` | Display-owned socket publication, explicit shutdown-signal ownership, live libwayland dispatch and clean termination; not a session-ready declaration |
 | `scene.hpp/.cpp`, `scene_bridge.h/.c` | Minimal XDG configure/map/unmap/destroy ownership and wlroots scene/output frame integration; no window-manager, placement or seat policy |
 | `session_bus.hpp/.cpp` | Direct asynchronous sd-bus connection/calls, changing FD interests, monotonic deadlines, bounded pending work/dispatch, cancellation and disconnect handling |
+| `session_systemd.hpp/.cpp` | Read-only user-manager version and bus credentials check with one deadline across both calls |
 | `session_pipewire.hpp/.cpp` | Official libpipewire core sync/done connection check integrated with the Wayland loop; no playback, capture, mixer or routing |
-| `startup_gate.hpp/.cpp` | Mandatory systemd-user, PipeWire, portal-frontend and capture-backend result coordination; not implementations of those service-specific checks |
+| `startup_gate.hpp/.cpp` | Mandatory systemd-user, PipeWire, portal-frontend and capture-backend result coordination |
 
 The minimal scene leaves initial window sizing to the client and advertises no
 window-management capabilities. Popup placement/grabs, seat/input, focus and
@@ -43,10 +45,11 @@ notify synchronously and exceed the normal per-turn budget. Rejected new calls
 receive no callback. Other Wayland sources and safe owner destruction remain
 covered by fault tests.
 
-The PipeWire adapter connects to the normal remote unless an internal explicit
-remote is supplied. Only a matching `PW_ID_CORE` sync sequence establishes the
-roundtrip result. Resource construction can load client configuration/modules;
-protocol communication uses nonblocking loop iterations. No private PipeWire
+The PipeWire adapter uses a native socket and PipeWire's normal remote
+selection. Fixtures can supply a specific remote. Only a matching
+`PW_ID_CORE` sync sequence establishes the roundtrip result. Resource
+construction can load client configuration and modules. Protocol
+communication uses nonblocking loop iterations. No private PipeWire
 server is created by production code: private servers belong exclusively to
 tests. Delivery is separate from PipeWire dispatch so callbacks can destroy
 their probes safely.
@@ -74,6 +77,9 @@ itself has an asynchronous failure-delivery fallback.
 - D-Bus cases use an isolated real `dbus-daemon`, including remote errors,
   stalled authentication, overdue replies, cancellation, disconnect, reentry,
   callback destruction and event-loop fairness.
+- User-manager cases exercise the version and credentials exchange with a
+  controlled bus peer, including missing service, invalid replies, wrong UID,
+  and cancellation.
 - PipeWire cases use isolated real servers and controlled silent/disconnected
   peers, covering real roundtrips, deadlines, cancellation, failure delivery and
   lifetime/resource cleanup. A successful exchange does not establish working
@@ -239,11 +245,30 @@ probe reported one hardware skip. The report is
 also passed with ASan/UBSan and leak detection using
 `meson test -C build-asan --suite part3 --print-errorlogs`.
 
-The following startup milestone needs a live Wayland socket, session-owned
-activation environment, and the genuine capture globals expected by the
-selected portal backend. Test real service activation and failure-to-TTY in
-the dedicated graphical guest. Qualify VT switching and session isolation with
-the real session lifecycle.
+### Core session services
+
+Run `ninja -C build && build/seaside-session-check` from the existing checkout
+in the Arch guest, logged in as the user who will run Seaside. Use the
+normal login environment. The uninstalled fixture connects to the same user's
+login bus, verifies the responding systemd manager, and waits for a matching
+core reply from the PipeWire remote. It can exercise ordinary PipeWire socket
+activation. Record the final `session core` line. Both services must report
+`PASS(0)` for the command to succeed.
+
+Arch WSL2 returned `systemd=PASS(0)` using the login bus and `pipewire=PASS(0)`
+using a private native PipeWire server. A missing socket, a silent server and
+a daemon-mode override produced distinct failures in both the normal and
+ASan/UBSan builds. The VM run covers the guest's regular PipeWire endpoint.
+
+The regression harness passed 15 entries and all 148 GoogleTest cases, with
+the DRM discovery probe skipped in WSL. The report is
+`test-results/20261120T181715Z-554be2dd/summary.txt`. All eight Part 3 entries
+also passed with ASan/UBSan and leak detection.
+
+The full startup trial needs a live Wayland socket, session-owned activation
+environment, and the genuine capture globals expected by the selected portal
+backend. Test portal routing and startup failure-to-TTY in the dedicated
+graphical guest. Qualify VT switching and isolation with the session lifecycle.
 
 The portal candidate (`xdg-desktop-portal-wlr` 0.8.4) requests embedded cursors
 by default. The wlroots 0.20.2 output capture helper responds by switching the
