@@ -7,19 +7,23 @@ import argparse
 from collections import Counter
 import ctypes
 from datetime import datetime, timezone
+import fnmatch
 import json
 import math
 import os
 from pathlib import Path
 import platform
+import re
 import selectors
 import shlex
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
 import time
 import uuid
+import xml.etree.ElementTree as ET
 
 
 class InterruptedRun(BaseException):
@@ -325,23 +329,272 @@ def environment_facts() -> dict:
     }
 
 
-def parse_meson_results(path: Path, run_dir: Path, log_limit: int) -> list[dict]:
+def open_regular_result(path: Path):
+    descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK)
+    source = os.fdopen(descriptor, "rb")
+    if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+        source.close()
+        raise ValueError(f"Result must be a regular file: {path.name}")
+    return source
+
+
+def read_bounded(path: Path, limit: int) -> bytes:
+    with open_regular_result(path) as source:
+        value = source.read(limit + 1)
+    if len(value) > limit:
+        raise ValueError(f"Result file exceeds {limit} bytes: {path.name}")
+    return value
+
+
+def load_test_manifest(build_dir: Path, suites: list[str]) -> list[dict]:
+    rows = json.loads(read_bounded(build_dir / "meson-info/intro-tests.json", 2 * 1024 * 1024))
+    if not isinstance(rows, list) or not rows or len(rows) > 10000:
+        raise ValueError("Meson test discovery must produce a nonempty bounded array")
+    selected = []
+    names = set()
+    gtest_names = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ValueError("Invalid discovered Meson test")
+        name, command, env, membership = (row.get(key) for key in ("name", "cmd", "env", "suite"))
+        if (not isinstance(name, str) or not name or name in names
+                or not isinstance(command, list) or not command
+                or any(not isinstance(arg, str) for arg in command)
+                or not isinstance(env, dict) or any(not isinstance(key, str) or not isinstance(value, str)
+                                                     for key, value in env.items())
+                or not isinstance(membership, list)
+                or any(not isinstance(suite, str) for suite in membership)):
+            raise ValueError("Invalid or duplicate discovered Meson test")
+        names.add(name)
+        if suites and not any(
+            fnmatch.fnmatchcase(value, requested) or fnmatch.fnmatchcase(value.split(":", 1)[-1], requested)
+            for requested in suites for value in membership
+        ):
+            continue
+        part = int(env.get("SEASIDE_TEST_PART", "1"))
+        if not 1 <= part <= 10:
+            raise ValueError("Invalid test part marker")
+        requirements = env.get("SEASIDE_REQUIREMENTS", "12.2b")
+        if not isinstance(requirements, str) or any(not value.strip() for value in requirements.split(",")):
+            raise ValueError("Invalid test requirement marker")
+        if env.get("SEASIDE_GTEST", "0") not in ("0", "1"):
+            raise ValueError("Invalid GoogleTest marker")
+        gtest_name = Path(command[0]).name if env.get("SEASIDE_GTEST") == "1" else None
+        if gtest_name:
+            if any(key.startswith("GTEST_") for key in env) or any(
+                argument.startswith("--gtest_") for argument in command[1:]
+            ):
+                raise ValueError("GoogleTest filters/output/sharding flags must not override run-owned discovery")
+            if gtest_name in gtest_names:
+                raise ValueError("GoogleTest executables need unique XML output basenames")
+            gtest_names.add(gtest_name)
+        working_directory = row.get("workdir") or str(build_dir)
+        if not isinstance(working_directory, str):
+            raise ValueError("Invalid discovered test working directory")
+        selected.append({
+            "name": name, "part": part, "requirement_sections": [value.strip() for value in requirements.split(",")],
+            "command": command, "gtest_name": gtest_name,
+            "environment": env, "working_directory": working_directory,
+        })
+    if not selected:
+        raise ValueError("No tests match the requested suites; an empty discovery is not a pass")
+    return selected
+
+
+def gtest_document(path: Path):
+    # Decode before looking for declarations. A byte-pattern check alone lets
+    # UTF-16/32 documents hide entity declarations behind embedded zero bytes.
+    document = read_bounded(path, 2 * 1024 * 1024).decode("utf-8-sig")
+    declaration = re.match(r'\s*<\?xml\b[^?]*\?>', document)
+    if declaration:
+        encoding = re.search(r'''\bencoding\s*=\s*(['"])(.*?)\1''', declaration.group())
+        if encoding and encoding.group(2).lower() not in ("utf-8", "utf8"):
+            raise ValueError("GoogleTest XML must use UTF-8")
+    if "\x00" in document or "<!DOCTYPE" in document.upper() or "<!ENTITY" in document.upper():
+        raise ValueError("GoogleTest XML must not contain document types/entities")
+    root = ET.fromstring(document)
+    if root.tag != "testsuites":
+        raise ValueError("Invalid GoogleTest XML root")
+    return root
+
+
+def disabled_gtest_name(classname: str, name: str) -> bool:
+    return any(fnmatch.fnmatchcase(value, pattern) for value in (classname, name)
+               for pattern in ("DISABLED_*", "*/DISABLED_*"))
+
+
+def validate_gtest_counts(node, counts: dict, *, require_tests=False) -> None:
+    for attribute, observed in counts.items():
+        if attribute in node.attrib:
+            if int(node.get(attribute)) != observed:
+                raise ValueError(f"Inconsistent GoogleTest {attribute} count")
+        elif attribute == "tests" and require_tests:
+            raise ValueError("Missing GoogleTest tests count")
+
+
+def discover_gtest_cases(path: Path) -> dict[str, bool]:
+    root = gtest_document(path)
+    cases = {}
+    for suite in root.findall("testsuite"):
+        classname = suite.get("name")
+        entries = suite.findall("testcase")
+        validate_gtest_counts(suite, {"tests": len(entries)})
+        for entry in entries:
+            name = entry.get("name")
+            if not classname or not name or len(classname) + len(name) > 2048:
+                raise ValueError("Invalid discovered GoogleTest case identity")
+            identity = f"{classname}.{name}"
+            if identity in cases:
+                raise ValueError("Duplicate discovered GoogleTest case identity")
+            cases[identity] = disabled_gtest_name(classname, name)
+    if not cases or len(cases) > 10000:
+        raise ValueError("GoogleTest case discovery must be nonempty and bounded")
+    validate_gtest_counts(root, {"tests": len(cases)}, require_tests=True)
+    return cases
+
+
+def parse_gtest_results(path: Path, parent: dict, log_limit: int,
+                        expected_cases: dict[str, bool] | None = None) -> list[dict]:
+    root = gtest_document(path)
+    entries = root.findall("./testsuite/testcase")
+    if not entries or len(entries) > 10000 or int(root.get("tests", "-1")) != len(entries):
+        raise ValueError("GoogleTest case discovery/count is empty or inconsistent")
+    cases = []
+    names = set()
+    totals = Counter()
+    for entry in entries:
+        name, classname = entry.get("name"), entry.get("classname")
+        if not name or not classname or len(name) + len(classname) > 2048:
+            raise ValueError("Invalid GoogleTest case identity")
+        identity = f"{classname}.{name}"
+        if identity in names:
+            raise ValueError("Duplicate GoogleTest case identity")
+        names.add(identity)
+        failures = entry.findall("failure")
+        errors = entry.findall("error")
+        skipped = entry.findall("skipped")
+        state, outcome = entry.get("status"), entry.get("result")
+        if state not in ("run", "notrun") or outcome not in ("completed", "suppressed", "skipped"):
+            raise ValueError("Invalid GoogleTest case outcome")
+        if (state == "notrun") != (outcome == "suppressed"):
+            raise ValueError("Inconsistent GoogleTest case execution state")
+        if expected_cases is not None and (identity not in expected_cases or
+                                           (state == "notrun" and not expected_cases[identity])):
+            raise ValueError("Unexpected or suppressed active GoogleTest case")
+        status = "fail" if failures or errors else "skip" if skipped or state == "notrun" or outcome != "completed" else "pass"
+        duration = float(entry.get("time", "0"))
+        if not math.isfinite(duration) or duration < 0:
+            raise ValueError("Invalid GoogleTest case duration")
+        diagnostic = BoundedOutput(min(log_limit, 4096))
+        for node in [*failures, *errors, *skipped]:
+            diagnostic.append((node.get("message", "") + "\n" + (node.text or "")).encode("utf-8", errors="replace"))
+        cases.append({
+            "test_id": f"{parent['test_id']}::{identity}", "case_name": identity,
+            "part": parent["part"], "requirement_sections": parent["requirement_sections"],
+            "status": status, "duration_seconds": duration, "log": parent["log"],
+            "reason": diagnostic.bytes().decode("utf-8", errors="replace") if diagnostic.total else
+                      "Disabled or skipped GoogleTest case" if status == "skip" else None,
+        })
+    for suite in root.findall("testsuite"):
+        suite_counts = Counter(tests=0, failures=0, errors=0, disabled=0, skipped=0)
+        for entry in suite.findall("testcase"):
+            suite_counts["tests"] += 1
+            suite_counts["failures"] += bool(entry.findall("failure"))
+            suite_counts["errors"] += bool(entry.findall("error"))
+            suite_counts["disabled"] += disabled_gtest_name(entry.get("classname", ""), entry.get("name", ""))
+            suite_counts["skipped"] += bool(entry.findall("skipped")) or entry.get("result") == "skipped"
+        validate_gtest_counts(suite, suite_counts)
+        totals.update(suite_counts)
+    validate_gtest_counts(root, totals, require_tests=True)
+    if expected_cases is not None and names != set(expected_cases):
+        raise ValueError("Executed GoogleTest case identities differ from independent discovery")
+    return cases
+
+
+def collection_failure(test_id: str, reason: str, metadata: dict | None = None) -> dict:
+    metadata = metadata or {}
+    return {
+        "test_id": test_id, "part": metadata.get("part", 0),
+        "requirement_sections": metadata.get("requirement_sections", ["12.2b"]),
+        "status": "blocked", "reason": reason, "log": None,
+    }
+
+
+def prepare_gtest_discovery(manifest: list[dict], run_dir: Path, child_env: dict,
+                            execute) -> list[dict]:
+    directory = run_dir / "gtest-discovery"
+    directory.mkdir(mode=0o700)
+    for index, item in enumerate(manifest):
+        if not item.get("gtest_name"):
+            continue
+        path = directory / (item["gtest_name"] + ".xml")
+        discovery_env = child_env.copy()
+        discovery_env.update(item.get("environment", {}))
+        discovery_env["GTEST_OUTPUT"] = "xml:" + str(path)
+        observed = execute(f"discover-gtest-{index + 1}",
+                           [*item["command"], "--gtest_list_tests"],
+                           env_override=discovery_env,
+                           cwd_override=Path(item.get("working_directory", run_dir)))
+        if observed["status"] != "pass":
+            return [collection_failure(item["name"] + "-case-discovery",
+                                       "Independent GoogleTest discovery did not pass", item)]
+        try:
+            item["expected_cases"] = discover_gtest_cases(path)
+        except (OSError, ValueError, UnicodeError, ET.ParseError) as error:
+            return [collection_failure(item["name"] + "-case-discovery", str(error), item)]
+    return []
+
+
+def parse_meson_results(path: Path, run_dir: Path, log_limit: int,
+                        expected_tests: list[dict] | None = None) -> list[dict]:
     results = []
+    discovered = set()
+    matched = set()
+    total_bytes = 0
     try:
-        with path.open("rb") as source:
+        with open_regular_result(path) as source:
             while line := source.readline(2 * 1024 * 1024 + 1):
-                if len(line) > 2 * 1024 * 1024:
-                    raise ValueError("Meson result record exceeds 2 MiB")
+                total_bytes += len(line)
+                if len(line) > 2 * 1024 * 1024 or len(results) >= 10000 or total_bytes > 32 * 1024 * 1024:
+                    raise ValueError("Meson results exceed byte/record/count limits")
                 row = json.loads(line)
-                if not isinstance(row, dict) or not isinstance(row.get("name"), str):
+                if not isinstance(row, dict) or not isinstance(row.get("name"), str) or not row["name"]:
                     raise ValueError("Invalid Meson test-result object")
+                if row["name"] in discovered:
+                    raise ValueError("Duplicate Meson test result")
+                discovered.add(row["name"])
+                metadata = None
+                if expected_tests is not None:
+                    matches = [item for item in expected_tests
+                               if row["name"] == item["name"] or row["name"].endswith(":" + item["name"])]
+                    if len(matches) != 1:
+                        raise ValueError("Meson result does not match exactly one discovered test")
+                    metadata = matches[0]
+                    if metadata["name"] in matched:
+                        raise ValueError("Duplicate result for discovered Meson test")
+                    matched.add(metadata["name"])
+                metadata = metadata or {"part": 1, "requirement_sections": ["12.2b"]}
+                duration = row.get("duration", 0)
+                returncode = row.get("returncode")
+                command = row.get("command")
+                if (not isinstance(duration, (int, float)) or isinstance(duration, bool)
+                        or not math.isfinite(duration) or duration < 0
+                        or (returncode is not None and (not isinstance(returncode, int) or isinstance(returncode, bool)))
+                        or (command is not None and (not isinstance(command, list) or not command
+                                                    or any(not isinstance(arg, str) for arg in command)))):
+                    raise ValueError("Invalid Meson execution metadata")
                 outcome = row.get("result")
+                if not isinstance(outcome, str):
+                    raise ValueError("Invalid Meson outcome")
                 status = {
                     "OK": "pass", "EXPECTEDFAIL": "pass",
                     "SKIP": "skip", "IGNORED": "skip", "INTERRUPT": "blocked",
                     "FAIL": "fail", "ERROR": "fail", "TIMEOUT": "fail",
                     "UNEXPECTEDPASS": "fail",
                 }.get(outcome, "blocked")
+                if returncode is not None and ((outcome == "OK" and returncode != 0) or
+                                                (outcome == "EXPECTEDFAIL" and returncode == 0)):
+                    raise ValueError("Meson outcome disagrees with recorded process exit status")
                 log = BoundedOutput(log_limit)
                 for field in ("stdout", "stderr"):
                     value = row.get(field, "")
@@ -350,49 +603,65 @@ def parse_meson_results(path: Path, run_dir: Path, log_limit: int) -> list[dict]
                     log.append(value.encode("utf-8", errors="replace"))
                 log_path = run_dir / f"test-{len(results) + 1:03d}.log"
                 log_path.write_bytes(log.bytes())
-                results.append({
-                    "test_id": row["name"],
-                    "requirement_sections": ["12.2b", "14 part 1"],
-                    "status": status,
-                    "meson_result": outcome,
-                    "command": row.get("command"),
-                    "returncode": row.get("returncode"),
-                    "duration_seconds": row.get("duration"),
-                    "log": str(log_path),
+                result = {
+                    "test_id": row["name"], "part": metadata["part"],
+                    "requirement_sections": metadata["requirement_sections"],
+                    "status": status, "meson_result": outcome,
+                    "command": row.get("command"), "returncode": row.get("returncode"),
+                    "duration_seconds": row.get("duration"), "log": str(log_path),
                     "log_truncated": log.total > log_limit,
-                    "reason": log.bytes().decode("utf-8", errors="replace")[:512]
-                              if status != "pass" else None,
-                })
+                    "reason": log.bytes().decode("utf-8", errors="replace")[:512] if status != "pass" else None,
+                }
+                if metadata.get("gtest_name"):
+                    try:
+                        result["cases"] = parse_gtest_results(
+                            run_dir / "gtest" / (metadata["gtest_name"] + ".xml"), result, log_limit,
+                            metadata.get("expected_cases"))
+                        case_states = {case["status"] for case in result["cases"]}
+                        if "fail" in case_states:
+                            result["status"] = "fail"
+                        elif "pass" not in case_states and status == "pass":
+                            result["status"] = "blocked"
+                            result["reason"] = "GoogleTest executed no passing cases"
+                    except (OSError, ValueError, UnicodeError, ET.ParseError) as error:
+                        result["cases"] = []
+                        result["collection_error"] = str(error)
+                        result["reason"] = f"GoogleTest case collection failed: {error}"
+                        if status != "fail":
+                            result["status"] = "blocked"
+                results.append(result)
     except (OSError, ValueError, UnicodeError) as error:
-        results.append({
-            "test_id": "meson-result-collection",
-            "requirement_sections": ["12.2b", "14 part 1"],
-            "status": "blocked",
-            "reason": str(error),
-            "log": None,
-        })
+        results.append(collection_failure("meson-result-collection", str(error)))
+    if expected_tests is not None:
+        for item in expected_tests:
+            if not any(name == item["name"] or name.endswith(":" + item["name"]) for name in discovered):
+                results.append(collection_failure(item["name"], "Discovered test produced no Meson result", item))
     if not results:
-        results.append({
-            "test_id": "meson-test-discovery",
-            "requirement_sections": ["12.2b", "14 part 1"],
-            "status": "blocked",
-            "reason": "No Meson test results were produced; an empty suite is not a pass",
-            "log": None,
-        })
+        results.append(collection_failure("meson-test-discovery", "No Meson test results were produced; an empty suite is not a pass"))
     return results
 
 
 def retain_meson_logs(run_dir: Path, log_limit: int) -> list[dict]:
     artifacts = []
-    for suffix in ("json", "txt", "junit.xml"):
-        path = run_dir / f"meson.{suffix}"
-        if not path.exists():
+    paths = [run_dir / f"meson.{suffix}" for suffix in ("json", "txt", "junit.xml")]
+    paths.extend(sorted((run_dir / "gtest").glob("*.xml")))
+    paths.extend(sorted((run_dir / "gtest-discovery").glob("*.xml")))
+    for path in paths:
+        if not path.exists() and not path.is_symlink():
             continue
-        output = BoundedOutput(log_limit)
-        with path.open("rb") as source:
-            while chunk := source.read(65536):
-                output.append(chunk)
-        truncated = output.total > log_limit
+        try:
+            with open_regular_result(path) as source:
+                size = os.fstat(source.fileno()).st_size
+                output = BoundedOutput(log_limit)
+                output.append(source.read(log_limit))
+                if size > log_limit:
+                    source.seek(max(0, size - log_limit))
+                    output.append(source.read(log_limit))
+                    output.total = size
+        except (OSError, ValueError) as error:
+            artifacts.append({"path": str(path), "error": str(error), "truncated": False})
+            continue
+        truncated = size > log_limit
         if truncated:
             # A truncated JSON/XML file is evidence, not a parseable result file.
             retained = path.with_name(path.name + ".truncated.log")
@@ -400,7 +669,7 @@ def retain_meson_logs(run_dir: Path, log_limit: int) -> list[dict]:
             path.unlink()
         else:
             retained = path
-        artifacts.append({"path": str(retained), "bytes": output.total, "truncated": truncated})
+        artifacts.append({"path": str(retained), "bytes": size, "truncated": truncated})
     return artifacts
 
 
@@ -408,6 +677,8 @@ def write_report(run_dir: Path, report: dict) -> None:
     report["counts"] = {status: 0 for status in ("pass", "fail", "skip", "blocked")}
     report["counts"].update(Counter(row["status"] for row in report["tests"]))
     command_states = {row["status"] for row in report["commands"]}
+    if any(row.get("cleanup_error") for row in report["commands"]):
+        command_states.add("fail")
     test_states = {row["status"] for row in report["tests"]}
     if "fail" in command_states or "fail" in test_states:
         report["status"] = "fail"
@@ -416,10 +687,30 @@ def write_report(run_dir: Path, report: dict) -> None:
     else:
         report["status"] = "pass"
     report["software_status"] = report["status"]
+    parts = sorted(set(report.get("parts", [])) | {row.get("part", 1) for row in report["tests"] if row.get("part", 1) > 0})
+    report["parts"] = parts
+    report["part"] = parts[0] if len(parts) == 1 else None
+    report["case_counts"] = {status: 0 for status in ("pass", "fail", "skip", "blocked")}
+    report["case_counts"].update(Counter(case["status"] for row in report["tests"] for case in row.get("cases", [])))
+    report["part_results"] = {}
+    for part in parts:
+        rows = [row for row in report["tests"] if row.get("part", 1) == part]
+        states = {row["status"] for row in rows} | {
+            row["status"] for row in report["tests"] if row.get("part") == 0
+        }
+        software = "fail" if "fail" in command_states or "fail" in states else (
+            "blocked" if "blocked" in command_states or "blocked" in states or "pass" not in states else "pass")
+        report["part_results"][str(part)] = {
+            "software_status": software,
+            "counts": dict(Counter(row["status"] for row in rows)),
+            "qualification": "pending_arch_vm_drm_and_interactive_checks" if part == 1 else
+                             "software_evidence_only_designated_vm_qualification_not_established",
+        }
     report["part1_qualification"] = "pending_arch_vm_drm_and_interactive_checks"
     report["pending_checks"] = [
         {"test_id": row["test_id"], "status": row["status"], "reason": row.get("reason")}
-        for row in report["tests"] if row["status"] in ("skip", "blocked")
+        for row in [*report["tests"], *(case for test in report["tests"] for case in test.get("cases", []))]
+        if row["status"] in ("skip", "blocked")
     ]
     report["finished_at"] = utc_now()
     temporary = run_dir / "summary.json.tmp"
@@ -427,10 +718,12 @@ def write_report(run_dir: Path, report: dict) -> None:
     temporary.replace(run_dir / "summary.json")
     lines = [
         f"Seaside software checks: {report['software_status'].upper()}",
-        "Part 1 qualification: PENDING Arch VM DRM and interactive checks.",
+        "Parts exercised: " + ", ".join(map(str, parts)),
+        "Part 1 qualification remains PENDING Arch VM DRM and interactive checks.",
         f"Environment: {report['environment']['classification']} ({report['environment']['kernel']})",
         "This run does not establish physical GPU or real TTY-session qualification.",
         "Tests: " + ", ".join(f"{count} {status}" for status, count in report["counts"].items()),
+        "GoogleTest cases: " + ", ".join(f"{count} {status}" for status, count in report["case_counts"].items()),
         f"Baseline: {report.get('baseline', 'not collected')}",
     ]
     for row in report["commands"]:
@@ -439,7 +732,12 @@ def write_report(run_dir: Path, report: dict) -> None:
             lines.append(f"  {row.get('error') or row.get('cleanup_error')}")
         lines.append(f"  Log: {row['log']}")
     for row in report["tests"]:
-        lines.append(f"{row['status'].upper()}: {row['test_id']}")
+        lines.append(f"{row['status'].upper()}: {row['test_id']} [part {row.get('part', 1)}; "
+                     + ", ".join(row.get("requirement_sections", [])) + "]")
+        for case in row.get("cases", []):
+            lines.append(f"  {case['status'].upper()}: {case['case_name']}")
+            if case.get("reason"):
+                lines.append("    " + case["reason"].replace("\n", " "))
         if row.get("reason"):
             lines.append("  " + row["reason"].replace("\n", " "))
     (run_dir / "summary.txt").write_text("\n".join(lines) + "\n")
@@ -456,7 +754,7 @@ def main(argv: list[str] | None = None, *, repository_root: Path | None = None) 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--build-dir", default="build", help="build directory, relative to the repository root")
     parser.add_argument("--results-dir", default="test-results", help="parent for run-specific evidence directories")
-    parser.add_argument("--timeout", type=positive_float, default=180.0, help="deadline in seconds per setup/build/test command")
+    parser.add_argument("--timeout", type=positive_float, default=300.0, help="deadline in seconds per setup/build/test command")
     parser.add_argument("--log-limit", type=int, default=1024 * 1024, help="maximum retained bytes per command/test log")
     parser.add_argument("--suite", action="append", default=[], help="select a Meson suite; repeat to select several")
     args = parser.parse_args(argv)
@@ -469,7 +767,7 @@ def main(argv: list[str] | None = None, *, repository_root: Path | None = None) 
     run_dir = results_dir / run_id
     run_dir.mkdir(parents=True, mode=0o700)
     report = {
-        "v": 1, "part": 1, "run_id": run_id, "started_at": utc_now(),
+        "v": 2, "parts": [], "run_id": run_id, "started_at": utc_now(),
         "environment": environment_facts(), "commands": [], "tests": [],
         "baseline": str(run_dir / "baseline.json"), "artifacts": [],
     }
@@ -484,16 +782,23 @@ def main(argv: list[str] | None = None, *, repository_root: Path | None = None) 
         with tempfile.TemporaryDirectory(prefix="seaside-tests-") as temporary:
             fixture_root = Path(temporary)
             child_env = os.environ.copy()
-            for key in ("WAYLAND_DISPLAY", "WAYLAND_SOCKET", "DISPLAY", "SEASIDE_SOCKET"):
-                child_env.pop(key, None)
+            for key in list(child_env):
+                if key in ("WAYLAND_DISPLAY", "WAYLAND_SOCKET", "DISPLAY", "SEASIDE_SOCKET") or key.startswith("GTEST_"):
+                    child_env.pop(key, None)
+            gtest_dir = run_dir / "gtest"
+            gtest_dir.mkdir(mode=0o700)
+            child_env["GTEST_OUTPUT"] = "xml:" + str(gtest_dir) + "/"
             for key, leaf in (("XDG_RUNTIME_DIR", "runtime"), ("XDG_STATE_HOME", "state"), ("XDG_CONFIG_HOME", "config")):
                 directory = fixture_root / leaf
                 directory.mkdir(mode=0o700)
                 child_env[key] = str(directory)
 
-            def execute(name: str, command: list[str]) -> dict:
+            def execute(name: str, command: list[str], *, env_override=None, cwd_override=None) -> dict:
                 nonlocal interrupted
-                row = run_command(command, cwd=root, log_path=run_dir / f"{name}.log", timeout=args.timeout, log_limit=args.log_limit, env=child_env)
+                row = run_command(command, cwd=cwd_override or root,
+                                  log_path=run_dir / f"{name}.log", timeout=args.timeout,
+                                  log_limit=args.log_limit,
+                                  env=child_env if env_override is None else env_override)
                 row["id"] = name
                 report["commands"].append(row)
                 interrupted = row["interrupted_signal"] or interrupted
@@ -517,8 +822,16 @@ def main(argv: list[str] | None = None, *, repository_root: Path | None = None) 
                 command = ["meson", "test", "-C", str(build_dir), "--no-rebuild", "--print-errorlogs", "--logbase", str(run_dir / "meson")]
                 for suite in args.suite:
                     command.extend(["--suite", suite])
-                execute("test", command)
-                report["tests"] = parse_meson_results(run_dir / "meson.json", run_dir, args.log_limit)
+                try:
+                    manifest = load_test_manifest(build_dir, args.suite)
+                    report["parts"] = sorted({row["part"] for row in manifest})
+                except (OSError, ValueError, UnicodeError, TypeError) as error:
+                    report["tests"] = [collection_failure("meson-test-discovery", str(error))]
+                else:
+                    report["tests"] = prepare_gtest_discovery(manifest, run_dir, child_env, execute)
+                    if not report["tests"] and not interrupted:
+                        execute("test", command)
+                        report["tests"] = parse_meson_results(run_dir / "meson.json", run_dir, args.log_limit, manifest)
             else:
                 report["tests"] = [{"test_id": "test-execution", "status": "blocked", "reason": "Setup/build did not pass or the run was interrupted", "log": None}]
     except (KeyboardInterrupt, InterruptedRun) as error:
@@ -528,6 +841,9 @@ def main(argv: list[str] | None = None, *, repository_root: Path | None = None) 
         signal.signal(signal.SIGTERM, previous_term_handler)
         report["interrupted_signal"] = interrupted
         report["artifacts"] = retain_meson_logs(run_dir, args.log_limit)
+        for artifact in report["artifacts"]:
+            if artifact.get("error"):
+                report["tests"].append(collection_failure("artifact-collection", artifact["error"]))
         write_report(run_dir, report)
         print(f"Report: {run_dir / 'summary.txt'}", flush=True)
     if interrupted:

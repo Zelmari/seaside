@@ -2,6 +2,7 @@
 """Check migrated core formatting and analyze the actual project compile commands."""
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 from pathlib import Path
 import subprocess
@@ -23,20 +24,49 @@ def main():
     )
     try:
         commands = json.loads((build_dir / 'compile_commands.json').read_text())
-        sources = sorted({
-            (Path(row['directory']) / row['file']).resolve() for row in commands
-            if (Path(row['directory']) / row['file']).resolve().is_relative_to(ROOT)
-            and not (Path(row['directory']) / row['file']).resolve().is_relative_to(build_dir)
-        })
+        if not isinstance(commands, list) or not commands:
+            raise ValueError('Compilation database must contain project translation units')
+        sources = set()
+        for row in commands:
+            if (not isinstance(row, dict) or not isinstance(row.get('directory'), str)
+                    or not isinstance(row.get('file'), str) or not row['file']):
+                raise ValueError('Invalid compilation database entry')
+            invocation = row.get('arguments', row.get('command'))
+            if not invocation or not isinstance(invocation, (str, list)):
+                raise ValueError('Compilation database entry has no compiler invocation')
+            if isinstance(invocation, list) and any(not isinstance(arg, str) for arg in invocation):
+                raise ValueError('Invalid compiler argument list')
+            source = (Path(row['directory']) / row['file']).resolve()
+            if source.is_relative_to(ROOT) and not source.is_relative_to(build_dir):
+                if source.suffix in ('.c', '.cpp', '.cc', '.cxx'):
+                    sources.add(source)
+        if not sources:
+            raise ValueError('Compilation database contains no applicable project translation units')
+        sources = sorted(sources)
         # Retained legacy C clients/probes keep their existing formatting; all
         # translation units still receive static analysis, including those C files.
-        checks = [['clang-format', '--dry-run', '--Werror', *map(str, formatted)]]
-        checks.extend(['clang-tidy', '--quiet', '-p', str(build_dir), str(path)] for path in sources)
-        for command in checks:
+        def run_check(command):
             print(f"Checking: {command[0]} {command[-1]}", flush=True)
-            result = subprocess.run(command, cwd=ROOT, timeout=60, check=False)
-            if result.returncode:
+            try:
+                return subprocess.run(command, cwd=ROOT, timeout=60, check=False).returncode
+            except (OSError, subprocess.TimeoutExpired) as error:
+                print(f'Code check failed: {error}', file=sys.stderr)
                 return 1
+        if run_check(['clang-format', '--dry-run', '--Werror', *map(str, formatted)]):
+            return 1
+        # Independent translation units can be analyzed concurrently. Limit the
+        # process count to keep analyzer memory/CPU bounded on development guests.
+        failed = False
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [executor.submit(run_check, ['clang-tidy', '--quiet', '-p', str(build_dir), str(path)])
+                       for path in sources]
+            for future in as_completed(futures):
+                if not future.cancelled() and future.result():
+                    failed = True
+                    for pending in futures:
+                        pending.cancel()
+        if failed:
+            return 1
     except (OSError, ValueError, KeyError, subprocess.TimeoutExpired) as error:
         print(f'Code checks unavailable or failed: {error}', file=sys.stderr)
         return 1

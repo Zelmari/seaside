@@ -1,11 +1,12 @@
 # Part 2 plan: configuration and state foundations
 
-Status: planned; implementation has not started.
+Status: implemented; integrated verification/review in progress. Actual modules,
+commands, evidence and limitations are recorded in [the Part 2 handoff](PART2.md).
 
 This implements the existing [specification](SEASIDE_SPEC.md), especially
 §§2.2, 8–9, 12.2b and 14. It adds the configuration/state foundations and their
 tests. It does not authorize additional settings, bindings or runtime features.
-The [part 1 handoff](PART1.md) remains the current implementation evidence.
+The [part 1 handoff](PART1.md) records the earlier foundation evidence.
 
 ## Delivery steps
 

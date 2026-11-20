@@ -18,11 +18,11 @@ from datetime import datetime, timezone
 ROOT = Path(__file__).resolve().parent.parent
 DEPENDENCIES = (
     'wlroots-0.20', 'wayland-server', 'wayland-client',
-    'wayland-protocols', 'libdrm', 'pixman-1', 'gtest_main',
+    'wayland-protocols', 'libdrm', 'pixman-1', 'gtest_main', 'tomlplusplus', 'xkbcommon',
 )
 PACKAGES = (
     'gcc', 'gcc-libs', 'glibc', 'binutils', 'pkgconf', 'meson', 'ninja', 'python',
-    'gtest', 'clang', 'gdb',
+    'gtest', 'clang', 'gdb', 'tomlplusplus',
     'wlroots0.20', 'wayland', 'wayland-protocols', 'libdrm', 'pixman',
     'libinput', 'libxkbcommon', 'mesa', 'seatd',
 )
@@ -102,6 +102,21 @@ def collect(build_dir: Path) -> dict:
     if not api_files:
         errors.append('No installed wlroots API/library artifacts were found')
 
+    supporting_api_files = []
+    for package in ('tomlplusplus', 'libxkbcommon'):
+        listing = command(['pacman', '-Qlq', package])
+        artifacts = []
+        if listing['returncode'] == 0:
+            for line in listing['stdout'].splitlines():
+                path = Path(line)
+                if path.is_file() and (path.suffix in ('.h', '.hpp', '.pc') or '.so' in path.name):
+                    item = digest(path)
+                    item['package'] = package
+                    artifacts.append(item)
+        if not artifacts:
+            errors.append(f'Cannot hash required {package} API/library files')
+        supporting_api_files.extend(artifacts)
+
     protocol_dir_result = command(['pkg-config', '--variable=pkgdatadir', 'wayland-protocols'])
     protocol_xml = []
     if protocol_dir_result['returncode'] == 0 and protocol_dir_result.get('stdout', '').strip():
@@ -169,7 +184,7 @@ def collect(build_dir: Path) -> dict:
         if observation['returncode'] != 0:
             errors.append(f'Cannot record required {name} observation')
     repository_databases = [digest(path) for path in sorted(Path('/var/lib/pacman/sync').glob('*.db'))]
-    for artifact in api_files + protocol_xml + source_hashes + repository_databases + standard_library:
+    for artifact in api_files + supporting_api_files + protocol_xml + source_hashes + repository_databases + standard_library:
         if artifact['sha256'] is None:
             errors.append(f"Cannot hash required artifact {artifact['path']}")
     for package, artifacts in package_archives.items():
@@ -203,6 +218,7 @@ def collect(build_dir: Path) -> dict:
         'installed_package_versions': installed_versions,
         'package_artifacts': package_archives,
         'wlroots_api_artifacts': api_files,
+        'supporting_api_artifacts': supporting_api_files,
         'protocol_xml_artifacts': protocol_xml,
         'repository_databases': repository_databases,
         'build_metadata': build_metadata,

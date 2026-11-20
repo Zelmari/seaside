@@ -308,6 +308,355 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(os.environ.get("HOME"), original_home)
 
 
+class ResultEvidenceTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="seaside-results-test-")
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.gtest_dir = self.root / "gtest"
+        self.gtest_dir.mkdir()
+        self.metadata = [{
+            "name": "configuration", "part": 2, "requirement_sections": ["8.1", "8.2"],
+            "command": ["/build/config-tests"], "gtest_name": "config-tests",
+        }]
+
+    def manifest(self, rows, suites=None):
+        path = self.root / "meson-info/intro-tests.json"
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(json.dumps(rows))
+        return runner.load_test_manifest(self.root, suites or [])
+
+    def declaration(self, name="configuration", part="2", suite="unit", gtest="1"):
+        return {
+            "name": name, "cmd": ["/build/config-tests"], "suite": ["seaside:" + suite],
+            "env": {"SEASIDE_GTEST": gtest, "SEASIDE_TEST_PART": part,
+                    "SEASIDE_REQUIREMENTS": "8.1,8.2"},
+        }
+
+    def parse(self, xml, aggregate="OK", rows=None, log_limit=1024):
+        if xml is not None:
+            path = self.gtest_dir / "config-tests.xml"
+            if isinstance(xml, bytes):
+                path.write_bytes(xml)
+            else:
+                path.write_text(xml)
+        rows = rows if rows is not None else [{
+            "name": "unit - seaside:configuration", "result": aggregate,
+            "stdout": "aggregate log", "returncode": 0 if aggregate == "OK" else 1,
+        }]
+        path = self.root / "meson.json"
+        path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+        return runner.parse_meson_results(path, self.root, log_limit, self.metadata)
+
+    def xml(self, cases, failures=0, errors=0):
+        return (f'<testsuites tests="{len(cases)}" failures="{failures}" errors="{errors}">'
+                '<testsuite name="ConfigTest">' + "".join(cases) + '</testsuite></testsuites>')
+
+    def case(self, name="Defaults", contents="", status="run", result="completed", duration="0.001"):
+        return (f'<testcase name="{name}" classname="ConfigTest" status="{status}" '
+                f'result="{result}" time="{duration}">{contents}</testcase>')
+
+    def report(self, rows, commands=None):
+        report = {"environment": {"classification": "test-fixture", "kernel": "test-only"},
+                  "commands": commands or [], "tests": rows}
+        runner.write_report(self.root, report)
+        return json.loads((self.root / "summary.json").read_text())
+
+    def test_part_and_requirements_follow_discovered_test_metadata(self):
+        result = self.manifest([self.declaration()])
+        self.assertEqual(result[0]["part"], 2)
+        self.assertEqual(result[0]["requirement_sections"], ["8.1", "8.2"])
+        self.assertEqual(result[0]["gtest_name"], "config-tests")
+
+    def test_suite_selection_does_not_require_unselected_tests(self):
+        rows = [self.declaration(), self.declaration(name="drm", part="1", suite="hardware", gtest="0")]
+        selected = self.manifest(rows, ["unit"])
+        self.assertEqual([row["name"] for row in selected], ["configuration"])
+        selected = self.manifest(rows, ["seaside:hardware"])
+        self.assertEqual([row["name"] for row in selected], ["drm"])
+
+    def test_empty_unknown_or_duplicate_discovery_is_rejected(self):
+        for rows, suites in (([], []), ([self.declaration()], ["missing"]),
+                             ([self.declaration(), self.declaration()], [])):
+            with self.subTest(rows=rows, suites=suites), self.assertRaises(ValueError):
+                self.manifest(rows, suites)
+
+    def test_colliding_gtest_xml_paths_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, "unique XML"):
+            self.manifest([self.declaration(), self.declaration(name="other")])
+
+    def test_declared_filters_shards_and_output_cannot_shrink_owned_discovery(self):
+        for key, value in (("GTEST_FILTER", "OnlyOne.*"), ("GTEST_TOTAL_SHARDS", "2"),
+                           ("GTEST_OUTPUT", "xml:/elsewhere")):
+            row = self.declaration()
+            row["env"][key] = value
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, "run-owned discovery"):
+                self.manifest([row])
+        for argument in ("--gtest_filter=OnlyOne.*", "--gtest_repeat=0", "--gtest_output=x"):
+            row = self.declaration()
+            row["cmd"].append(argument)
+            with self.subTest(argument=argument), self.assertRaises(ValueError):
+                self.manifest([row])
+
+    def test_missing_expected_test_result_blocks_even_with_other_passing_tests(self):
+        self.metadata.append({"name": "other", "part": 1, "requirement_sections": ["2.2"],
+                              "command": ["/build/other"], "gtest_name": None})
+        result = self.report(self.parse(self.xml([self.case()])))
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["tests"][1]["test_id"], "other")
+        self.assertEqual(result["part_results"]["1"]["software_status"], "blocked")
+        self.assertEqual(result["part_results"]["2"]["software_status"], "pass")
+        self.assertEqual(result["parts"], [1, 2])
+        self.assertIsNone(result["part"])
+
+    def test_duplicate_or_unexpected_meson_results_cannot_pass(self):
+        passing = {"name": "unit - seaside:configuration", "result": "OK"}
+        for rows in ([passing, passing], [{"name": "unexpected", "result": "OK"}]):
+            with self.subTest(rows=rows):
+                result = self.report(self.parse(self.xml([self.case()]), rows=rows))
+                self.assertEqual(result["status"], "blocked")
+
+    def test_individual_cases_and_bounded_failures_override_successful_aggregate(self):
+        failure = self.case("InvalidType", '<failure message="wrong type">' + "x" * 10000 + '</failure>')
+        result = self.report(self.parse(self.xml([self.case(), failure], failures=1), log_limit=128))
+        self.assertEqual(result["status"], "fail")
+        self.assertEqual(result["counts"]["fail"], 1)
+        self.assertEqual(result["case_counts"], {"pass": 1, "fail": 1, "skip": 0, "blocked": 0})
+        cases = result["tests"][0]["cases"]
+        self.assertEqual(cases[1]["case_name"], "ConfigTest.InvalidType")
+        self.assertEqual(cases[1]["part"], 2)
+        self.assertEqual(cases[1]["requirement_sections"], ["8.1", "8.2"])
+        self.assertLessEqual(len(cases[1]["reason"].encode()), 128)
+        self.assertIn("ConfigTest.InvalidType", (self.root / "summary.txt").read_text())
+
+    def test_aggregate_crash_is_not_masked_by_completed_passing_cases(self):
+        result = self.report(self.parse(self.xml([self.case()]), aggregate="FAIL"))
+        self.assertEqual(result["status"], "fail")
+        self.assertEqual(result["case_counts"]["pass"], 1)
+
+    def test_missing_empty_malformed_and_oversized_xml_cannot_pass(self):
+        samples = [None, "", "<testsuites>", '<testsuites tests="0"/>',
+                   self.xml([self.case()]) + " " * (2 * 1024 * 1024)]
+        for sample in samples:
+            with self.subTest(size=None if sample is None else len(sample)):
+                path = self.gtest_dir / "config-tests.xml"
+                path.unlink(missing_ok=True)
+                result = self.report(self.parse(sample))
+                self.assertEqual(result["status"], "blocked")
+                self.assertEqual(result["case_counts"]["pass"], 0)
+                self.assertTrue(result["tests"][0]["collection_error"])
+
+    def test_xml_count_mismatch_duplicates_unknown_outcomes_or_nonfinite_time_block(self):
+        samples = [
+            self.xml([self.case()], failures=1),
+            self.xml([self.case(), self.case()]),
+            self.xml([self.case(status="unknown")]),
+            self.xml([self.case(duration="nan")]),
+            self.xml([self.case()]).replace('tests="1"', 'tests="2"'),
+            '<!DOCTYPE testsuites [<!ENTITY example "x">]>' + self.xml([self.case()]),
+        ]
+        for sample in samples:
+            with self.subTest(sample=sample):
+                result = self.report(self.parse(sample))
+                self.assertEqual(result["status"], "blocked")
+                self.assertEqual(result["tests"][0]["cases"], [])
+
+    def test_suite_disabled_and_skipped_counts_must_agree_with_case_details(self):
+        samples = [
+            self.xml([self.case()]).replace('<testsuite name="ConfigTest">',
+                                           '<testsuite name="ConfigTest" tests="1" failures="1">'),
+            self.xml([self.case()]).replace('<testsuite name="ConfigTest">',
+                                           '<testsuite name="ConfigTest" tests="2">'),
+            self.xml([self.case()]).replace('errors="0"', 'errors="0" disabled="1"', 1),
+            self.xml([self.case()]).replace('errors="0"', 'errors="0" skipped="1"', 1),
+        ]
+        for sample in samples:
+            with self.subTest(xml=sample):
+                result = self.report(self.parse(sample))
+                self.assertEqual(result["status"], "blocked")
+                self.assertEqual(result["tests"][0]["cases"], [])
+
+    def test_xml_encoding_cannot_hide_entity_declarations(self):
+        body = ('<!DOCTYPE testsuites [<!ENTITY name "Defaults">]>' +
+                self.xml([self.case()]).replace('name="Defaults"', 'name="&name;"'))
+        for encoding in ("utf-16", "utf-32"):
+            xml = ('<?xml version="1.0" encoding="' + encoding + '"?>' + body).encode(encoding)
+            with self.subTest(encoding=encoding):
+                self.assertEqual(self.report(self.parse(xml))["status"], "blocked")
+        mismatched = '<?xml version="1.0" encoding="UTF-16"?>' + self.xml([self.case()])
+        self.assertEqual(self.report(self.parse(mismatched))["status"], "blocked")
+
+    def test_explicit_process_exit_must_agree_with_successful_meson_outcome(self):
+        for outcome, code in (("OK", 9), ("OK", 77), ("EXPECTEDFAIL", 0)):
+            row = {"name": "unit - seaside:configuration", "result": outcome, "returncode": code}
+            with self.subTest(row=row):
+                self.assertEqual(self.report(self.parse(self.xml([self.case()]), rows=[row]))["status"],
+                                 "blocked")
+
+    def test_execution_must_match_independently_discovered_cases(self):
+        self.metadata[0]["expected_cases"] = {"ConfigTest.Defaults": False,
+                                              "ConfigTest.Bounds": False}
+        self.assertEqual(self.report(self.parse(self.xml([self.case()])))["status"], "blocked")
+        suppressed = self.case("Bounds", status="notrun", result="suppressed")
+        self.assertEqual(self.report(self.parse(self.xml([self.case(), suppressed])))["status"],
+                         "blocked")
+        runtime_skip = self.case("Bounds", '<skipped message="unavailable"/>', result="skipped")
+        result = self.report(self.parse(self.xml([self.case(), runtime_skip])))
+        self.assertEqual(result["status"], "pass")
+        self.assertEqual(result["case_counts"]["skip"], 1)
+        self.metadata[0]["expected_cases"]["ConfigTest.DISABLED_Bounds"] = True
+        del self.metadata[0]["expected_cases"]["ConfigTest.Bounds"]
+        disabled = self.case("DISABLED_Bounds", status="notrun", result="suppressed")
+        result = self.report(self.parse(self.xml([self.case(), disabled])))
+        self.assertEqual(result["status"], "pass")
+        self.assertEqual(result["case_counts"]["skip"], 1)
+
+    def test_independent_discovery_rejects_empty_duplicate_or_inconsistent_case_lists(self):
+        path = self.root / "discovered.xml"
+        for sample in ('<testsuites tests="0"/>', self.xml([self.case(), self.case()]),
+                       self.xml([self.case()]).replace('tests="1"', 'tests="2"')):
+            path.write_text(sample)
+            with self.subTest(sample=sample), self.assertRaises(ValueError):
+                runner.discover_gtest_cases(path)
+        path.write_text(self.xml([self.case(), self.case("DISABLED_Bounds")]))
+        self.assertEqual(runner.discover_gtest_cases(path),
+                         {"ConfigTest.Defaults": False, "ConfigTest.DISABLED_Bounds": True})
+
+    def test_independent_discovery_uses_supervisor_deadline_and_cannot_pass_on_timeout(self):
+        metadata = dict(self.metadata[0])
+        metadata["command"] = [sys.executable, "-c", "import time; time.sleep(10)"]
+        metadata["working_directory"] = str(self.root)
+        observed = []
+
+        def execute(name, command, *, env_override, cwd_override):
+            result = runner.run_command(command, cwd=cwd_override,
+                                        log_path=self.root / (name + ".log"),
+                                        timeout=0.1, terminate_grace=0.1,
+                                        log_limit=256, env=env_override)
+            observed.append(result)
+            return result
+
+        failures = runner.prepare_gtest_discovery([metadata], self.root, os.environ.copy(), execute)
+        self.assertEqual(len(failures), 1)
+        self.assertEqual(failures[0]["status"], "blocked")
+        self.assertTrue(observed[0]["timed_out"])
+        self.assertIsNone(observed[0]["cleanup_error"])
+        self.assertNotIn("expected_cases", metadata)
+
+    def test_disabled_or_skipped_only_cases_do_not_establish_pass(self):
+        for case in (self.case(status="notrun", result="suppressed"),
+                     self.case(contents='<skipped message="unavailable"/>', result="skipped")):
+            with self.subTest(case=case):
+                result = self.report(self.parse(self.xml([case])))
+                self.assertEqual(result["status"], "blocked")
+                self.assertEqual(result["case_counts"]["skip"], 1)
+                self.assertTrue(any("::" in row["test_id"] for row in result["pending_checks"]))
+
+    def test_successful_xml_artifact_retention_is_bounded_after_case_collection(self):
+        result = self.parse(self.xml([self.case()]))
+        self.assertEqual(result[0]["status"], "pass")
+        artifacts = runner.retain_meson_logs(self.root, 64)
+        xml = next(row for row in artifacts if "config-tests.xml" in row["path"])
+        self.assertTrue(xml["truncated"])
+        self.assertLessEqual(Path(xml["path"]).stat().st_size, 64)
+        self.assertFalse((self.gtest_dir / "config-tests.xml").exists())
+
+    def test_result_symlinks_and_fifos_are_rejected_without_reading_them(self):
+        path = self.gtest_dir / "config-tests.xml"
+        target = self.root / "other.xml"
+        target.write_text(self.xml([self.case()]))
+        path.symlink_to(target)
+        result = self.report(self.parse(None))
+        self.assertEqual(result["status"], "blocked")
+        path.unlink()
+        os.mkfifo(path)
+        result = self.report(self.parse(None))
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(target.read_text(), self.xml([self.case()]))
+
+    def test_cleanup_error_cannot_be_hidden_by_successful_command_status(self):
+        rows = self.parse(self.xml([self.case()]))
+        command = {"id": "test", "status": "pass", "command": ["tests"],
+                   "cleanup_error": "owned process still alive", "log": "test.log"}
+        report = self.report(rows, [command])
+        self.assertEqual(report["status"], "fail")
+        self.assertEqual(report["part_results"]["2"]["software_status"], "fail")
+        self.assertEqual(report["part1_qualification"], "pending_arch_vm_drm_and_interactive_checks")
+
+    def test_full_runner_collects_run_owned_cases_and_isolates_ambient_gtest_filters(self):
+        binary_dir = self.root / "bin"
+        binary_dir.mkdir()
+        meson = binary_dir / "meson"
+        declaration = self.declaration()
+        declaration["cmd"] = [str(binary_dir / "config-tests")]
+        xml = self.xml([self.case(), self.case("Bounds")])
+        gtest = binary_dir / "config-tests"
+        gtest.write_text(
+            f"#!{sys.executable}\nimport os,pathlib,sys\n"
+            "assert sys.argv[1:] == ['--gtest_list_tests']\n"
+            "assert not any(key.startswith('GTEST_') and key != 'GTEST_OUTPUT' for key in os.environ)\n"
+            f"pathlib.Path(os.environ['GTEST_OUTPUT'][4:]).write_text({xml!r})\n"
+        )
+        gtest.chmod(0o700)
+        meson.write_text(
+            f"#!{sys.executable}\nimport json,os,pathlib,sys\n"
+            "if sys.argv[1] == 'setup':\n"
+            "    build=pathlib.Path(sys.argv[2]); (build/'meson-info').mkdir(parents=True)\n"
+            f"    (build/'meson-info/intro-tests.json').write_text({json.dumps([declaration])!r})\n"
+            "elif sys.argv[1] == 'test':\n"
+            "    assert not any(key.startswith('GTEST_') and key != 'GTEST_OUTPUT' for key in os.environ)\n"
+            "    output=os.environ['GTEST_OUTPUT']; assert output.startswith('xml:')\n"
+            "    directory=pathlib.Path(output[4:]); assert directory.is_dir()\n"
+            f"    (directory/'config-tests.xml').write_text({xml!r})\n"
+            "    path=pathlib.Path(sys.argv[sys.argv.index('--logbase')+1]+'.json')\n"
+            "    path.write_text(json.dumps({'name':'unit - seaside:configuration','result':'OK','stdout':'','returncode':0})+'\\n')\n"
+        )
+        meson.chmod(0o700)
+        tools = self.root / "tools"
+        tools.mkdir()
+        (tools / "record-baseline").write_text(
+            "import pathlib,sys\npathlib.Path(sys.argv[sys.argv.index('--output')+1]).write_text('{}')\n"
+        )
+        with patch.dict(os.environ, {"PATH": str(binary_dir) + os.pathsep + os.environ.get("PATH", ""),
+                                     "GTEST_FILTER": "NoSuchCases.*", "GTEST_TOTAL_SHARDS": "4"}), redirect_stdout(io.StringIO()):
+            self.assertEqual(runner.main(["--suite", "unit"], repository_root=self.root), 0)
+        path = next((self.root / "test-results").glob("*/summary.json"))
+        report = json.loads(path.read_text())
+        self.assertEqual(report["parts"], [2])
+        self.assertEqual(report["part"], 2)
+        self.assertEqual(report["case_counts"]["pass"], 2)
+        self.assertEqual(report["tests"][0]["requirement_sections"], ["8.1", "8.2"])
+        self.assertTrue(any("config-tests.xml" in row["path"] for row in report["artifacts"]))
+        self.assertTrue(any(row["id"].startswith("discover-gtest-") for row in report["commands"]))
+        self.assertTrue(any("gtest-discovery" in row["path"] for row in report["artifacts"]))
+
+
+class CodeCheckDiscoveryTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="seaside-code-check-test-")
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        loader = importlib.machinery.SourceFileLoader("seaside_code_check", str(ROOT / "tools/check-code"))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        self.check = importlib.util.module_from_spec(spec)
+        loader.exec_module(self.check)
+        self.build = self.root / "build"
+        self.build.mkdir()
+
+    def test_missing_empty_malformed_or_inapplicable_database_never_runs_tools(self):
+        samples = [None, "[]", "{}", "[", '[{"file":"test.cpp"}]', json.dumps([
+            {"directory": "/outside", "file": "test.cpp", "command": "g++ test.cpp"}])]
+        for sample in samples:
+            with self.subTest(sample=sample):
+                path = self.build / "compile_commands.json"
+                path.unlink(missing_ok=True)
+                if sample is not None:
+                    path.write_text(sample)
+                with patch.object(self.check, "ROOT", self.root), patch.object(sys, "argv", ["check-code", "--build-dir", str(self.build)]), patch.object(self.check.subprocess, "run") as run, redirect_stdout(io.StringIO()):
+                    self.assertEqual(self.check.main(), 1)
+                    run.assert_not_called()
+
+
 class HeadlessFixtureTests(unittest.TestCase):
     @unittest.skipUnless(os.environ.get("SEASIDE_HEADLESS_FIXTURE"), "Meson supplies the built headless fixture")
     def test_ready_then_signal_shutdown_releases_private_wayland_runtime(self):
