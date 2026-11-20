@@ -6,7 +6,7 @@
 **Target:** Arch Linux only (initial development and testing inside an Arch VM hosted on Windows; final validation on native Arch / Framework Desktop, Ryzen AI Max+ 395 / Radeon 8060S)  
 **Implementation target:** standalone C++23 Wayland compositor using wlroots; no required desktop shell
 
-**Stack decision status — 2026-11-20:** The owner selected C++23 and wlroots as the foundation, superseding the original C17 language target while retaining wlroots. The existing wlroots 0.20 API baseline is the starting point for C++ integration checks; the recorded C build does not qualify a C++ build. Renderer, supporting-library and build-system choices remain under discussion before further development. C17-specific descriptions below apply to the original part 1 prototype, whose implementation and recorded test results remain unchanged. Selecting wlroots does not independently settle use of its scene graph, a particular GPU renderer or a custom renderer. Finalize the remaining dependency boundaries and update the affected contracts before migration; all approved product behavior still applies.
+**Stack decision status — 2026-11-20:** The owner selected C++23, wlroots, and wlroots' existing scene graph and renderers as the foundation, superseding the original C17 language target. The existing wlroots 0.20 API baseline is the starting point for C++ integration checks; the recorded C build does not qualify a C++ build. The particular GPU renderer, supporting libraries and build system remain under discussion before further development. C17-specific descriptions below apply to the original part 1 prototype, whose implementation and recorded test results remain unchanged. Finalize the remaining dependency boundaries and update the affected contracts before migration; all approved product behavior still applies.
 
 > **Source of truth:** This file and the owner's subsequent explicit corrections define the current requirements. The historical files `SEASIDE_DECISION_ARCHIVE.md` and `SEASIDE_REPO_AUDIT.md` were referenced by the supplied draft but are **not present in this workspace**. Do not invent their contents or assume they authorize features. If recovered, treat the former as historical decisions and the latter as research; the newest explicit owner decision controls. Commented TOML examples and implementation convenience do not create approved features.
 >
@@ -76,6 +76,8 @@ xdg-desktop-portal frontend + tested portal backend.
 | `diagnostic` | on-demand queries and bounded temporary tracing | render, output |
 
 **Invariants:** The main event loop must not block on subprocess startup, D-Bus replies, disk writes, IPC subscribers or trace export. Outputs are not windows; shell layer surfaces are not ordinary tiled clients; layout engines compute geometry without owning GPU buffers. The exact threading strategy is **ENGINEERING CHOICE**; no separate permanent worker processes are authorized.
+
+**APPROVED rendering infrastructure:** Use wlroots' existing scene graph (`wlr_scene`) and renderer implementations through their supported APIs. Seaside supplies its approved window/layout/focus policy and coordinates scene updates, output scheduling and capture integration. A custom scene graph or renderer is not selected. The particular production GPU renderer remains a separate stack decision; the existing offscreen Pixman fixture remains test infrastructure. Verify damage handling, presentation, capture of hidden chosen windows and direct-scanout interactions against the pinned wlroots API before claiming those behaviors work.
 
 ### 2.2 Core object model and lifetimes
 
@@ -1084,3 +1086,5 @@ The supplied draft referenced `SEASIDE_DECISION_ARCHIVE.md` for a full chronolog
 **Owner decision — 2026-11-20 (language standard):** Use C++23. This settles the standard left open in the language decision above. Backend, rendering, supporting-library and build-system choices remain under discussion. The current C prototype has not been migrated or verified as C++23.
 
 **Owner decision — 2026-11-20 (compositor library):** Use wlroots with C++23. This settles the compositor-library choice; Aquamarine and a library-free implementation were discussed but not selected. Renderer/scene-graph ownership, supporting libraries and the build system remain to be settled. C++ interoperability and the approved rendering/capture/hardware requirements still need implementation evidence.
+
+**Owner decision — 2026-11-20 (rendering infrastructure):** Use wlroots' existing scene graph and renderers. Seaside retains its own approved window-management policy. The production GPU backend (OpenGL ES or Vulkan) remains to be discussed; this decision does not add a renderer setting or change the hardware-cursor requirement.
