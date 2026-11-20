@@ -5,6 +5,13 @@
 /compile_commands.json
 /.cache/
 
+# Personal agent instructions and skills stay local
+AGENTS.md
+CLAUDE.md
+agents.md
+claude.md
+skills/
+
 # Test-run output; keep test sources and fixtures trackable
 /test-results/
 /test-artifacts/
