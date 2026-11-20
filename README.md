@@ -1,8 +1,8 @@
 # Seaside
 
 An Arch Linux Wayland compositor with **C++23 and wlroots selected as the
-foundation**, retaining **Meson + Ninja** for builds. Supporting libraries remain
-under review. The current implementation is
+foundation**, using **GCC** as the primary compiler and **Meson + Ninja** for
+builds. Supporting libraries remain under review. The current implementation is
 the original **C/wlroots part 1 build and test foundation**: a private server
 lifecycle library, a real-client headless fixture, a bounded test runner and a
 DRM inspection tool.
