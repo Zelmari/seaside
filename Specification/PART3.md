@@ -1,8 +1,9 @@
 # Part 3: headless session groundwork
 
 Status: headless milestone software-verified in Arch WSL2. The Arch VirtualBox
-guest passed the original harness, and the live console fixture awaits its
-first VM run. Part 3 and release qualification are pending.
+guest passed the original harness and the live console fixture with Pixman.
+Automatic renderer selection failed on this guest. Part 3 and release
+qualification remain pending.
 
 This implements the bounded [Part 3 plan](PART3_PLAN.md) against specification
 §§2.1–2.2, 3–3.1, 12.2b and 14. Work stops at the first Arch-VM qualification
@@ -139,18 +140,27 @@ entries in `drm_info`. Those observations establish that the guest is a
 candidate for testing real cursor presentation. The watchdog reported stalls
 during that run, and the harness completed successfully.
 
+The guest built revision `b2c172f` after Ninja regenerated the build files.
+The first console attempt stopped at `stage=seat-drm-renderer` with automatic
+renderer selection. The owner reran the same fixture with
+`WLR_RENDERER=pixman build/seaside-tty-fixture`. It enabled `Virtual-1` at
+1280 × 800 and 60 Hz, with DRM connector 44 and hardware cursor plane 40.
+The report counted 5,565 presented frames and 5,564 presented position changes
+from 5,575 accepted moves, then printed `PASS stop=observation-ended` and returned
+to the same shell. Visual confirmation of the moving cross is pending. The
+explicit renderer choice applies to this VM check. Automatic renderer selection
+remains a separate qualification item.
+
 `seaside-tty-fixture` is a development executable for one DRM output. It opens
 the guest seat through wlroots, starts the DRM and libinput backends, uses the
 existing scene to render black, and moves a hardware cursor from real pointer
 events. It checks presentation and records the DRM connector and cursor plane.
 It uses a fixture-specific Wayland socket and leaves user service activation
-for the graphical session milestone. From the active guest console, refresh
-the existing Meson build directory before compiling the newly added target:
+for the graphical session milestone. From the active guest console, use Ninja
+to regenerate the existing Meson build files and build the updated project:
 
 ```sh
-meson setup --reconfigure build &&
-  meson compile -C build seaside-tty-fixture &&
-  build/seaside-tty-fixture
+ninja -C build && build/seaside-tty-fixture
 ```
 
 Move the pointer across the black screen for a few seconds. Wait for the
