@@ -1,10 +1,12 @@
 # Seaside — v1 Engineering Design
 
 **Status:** Ready to start scoped engineering/prototype work; build, integration and hardware qualification pending (§§12–14)  
-**Updated:** 2026-11-19  
+**Updated:** 2026-11-20\
 **Owner-approved product behavior:** frozen provisionally; changes require explicit approval  
 **Target:** Arch Linux only (initial development and testing inside an Arch VM hosted on Windows; final validation on native Arch / Framework Desktop, Ryzen AI Max+ 395 / Radeon 8060S)  
-**Implementation:** standalone C Wayland compositor using wlroots; no required desktop shell
+**Implementation target:** standalone C++ Wayland compositor; compositor/backend library and C++ standard under review; no required desktop shell
+
+**Stack decision status — 2026-11-20:** The owner selected C++ as the implementation language, superseding the original C17 target. The remaining stack choices are being discussed before further development. C17/wlroots-specific architecture and API references below describe the original design and existing part 1 prototype; they do not settle the revised stack. The current C/wlroots/Meson implementation and its recorded test results remain unchanged. Language selection alone does not select Aquamarine, custom protocol/rendering implementations, a C++ standard or a different build system. Finalize the dependency boundaries and update the affected contracts before migration; all approved product behavior still applies.
 
 > **Source of truth:** This file and the owner's subsequent explicit corrections define the current requirements. The historical files `SEASIDE_DECISION_ARCHIVE.md` and `SEASIDE_REPO_AUDIT.md` were referenced by the supplied draft but are **not present in this workspace**. Do not invent their contents or assume they authorize features. If recovered, treat the former as historical decisions and the latter as research; the newest explicit owner decision controls. Commented TOML examples and implementation convenience do not create approved features.
 >
@@ -1076,3 +1078,5 @@ The supplied draft referenced `SEASIDE_DECISION_ARCHIVE.md` for a full chronolog
 **Owner-directed development workflow — 2026-11-19:** Develop in testable parts with a harness built alongside the implementation, minimizing human involvement to checks that genuinely need it. Code comments explain decisions, non-obvious behavior and difficult reasoning rather than pure syntax. The engineering plan uses 10 parts (§14), each with concrete evidence and explicit remaining verification; this adds development tooling and standards, not runtime product functionality.
 
 **Part 1 implementation evidence — 2026-11-19:** The Meson build, private server lifecycle, real-client headless fixture, development runner and safe DRM observer are implemented. Software checks run in Arch WSL2, including sanitizer builds; [the handoff](PART1.md) records their results. Full Arch-VM execution, an actual guest cursor-plane observation and native hardware/session qualification remain pending. No installable compositor, preflight bypass or additional product functionality is introduced.
+
+**Owner decision — 2026-11-20 (implementation language):** Select C++ for Seaside and discuss the remaining technology stack before proceeding. The earlier Rust/Smithay proposal was not adopted. The exact C++ standard, compositor/backend library, renderer, supporting dependencies and any build-system change remain to be decided; no runtime functionality or implementation migration is inferred from this language decision.
