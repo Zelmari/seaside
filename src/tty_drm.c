@@ -3,13 +3,17 @@
 #include "tty_drm.h"
 
 #include <drm_fourcc.h>
+#include <errno.h>
+#include <linux/vt.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
 #include <time.h>
+#include <unistd.h>
 #include <wayland-server-core.h>
 #include <wlr/backend/drm.h>
 #include <wlr/backend/libinput.h>
@@ -25,6 +29,7 @@
 enum {
     SEAT_WAIT_MS = 2000,
     CURSOR_SIZE = 16,
+    MAX_KMS_CARDS = 64,
     MAX_KMS_PLANES = 256,
     MAX_PLANE_PROPERTIES = 64,
 };
@@ -129,8 +134,15 @@ static void on_session_active(struct wl_listener *listener, void *data) {
     (void)data;
     struct seaside_tty_drm *drm = wl_container_of(listener, drm, session_active);
     drm->evidence.active = drm->session->active;
-    if (!drm->session->active && drm->backend) {
-        fail(drm, "seat became inactive during the TTY fixture run");
+    if (!drm->session->active) {
+        /* wlroots destroys DRM outputs on VT pause and advertises fresh
+         * handles on resume. Reverify the plane on the new presentation. */
+        drm->commit_pending = false;
+        drm->evidence.cursor_presented = false;
+        drm->evidence.cursor_plane_id = 0;
+    }
+    if (drm->backend) {
+        fprintf(stderr, "TTY DRM: seat %s\n", drm->session->active ? "resumed" : "paused");
     }
 }
 
@@ -145,9 +157,6 @@ static void on_backend_destroy(struct wl_listener *listener, void *data) {
 static void on_output_destroy(struct wl_listener *listener, void *data) {
     (void)data;
     struct seaside_tty_drm *drm = wl_container_of(listener, drm, output_destroy);
-    if (drm->backend && drm->cursor) {
-        fail(drm, "selected output disappeared during the TTY fixture run");
-    }
     unlink_listener(&drm->output_destroy);
     unlink_listener(&drm->output_commit);
     unlink_listener(&drm->output_present);
@@ -155,6 +164,8 @@ static void on_output_destroy(struct wl_listener *listener, void *data) {
     drm->output = NULL;
     drm->cursor = NULL;
     drm->commit_pending = false;
+    drm->evidence.cursor_presented = false;
+    drm->evidence.cursor_plane_id = 0;
 }
 
 static void on_new_output(struct wl_listener *listener, void *data) {
@@ -313,6 +324,24 @@ static bool primary_card_path(const char *path) {
            minor(info.st_rdev) < 64;
 }
 
+bool seaside_tty_active_console(void) {
+    char path[64];
+    struct vt_stat active = {0};
+    static const char prefix[] = "/dev/tty";
+    if (ttyname_r(STDIN_FILENO, path, sizeof(path)) != 0 ||
+        strncmp(path, prefix, sizeof(prefix) - 1) != 0) {
+        return false;
+    }
+    const char *digits = path + sizeof(prefix) - 1;
+    if (*digits == '\0' || digits[strspn(digits, "0123456789")] != '\0') {
+        return false;
+    }
+    errno = 0;
+    const unsigned long vt = strtoul(digits, NULL, 10);
+    return errno == 0 && vt > 0 && tcgetpgrp(STDIN_FILENO) == getpgrp() &&
+           ioctl(STDIN_FILENO, VT_GETSTATE, &active) == 0 && vt == active.v_active;
+}
+
 static int64_t monotonic_ms(void) {
     struct timespec now;
     if (clock_gettime(CLOCK_MONOTONIC, &now) < 0) {
@@ -351,6 +380,21 @@ static bool add_backend(struct wlr_backend *multi, struct wlr_backend *child) {
     return true;
 }
 
+static struct wlr_device *find_primary_device(struct wlr_session *session, const char *path) {
+    if (path) {
+        return wlr_session_open_file(session, path);
+    }
+    struct wlr_device *devices[MAX_KMS_CARDS];
+    const ssize_t count = wlr_session_find_gpus(session, MAX_KMS_CARDS, devices);
+    if (count <= 0) {
+        return NULL;
+    }
+    for (ssize_t i = 1; i < count; ++i) {
+        wlr_session_close_file(session, devices[i]);
+    }
+    return devices[0];
+}
+
 struct seaside_tty_drm *seaside_tty_drm_create(struct wl_display *display, const char *device_path,
                                                struct wlr_backend **backend,
                                                struct wlr_renderer **renderer) {
@@ -359,9 +403,8 @@ struct seaside_tty_drm *seaside_tty_drm_create(struct wl_display *display, const
     }
     *backend = NULL;
     *renderer = NULL;
-    if (!primary_card_path(device_path)) {
-        fprintf(stderr, "TTY DRM: missing or invalid primary DRM node: %s\n",
-                device_path ? device_path : "(null)");
+    if (device_path && !primary_card_path(device_path)) {
+        fprintf(stderr, "TTY DRM: missing or invalid primary DRM node: %s\n", device_path);
         return NULL;
     }
     struct seaside_tty_drm *drm = calloc(1, sizeof(*drm));
@@ -408,7 +451,7 @@ struct seaside_tty_drm *seaside_tty_drm_create(struct wl_display *display, const
     wl_signal_add(&drm->backend->events.destroy, &drm->backend_destroy);
     wl_signal_add(&drm->backend->events.new_output, &drm->new_output);
 
-    struct wlr_device *device = wlr_session_open_file(drm->session, device_path);
+    struct wlr_device *device = find_primary_device(drm->session, device_path);
     if (!device || drmGetNodeTypeFromFd(device->fd) != DRM_NODE_PRIMARY) {
         fail(drm, "libseat could not open the selected primary DRM node");
         goto error;
@@ -573,6 +616,15 @@ bool seaside_tty_drm_move(struct seaside_tty_drm *drm, bool absolute, double x, 
     return true;
 }
 
+bool seaside_tty_drm_change_vt(struct seaside_tty_drm *drm, unsigned vt) {
+    return drm && drm->session && drm->session->active && wlr_session_change_vt(drm->session, vt);
+}
+
 struct seaside_tty_drm_observation seaside_tty_drm_observation(const struct seaside_tty_drm *drm) {
-    return drm ? drm->evidence : (struct seaside_tty_drm_observation){0};
+    if (!drm) {
+        return (struct seaside_tty_drm_observation){0};
+    }
+    struct seaside_tty_drm_observation result = drm->evidence;
+    result.output_pending = result.active && drm->output && !drm->cursor;
+    return result;
 }

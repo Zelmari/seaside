@@ -41,6 +41,69 @@ xdg_shell_private_code = custom_target(
   command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'],
 )
 
+capture_source_xml = wayland_protocols.get_variable(pkgconfig: 'pkgdatadir') / 'staging/ext-image-capture-source/ext-image-capture-source-v1.xml'
+capture_source_server = custom_target(
+  'capture-source-server-header', input: capture_source_xml,
+  output: 'ext-image-capture-source-v1-server-protocol.h',
+  command: [wayland_scanner, 'server-header', '@INPUT@', '@OUTPUT@'],
+)
+capture_source_code = custom_target(
+  'capture-source-private-code', input: capture_source_xml,
+  output: 'ext-image-capture-source-v1-protocol.c',
+  command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'],
+)
+foreign_toplevel_xml = wayland_protocols.get_variable(pkgconfig: 'pkgdatadir') / 'staging/ext-foreign-toplevel-list/ext-foreign-toplevel-list-v1.xml'
+foreign_toplevel_code = custom_target(
+  'foreign-toplevel-private-code', input: foreign_toplevel_xml,
+  output: 'ext-foreign-toplevel-list-v1-protocol.c',
+  command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'],
+)
+capture_foundation = static_library(
+  'seaside-capture-foundation',
+  ['src/output_capture.c', capture_source_server, capture_source_code, foreign_toplevel_code],
+  include_directories: include_directories('src'),
+  dependencies: [wlroots, wayland_server, pixman, libdrm], install: false,
+)
+
+capture_copy_xml = wayland_protocols.get_variable(pkgconfig: 'pkgdatadir') / 'staging/ext-image-copy-capture/ext-image-copy-capture-v1.xml'
+capture_source_client = custom_target(
+  'capture-source-client-header', input: capture_source_xml,
+  output: 'ext-image-capture-source-v1-client-protocol.h',
+  command: [wayland_scanner, 'client-header', '@INPUT@', '@OUTPUT@'],
+)
+capture_copy_client = custom_target(
+  'capture-copy-client-header', input: capture_copy_xml,
+  output: 'ext-image-copy-capture-v1-client-protocol.h',
+  command: [wayland_scanner, 'client-header', '@INPUT@', '@OUTPUT@'],
+)
+capture_copy_code = custom_target(
+  'capture-copy-private-code', input: capture_copy_xml,
+  output: 'ext-image-copy-capture-v1-protocol.c',
+  command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'],
+)
+xdg_output_xml = wayland_protocols.get_variable(pkgconfig: 'pkgdatadir') / 'unstable/xdg-output/xdg-output-unstable-v1.xml'
+xdg_output_client = custom_target(
+  'xdg-output-client-header', input: xdg_output_xml,
+  output: 'xdg-output-unstable-v1-client-protocol.h',
+  command: [wayland_scanner, 'client-header', '@INPUT@', '@OUTPUT@'],
+)
+xdg_output_code = custom_target(
+  'xdg-output-private-code', input: xdg_output_xml,
+  output: 'xdg-output-unstable-v1-protocol.c',
+  command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'],
+)
+capture_test = executable(
+  'seaside-output-capture-test',
+  ['tests/integration/output_capture.c', capture_source_client, capture_copy_client, capture_copy_code,
+   xdg_output_client, xdg_output_code],
+  include_directories: include_directories('src'),
+  dependencies: [wlroots, wayland_server, wayland_client, pixman, libdrm, threads],
+  link_with: capture_foundation, install: false,
+)
+test('part3-output-capture', capture_test, suite: ['integration', 'part3'], timeout: 25,
+  env: {'SEASIDE_TEST_PART': '3', 'SEASIDE_REQUIREMENTS': '3.1,7,12.2b'},
+)
+
 cpp = meson.get_compiler('cpp')
 if get_option('cpp_std') != 'c++23'
   error('Reconfigure the legacy build with -Dcpp_std=c++23; the core now requires C++23.')
@@ -110,7 +173,8 @@ config_foundation = static_library(
 
 session_foundation = static_library(
   'seaside-session-foundation',
-  ['src/session_bus.cpp', 'src/session_pipewire.cpp', 'src/session_systemd.cpp',
+  ['src/session_activation.cpp', 'src/session_bus.cpp', 'src/session_pipewire.cpp',
+   'src/session_portal.cpp', 'src/session_services.cpp', 'src/session_systemd.cpp',
    'src/startup_gate.cpp'],
   include_directories: include_directories('src'),
   dependencies: [systemd, pipewire, wayland_server, threads],
@@ -161,6 +225,41 @@ test('part3-session-pipewire', session_pipewire_tests, suite: ['unit', 'part3'],
   env: {'SEASIDE_GTEST': '1', 'SEASIDE_TEST_PART': '3', 'SEASIDE_REQUIREMENTS': '2.1,3.1,12.2b'},
 )
 
+session_portal_tests = executable(
+  'seaside-session-portal-tests', 'tests/unit/session_portal_test.cpp',
+  include_directories: include_directories('src', 'tests/unit'),
+  dependencies: [systemd, wayland_server, threads, gtest],
+  link_with: session_foundation, install: false,
+)
+test('part3-session-portal', session_portal_tests, suite: ['unit', 'part3'], timeout: 30,
+  env: {'SEASIDE_GTEST': '1', 'SEASIDE_TEST_PART': '3', 'SEASIDE_REQUIREMENTS': '3.1,12.2b'},
+)
+session_activation_tests = executable(
+  'seaside-session-activation-tests', 'tests/unit/session_activation_test.cpp',
+  include_directories: include_directories('src', 'tests/unit'),
+  dependencies: [systemd, wayland_server, threads, gtest],
+  link_with: session_foundation,
+  link_args: ['-Wl,--wrap=access'],
+  install: false,
+)
+test('part3-session-activation', session_activation_tests, suite: ['unit', 'part3'], timeout: 30,
+  env: {'SEASIDE_GTEST': '1', 'SEASIDE_TEST_PART': '3', 'SEASIDE_REQUIREMENTS': '3.1,12.2b'},
+)
+
+seaside = executable(
+  'seaside', 'src/session_entry.cpp',
+  include_directories: include_directories('src'),
+  dependencies: [wlroots, wayland_server, pixman, libdrm, systemd, pipewire, xkbcommon, threads],
+  link_with: [core, tty_foundation, config_foundation, capture_foundation, session_foundation],
+  install: true,
+)
+install_data('packaging/seaside-portals.conf', install_dir: get_option('datadir') / 'xdg-desktop-portal')
+test('part3-session-entry-guard', python,
+  args: [files('tests/integration/test_session_entry.py'), seaside],
+  suite: ['integration', 'part3'], timeout: 15,
+  env: {'SEASIDE_TEST_PART': '3', 'SEASIDE_REQUIREMENTS': '3,12.2b'},
+)
+
 headless_fixture = executable(
   'seaside-headless-fixture',
   'tests/integration/headless.c',
@@ -180,6 +279,19 @@ part3_fixture = executable(
 )
 test('part3-headless-session', part3_fixture, suite: ['integration', 'part3'], timeout: 30,
   env: {'SEASIDE_TEST_PART': '3', 'SEASIDE_REQUIREMENTS': '2.1,2.2,3,12.2b'},
+)
+
+portal_smoke = executable(
+  'seaside-portal-smoke', ['tests/integration/portal_smoke.cpp', 'tests/integration/part3_bridge.c'],
+  include_directories: include_directories('src', 'tests/integration'),
+  dependencies: [wlroots, wayland_server, pixman, libdrm, systemd, pipewire, threads],
+  link_with: [core, capture_foundation, session_foundation], install: false,
+)
+test('part3-real-portals', python,
+  args: [files('tests/integration/test_real_portals.py'), portal_smoke,
+         files('packaging/seaside-portals.conf')],
+  suite: ['integration', 'part3'], timeout: 35,
+  env: {'SEASIDE_TEST_PART': '3', 'SEASIDE_REQUIREMENTS': '3.1,7,12.2b'},
 )
 
 drm_probe = executable(
@@ -290,7 +402,7 @@ summary({
   'Protocol XML package': wayland_protocols.version(),
   'libdrm': libdrm.version(),
   'Fixture renderer': 'pixman, offscreen tests only',
-  'Installed product targets': 'none; Part 3 development fixtures',
+  'Installed product targets': 'seaside TTY session',
   'C++ standard': 'C++23',
   'GoogleTest': gtest.version(),
   'TOML parser (strict 1.0)': tomlplusplus.version(),

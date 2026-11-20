@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "tty_input.h"
 
+#include <limits.h>
 #include <linux/input-event-codes.h>
 #include <stdlib.h>
 #include <time.h>
@@ -24,6 +25,7 @@ struct seaside_tty_input {
     bool attached;
     struct wlr_seat *seat;
     struct wlr_keyboard_group *group;
+    struct xkb_state *shortcut_state;
     /* wlroots uses the seat keyboard's key list for late wl_keyboard binds.
      * Keep it separate so a held, consumed shortcut never enters that list. */
     struct wlr_keyboard client_keyboard;
@@ -32,6 +34,7 @@ struct seaside_tty_input {
     struct wl_listener focus_destroy;
     struct wl_listener group_key;
     struct wl_listener group_modifiers;
+    struct wl_listener group_enter;
     struct wl_listener group_leave;
     bool consumed[KEY_CNT];
 };
@@ -155,6 +158,32 @@ static bool launch_shortcut(struct seaside_tty_input *input, uint32_t keycode) {
            xkb_state_key_get_one_sym(keyboard->xkb_state, keycode + 8) == XKB_KEY_Return;
 }
 
+static bool configured_shortcut(struct seaside_tty_input *input, uint32_t keycode) {
+    if (!input->shortcut_state) {
+        return false;
+    }
+    const struct wlr_keyboard *keyboard = &input->group->keyboard;
+    const xkb_mod_mask_t active =
+        xkb_state_serialize_mods(input->shortcut_state, XKB_STATE_MODS_DEPRESSED) |
+        xkb_state_serialize_mods(input->shortcut_state, XKB_STATE_MODS_LATCHED);
+    uint32_t state = 0;
+    for (size_t i = 0; i < WLR_MODIFIER_COUNT; ++i) {
+        const xkb_mod_index_t index = keyboard->mod_indexes[i];
+        if (index < sizeof(active) * CHAR_BIT && (active & (1u << index)) != 0) {
+            state |= 1u << i;
+        }
+    }
+    if ((state & (WLR_MODIFIER_MOD3 | WLR_MODIFIER_MOD5)) != 0) {
+        return false;
+    }
+    const uint8_t modifiers =
+        ((state & WLR_MODIFIER_LOGO) ? 1 : 0) | ((state & WLR_MODIFIER_CTRL) ? 2 : 0) |
+        ((state & WLR_MODIFIER_ALT) ? 4 : 0) | ((state & WLR_MODIFIER_SHIFT) ? 8 : 0);
+    /* Ignore lock modifier bits while using the effective XKB keysym. */
+    const uint32_t keysym = xkb_state_key_get_one_sym(input->shortcut_state, keycode + 8);
+    return input->callbacks.shortcut_pressed(input->data, modifiers, keysym);
+}
+
 static void deliver_key(struct seaside_tty_input *input, struct wlr_keyboard_key_event event) {
     if (event.keycode >= KEY_CNT) {
         return;
@@ -195,12 +224,26 @@ static void handle_group_key(struct wl_listener *listener, void *data) {
     if (event->keycode >= KEY_CNT) {
         return;
     }
-    if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED && !input->consumed[event->keycode] &&
-        launch_shortcut(input, event->keycode)) {
-        input->consumed[event->keycode] = true;
-        ++input->snapshot.launch_requests;
-        input->callbacks.launch_requested(input->data);
-        return;
+    const bool pressed = event->state == WL_KEYBOARD_KEY_STATE_PRESSED;
+    const bool handled =
+        pressed && !input->consumed[event->keycode] && configured_shortcut(input, event->keycode);
+    if (input->shortcut_state) {
+        /* Device modifier masks can outlive a removed group member. Shortcuts
+         * follow the aggregate key transitions, including synthetic releases. */
+        xkb_state_update_key(input->shortcut_state, event->keycode + 8,
+                             pressed ? XKB_KEY_DOWN : XKB_KEY_UP);
+    }
+    if (pressed && !input->consumed[event->keycode]) {
+        if (handled) {
+            input->consumed[event->keycode] = true;
+            return;
+        }
+        if (launch_shortcut(input, event->keycode)) {
+            input->consumed[event->keycode] = true;
+            ++input->snapshot.launch_requests;
+            input->callbacks.launch_requested(input->data);
+            return;
+        }
     }
     if (event->state == WL_KEYBOARD_KEY_STATE_RELEASED && !event->update_state) {
         /* Input device teardown in wlroots emits releases without updating
@@ -225,6 +268,18 @@ static void handle_group_modifiers(struct wl_listener *listener, void *data) {
     deliver_modifiers(input, &keyboard->modifiers);
 }
 
+static void handle_group_enter(struct wl_listener *listener, void *data) {
+    struct seaside_tty_input *input = wl_container_of(listener, input, group_enter);
+    if (!input->shortcut_state) {
+        return;
+    }
+    struct wl_array *keys = data;
+    const uint32_t *key;
+    wl_array_for_each(key, keys) {
+        xkb_state_update_key(input->shortcut_state, *key + 8, XKB_KEY_DOWN);
+    }
+}
+
 static void handle_group_leave(struct wl_listener *listener, void *data) {
     struct seaside_tty_input *input = wl_container_of(listener, input, group_leave);
     struct wl_array *keys = data;
@@ -234,6 +289,9 @@ static void handle_group_leave(struct wl_listener *listener, void *data) {
         (uint32_t)((uint64_t)now.tv_sec * 1000 + (uint64_t)now.tv_nsec / 1000000);
     const uint32_t *key;
     wl_array_for_each(key, keys) {
+        if (input->shortcut_state) {
+            xkb_state_update_key(input->shortcut_state, *key + 8, XKB_KEY_UP);
+        }
         deliver_key(input, (struct wlr_keyboard_key_event){
                                .time_msec = time_msec,
                                .keycode = *key,
@@ -362,11 +420,15 @@ bool seaside_tty_input_enable_keyboard(struct seaside_tty_input *input,
 
     struct wlr_keyboard_group *group = wlr_keyboard_group_create();
     wlr_keyboard_init(&input->client_keyboard, &client_keyboard_impl, "Seaside keyboard");
-    bool mapped = group && wlr_keyboard_set_keymap(&group->keyboard, keymap) &&
+    struct xkb_state *shortcut_state =
+        input->callbacks.shortcut_pressed ? xkb_state_new(keymap) : NULL;
+    bool mapped = group && (!input->callbacks.shortcut_pressed || shortcut_state) &&
+                  wlr_keyboard_set_keymap(&group->keyboard, keymap) &&
                   wlr_keyboard_set_keymap(&input->client_keyboard, keymap);
     xkb_keymap_unref(keymap);
     struct wlr_seat *seat = mapped ? wlr_seat_create(display, "seat0") : NULL;
     if (!seat || !wlr_data_device_manager_create(display)) {
+        xkb_state_unref(shortcut_state);
         wlr_seat_destroy(seat);
         if (group) {
             wlr_keyboard_group_destroy(group);
@@ -377,14 +439,17 @@ bool seaside_tty_input_enable_keyboard(struct seaside_tty_input *input,
 
     input->seat = seat;
     input->group = group;
+    input->shortcut_state = shortcut_state;
     input->seat_destroy.notify = handle_seat_destroy;
     input->focus_destroy.notify = handle_focus_destroy;
     input->group_key.notify = handle_group_key;
     input->group_modifiers.notify = handle_group_modifiers;
+    input->group_enter.notify = handle_group_enter;
     input->group_leave.notify = handle_group_leave;
     wl_signal_add(&seat->events.destroy, &input->seat_destroy);
     wl_signal_add(&group->keyboard.events.key, &input->group_key);
     wl_signal_add(&group->keyboard.events.modifiers, &input->group_modifiers);
+    wl_signal_add(&group->events.enter, &input->group_enter);
     wl_signal_add(&group->events.leave, &input->group_leave);
     return true;
 }
@@ -396,9 +461,11 @@ void seaside_tty_input_destroy(struct seaside_tty_input *input) {
         if (input->group) {
             wl_list_remove(&input->group_key.link);
             wl_list_remove(&input->group_modifiers.link);
+            wl_list_remove(&input->group_enter.link);
             wl_list_remove(&input->group_leave.link);
             wlr_keyboard_group_destroy(input->group);
             wlr_keyboard_finish(&input->client_keyboard);
+            xkb_state_unref(input->shortcut_state);
         }
         free(input);
     }

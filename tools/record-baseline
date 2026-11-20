@@ -27,6 +27,8 @@ PACKAGES = (
     'wlroots0.20', 'wayland', 'wayland-protocols', 'libdrm', 'pixman',
     'libinput', 'libxkbcommon', 'mesa', 'seatd',
     'systemd', 'systemd-libs', 'libpipewire', 'pipewire', 'dbus',
+    'xdg-desktop-portal', 'xdg-desktop-portal-wlr', 'xdg-desktop-portal-gtk',
+    'wireplumber', 'grim', 'foot',
 )
 
 
@@ -131,7 +133,7 @@ def collect(build_dir: Path) -> dict:
         errors.append('Cannot record installed protocol XML hashes')
 
     source_files = [ROOT / name for name in ('meson.build', '.clang-format', '.clang-tidy', 'LICENSE')]
-    for directory in ('src', 'tests', 'tools'):
+    for directory in ('src', 'tests', 'tools', 'packaging'):
         source_files.extend(
             path for path in (ROOT / directory).rglob('*')
             if path.is_file() and '__pycache__' not in path.parts
@@ -177,6 +179,11 @@ def collect(build_dir: Path) -> dict:
         '/usr/bin/dbus-daemon', '/usr/bin/pipewire',
         '/usr/share/dbus-1/session.conf', '/usr/share/pipewire/client.conf',
     )]
+    session_support_files.extend(digest(path) for path in (
+        Path('/usr/lib/xdg-desktop-portal'), Path('/usr/lib/xdg-desktop-portal-wlr'),
+        Path('/usr/lib/xdg-desktop-portal-gtk'), Path('/usr/bin/wireplumber'),
+        Path('/usr/bin/grim'), Path('/usr/bin/foot'),
+    ) if path.is_file())
 
     observations = {
         'git_head': command(['git', 'rev-parse', 'HEAD']),

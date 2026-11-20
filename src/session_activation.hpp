@@ -1,0 +1,37 @@
+#ifndef SEASIDE_SESSION_ACTIVATION_HPP
+#define SEASIDE_SESSION_ACTIVATION_HPP
+
+#include "startup_gate.hpp"
+
+#include <chrono>
+#include <expected>
+#include <functional>
+#include <memory>
+#include <string_view>
+
+namespace seaside {
+class SessionBus;
+
+// The bus and Wayland loop outlive the activation and its orderly stop.
+class PortalActivation final {
+  public:
+    using Completion = std::function<void(StartupService, ServiceReport)>;
+
+    static std::expected<std::unique_ptr<PortalActivation>, ServiceReport>
+    start(SessionBus &bus, std::string_view socket, Completion completion,
+          std::chrono::milliseconds timeout) noexcept;
+
+    ~PortalActivation() noexcept;
+    PortalActivation(const PortalActivation &) = delete;
+    PortalActivation &operator=(const PortalActivation &) = delete;
+
+    // Call outside dispatch, after cancelling other portal requests.
+    bool stop() noexcept;
+
+  private:
+    struct Impl;
+    explicit PortalActivation(std::shared_ptr<Impl> impl) noexcept;
+    std::shared_ptr<Impl> impl_;
+};
+} // namespace seaside
+#endif

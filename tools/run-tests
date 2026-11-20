@@ -808,8 +808,7 @@ def write_report(run_dir: Path, report: dict) -> None:
         f"Baseline: {report.get('baseline', 'not collected')}",
     ]
     if 3 in parts:
-        lines.append("Part 3 is a partial headless milestone; real TTY/seat/display/input "
-                     "and service-preflight qualification remain PENDING Arch VM checks.")
+        lines.append("Part 3 full TTY startup and service preflight require the dedicated Arch VM trial.")
     for row in report["commands"]:
         lines.append(f"{row['status'].upper()}: {row['id']} — {shlex.join(row['command'])}")
         if row.get("error") or row.get("cleanup_error"):

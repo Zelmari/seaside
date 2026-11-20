@@ -47,9 +47,13 @@ class PipeWireProbe final {
         std::string remote{};
     };
     using Completion = std::function<void(PipeWireResult)>;
+    using RuntimeFault = std::function<void(int native_error)>;
 
+    // With a fault callback, keep the ready connection and report its first
+    // failure outside PipeWire dispatch. The startup result remains unchanged.
     static std::expected<std::unique_ptr<PipeWireProbe>, PipeWireError>
-    create(wl_event_loop *loop, Options options, Completion completion) noexcept;
+    create(wl_event_loop *loop, Options options, Completion completion,
+           RuntimeFault fault = {}) noexcept;
     ~PipeWireProbe() noexcept;
     PipeWireProbe(const PipeWireProbe &) = delete;
     PipeWireProbe &operator=(const PipeWireProbe &) = delete;
@@ -58,7 +62,8 @@ class PipeWireProbe final {
     // If deferred scheduling fails, explicit cancel may deliver its failure
     // before returning. A throwing completion is recorded in result().
     // Destroying the probe from its completion is supported; destroying a
-    // pending probe silently cancels delivery. Explicit cancel delivers cancelled.
+    // pending probe silently cancels delivery. Explicit cancel delivers cancelled
+    // before readiness and silently releases a retained connection afterwards.
     std::expected<void, PipeWireError> cancel() noexcept;
     PipeWireResult result() const noexcept;
 

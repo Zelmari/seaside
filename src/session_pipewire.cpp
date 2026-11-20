@@ -9,6 +9,7 @@
 #include <pipewire/pipewire.h>
 #include <string_view>
 #include <thread>
+#include <utility>
 #include <wayland-server-core.h>
 
 namespace seaside {
@@ -16,12 +17,13 @@ namespace {
 void initialize_pipewire() {
     static std::once_flag initialized;
     // Other components may use libpipewire later. Do not globally deinitialize
-    // it when this short-lived connection probe finishes.
+    // it when a connection probe finishes.
     std::call_once(initialized, [] { pw_init(nullptr, nullptr); });
 }
 } // namespace
 
 struct PipeWireProbe::Impl : std::enable_shared_from_this<Impl> {
+    using Source = std::unique_ptr<wl_event_source, decltype(&wl_event_source_remove)>;
     wl_event_loop *wayland_loop;
     const std::thread::id owner = std::this_thread::get_id();
     pw_loop *pipewire_loop = nullptr;
@@ -36,10 +38,13 @@ struct PipeWireProbe::Impl : std::enable_shared_from_this<Impl> {
     std::chrono::steady_clock::time_point deadline;
     PipeWireResult outcome;
     Completion completion;
+    RuntimeFault runtime_fault;
+    int runtime_error = 0;
+    bool monitoring = false;
     bool delivery_failed = false;
 
-    Impl(wl_event_loop *loop, Completion callback)
-        : wayland_loop(loop), completion(std::move(callback)) {}
+    Impl(wl_event_loop *loop, Completion callback, RuntimeFault fault)
+        : wayland_loop(loop), completion(std::move(callback)), runtime_fault(std::move(fault)) {}
     ~Impl() noexcept { shutdown(); }
 
     void disconnect() noexcept {
@@ -74,6 +79,8 @@ struct PipeWireProbe::Impl : std::enable_shared_from_this<Impl> {
         detach_sources();
         disconnect();
         completion = {};
+        runtime_fault = {};
+        monitoring = false;
     }
 
     void settle(PipeWireStatus status, int error) noexcept {
@@ -95,25 +102,62 @@ struct PipeWireProbe::Impl : std::enable_shared_from_this<Impl> {
         }
     }
 
-    static int deliver(void *data) noexcept {
+    static int deliver_startup(void *data) noexcept {
         auto self = static_cast<Impl *>(data)->weak_from_this().lock();
         if (!self) {
             return 0;
         }
+        // Nested Wayland dispatch must not free the current timer until
+        // the completion callback has returned.
+        const Source current(std::exchange(self->completion_source, nullptr),
+                             wl_event_source_remove);
         self->delivery_failed = false;
         auto callback = std::move(self->completion);
-        const auto result = self->outcome;
-        self->detach_sources();
-        self->disconnect();
+        if (self->outcome.status == PipeWireStatus::ready && self->runtime_fault) {
+            if (wl_event_source_fd_update(self->io_source, WL_EVENT_READABLE) == 0) {
+                self->monitoring = true;
+                if (auto *deadline = std::exchange(self->deadline_source, nullptr)) {
+                    wl_event_source_remove(deadline);
+                }
+            } else {
+                self->outcome = {PipeWireStatus::failed, -errno};
+            }
+        }
+        if (!self->monitoring) {
+            self->shutdown();
+        }
         try {
             if (callback) {
-                callback(result);
+                callback(self->outcome);
             }
         } catch (...) {
             // A user callback cannot unwind through libwayland's C dispatch.
             self->outcome = {PipeWireStatus::failed, -ECANCELED, true};
+            self->shutdown();
         }
         return 0;
+    }
+
+    void observe_error(int code) noexcept {
+        if (outcome.status == PipeWireStatus::pending) {
+            settle(PipeWireStatus::failed, code);
+        } else if (monitoring && !runtime_error) {
+            runtime_error = code;
+        } else if (outcome.status == PipeWireStatus::ready && completion && runtime_fault) {
+            // A peer can send done and disconnect in the same iteration.
+            outcome = {PipeWireStatus::failed, code};
+        }
+    }
+
+    void deliver_fault() noexcept {
+        auto callback = std::exchange(runtime_fault, {});
+        const auto code = std::exchange(runtime_error, 0);
+        shutdown();
+        try {
+            callback(code);
+        } catch (...) {
+            outcome.callback_failed = true;
+        }
     }
 
     static int timeout(void *data) noexcept {
@@ -121,9 +165,10 @@ struct PipeWireProbe::Impl : std::enable_shared_from_this<Impl> {
         if (!self) {
             return 0;
         }
+        const Source current(std::exchange(self->deadline_source, nullptr), wl_event_source_remove);
         self->settle(PipeWireStatus::timed_out, -ETIMEDOUT);
         if (self->delivery_failed) {
-            deliver(data);
+            deliver_startup(data);
         }
         return 0;
     }
@@ -133,35 +178,30 @@ struct PipeWireProbe::Impl : std::enable_shared_from_this<Impl> {
         if (!self) {
             return 0;
         }
-        if (self->outcome.status != PipeWireStatus::pending) {
+        const bool pending = self->outcome.status == PipeWireStatus::pending;
+        if (!pending && !self->monitoring) {
             return 0;
         }
         // Several ready sources may be returned in the same epoll batch. An
         // overdue reply must not win just because I/O precedes its timer.
-        if (std::chrono::steady_clock::now() >= self->deadline) {
+        if (pending && std::chrono::steady_clock::now() >= self->deadline) {
             self->settle(PipeWireStatus::timed_out, -ETIMEDOUT);
-            if (self->delivery_failed) {
-                deliver(data);
+        } else if ((mask & (WL_EVENT_HANGUP | WL_EVENT_ERROR)) != 0) {
+            self->observe_error(-EPIPE);
+        } else {
+            // The PipeWire epoll fd becomes readable for its timers and I/O.
+            // One nonblocking iteration preserves the outer loop.
+            pw_loop_enter(self->pipewire_loop);
+            const int result = pw_loop_iterate(self->pipewire_loop, 0);
+            pw_loop_leave(self->pipewire_loop);
+            if (result < 0 && result != -EINTR) {
+                self->observe_error(result);
             }
-            return 0;
-        }
-        if ((mask & (WL_EVENT_HANGUP | WL_EVENT_ERROR)) != 0) {
-            self->settle(PipeWireStatus::failed, -EPIPE);
-            if (self->delivery_failed) {
-                deliver(data);
-            }
-            return 0;
-        }
-        // The PipeWire epoll fd becomes readable for its timers and I/O. One
-        // nonblocking iteration per Wayland callback preserves the outer loop.
-        pw_loop_enter(self->pipewire_loop);
-        const int result = pw_loop_iterate(self->pipewire_loop, 0);
-        pw_loop_leave(self->pipewire_loop);
-        if (result < 0) {
-            self->settle(PipeWireStatus::failed, result);
         }
         if (self->delivery_failed) {
-            deliver(data);
+            deliver_startup(data);
+        } else if (self->runtime_error) {
+            self->deliver_fault();
         }
         return 0;
     }
@@ -177,8 +217,11 @@ struct PipeWireProbe::Impl : std::enable_shared_from_this<Impl> {
         }
     }
 
-    static void error(void *data, std::uint32_t, int, int code, const char *) noexcept {
-        static_cast<Impl *>(data)->settle(PipeWireStatus::failed, code < 0 ? code : -EIO);
+    static void error(void *data, std::uint32_t id, int, int code, const char *) noexcept {
+        auto *self = static_cast<Impl *>(data);
+        if (!self->monitoring || id == PW_ID_CORE) {
+            self->observe_error(code < 0 ? code : -EIO);
+        }
     }
 
     std::expected<void, PipeWireError> initialize(const Options &options) noexcept {
@@ -225,7 +268,7 @@ struct PipeWireProbe::Impl : std::enable_shared_from_this<Impl> {
         if (!core) {
             return std::unexpected(PipeWireError{PipeWireFailure::connection, -errno});
         }
-        completion_source = wl_event_loop_add_timer(wayland_loop, deliver, this);
+        completion_source = wl_event_loop_add_timer(wayland_loop, deliver_startup, this);
         deadline_source = wl_event_loop_add_timer(wayland_loop, timeout, this);
         const int fd = pw_loop_get_fd(pipewire_loop);
         if (!completion_source || !deadline_source || fd < 0) {
@@ -261,14 +304,15 @@ struct PipeWireProbe::Impl : std::enable_shared_from_this<Impl> {
 PipeWireProbe::PipeWireProbe(std::shared_ptr<Impl> impl) noexcept : impl_(std::move(impl)) {}
 
 std::expected<std::unique_ptr<PipeWireProbe>, PipeWireError>
-PipeWireProbe::create(wl_event_loop *loop, Options options, Completion completion) noexcept {
+PipeWireProbe::create(wl_event_loop *loop, Options options, Completion completion,
+                      RuntimeFault fault) noexcept {
     if (!loop || !completion || options.timeout.count() < 1 || options.timeout.count() > INT_MAX ||
         options.remote.find('\0') != std::string::npos) {
         return std::unexpected(PipeWireError{PipeWireFailure::invalid_arguments, -EINVAL});
     }
     try {
         initialize_pipewire();
-        auto impl = std::make_shared<Impl>(loop, std::move(completion));
+        auto impl = std::make_shared<Impl>(loop, std::move(completion), std::move(fault));
         if (auto initialized = impl->initialize(options); !initialized) {
             return std::unexpected(initialized.error());
         }
@@ -287,9 +331,13 @@ std::expected<void, PipeWireError> PipeWireProbe::cancel() noexcept {
     if (std::this_thread::get_id() != self->owner) {
         return std::unexpected(PipeWireError{PipeWireFailure::wrong_thread, -EPERM});
     }
+    if (self->monitoring) {
+        self->shutdown();
+        return {};
+    }
     self->settle(PipeWireStatus::cancelled, -ECANCELED);
     if (self->delivery_failed) {
-        Impl::deliver(self.get());
+        Impl::deliver_startup(self.get());
     }
     return {};
 }

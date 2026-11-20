@@ -4,13 +4,13 @@ Status: headless milestone software-verified in Arch WSL2. The Arch VirtualBox
 guest passed the original harness and the live console fixture with Pixman.
 Automatic renderer selection failed on this guest. The keyboard and terminal
 trial passed offscreen and in VirtualBox. Systemd and PipeWire passed on the
-first run after a fresh VM login. Full session startup and release
-qualification remain pending.
+first run after a fresh VM login. The full TTY entrypoint and portal checks
+are implemented. Their combined Arch VM trial and native qualification remain
+pending.
 
 This implements the bounded [Part 3 plan](PART3_PLAN.md) against specification
 §§2.1–2.2, 3–3.1, 12.2b and 14. The checks below cover the headless milestone
-and the subsequent Arch VM checkpoints. The TTY entrypoint is a development
-fixture.
+and the subsequent Arch VM checkpoints. `seaside` is the real TTY entrypoint.
 
 ## Implemented mechanisms
 
@@ -283,18 +283,70 @@ the DRM discovery probe skipped in WSL. The report is
 `test-results/20261120T181715Z-554be2dd/summary.txt`. All eight Part 3 entries
 also passed with ASan/UBSan and leak detection.
 
-The full startup trial needs a live Wayland socket, session-owned activation
-environment, and the genuine capture globals expected by the selected portal
-backend. Test portal routing and startup failure-to-TTY in the dedicated
-graphical guest. Qualify VT switching and isolation with the session lifecycle.
+### Full session startup
 
-The portal candidate (`xdg-desktop-portal-wlr` 0.8.4) requests embedded cursors
-by default. The wlroots 0.20.2 output capture helper responds by switching the
-output to software cursors. Qualifying this backend requires verifying cursor
-composition in the captured frames while preserving the hardware cursor on
-the display. The portal gate also needs a real capture source before it can
-test backend startup. [Portal capture request](https://github.com/emersion/xdg-desktop-portal-wlr/blob/v0.8.4/src/screencast/ext_image_copy.c#L278-L284)
-and [wlroots output capture behavior](https://gitlab.freedesktop.org/wlroots/wlroots/-/blob/0.20.2/types/ext_image_capture_source_v1/output.c#L40-L70).
+`seaside` starts in the foreground on the active Linux console. It presents
+an output with a hardware cursor, publishes its Wayland globals, and checks
+systemd, PipeWire and both portal endpoints before printing `seaside READY`
+and running configured autostart. The staged compositor uses one DRM output.
+After a VT switch it attaches the returned output to the existing scene and
+capture managers and verifies cursor presentation again.
+
+Portal activation uses private transient units on the login user manager.
+Each unit receives the session environment directly. An existing owner of a
+required portal name causes a startup failure. The coordinator matches new
+name owners to its own unit paths and waits for its units to stop before
+returning to the TTY. The routing file selects wlr for Screenshot and
+ScreenCast, and GTK supplies Access. The ScreenCast check creates and closes
+an unstarted session and verifies the matching object on the wlr backend.
+The screenshot interfaces are checked during preflight. Interactive portal
+permissions and full streaming are release integration checks.
+
+The monitor-capture source uses the wlroots image-copy manager and advertises
+XDG output metadata. Captures with embedded cursors use a separate buffer
+with the cursor composited over the frame. The physical output keeps its
+hardware cursor. The Wayland regression checks hidden and embedded pixels,
+cursor movement, output replacement and zero software cursor locks.
+
+The headless smoke test ran Arch's frontend 1.22.1-2, wlr 0.8.4-1, GTK
+1.15.3-2 and `grim` 1.5.0-2 against Seaside on a private D-Bus and PipeWire
+session. It verified the actual portal route and a 160 × 90 PNG in both the
+normal and sanitizer builds. Private-bus tests cover late and wrong owners,
+routing failures, stopping only owned units, cleanup completion, and
+event-driven service-loss reporting. The staged install verified the binary
+and routing file paths.
+
+The full WSL harness passed 19 entries and all 170 GoogleTest cases. It
+skipped DRM discovery and the portal test that looks for installed Arch
+packages. The latter passed using the unpacked packages above. The report is
+`test-results/20261120T194449Z-619cbf2b/summary.txt`. The Part 3 sanitizer
+suite passed all 12 available entries and the separate real-portal run.
+
+### Final Part 3 VM trial
+
+Run on the dedicated Arch VirtualBox guest. Type each command separately.
+
+1. `cd ~/Projects/seaside`
+2. `git pull --ff-only`
+3. `sudo pacman -S --needed xdg-desktop-portal-{wlr,gtk}`
+4. `ninja -C build`
+5. `sudo meson install -C build --no-rebuild`
+6. `tools/run-tests`
+7. `WLR_RENDERER=pixman build/seaside`
+
+Move the pointer, open `foot` with Super+Return, then run
+`grim -c /tmp/seaside.png` and `file /tmp/seaside.png` inside it. Switch to
+TTY 2 with Ctrl+Alt+F2 and back with Ctrl+Alt+F1. Confirm the same terminal
+and the cursor still work. Repeat the `grim` command after returning to
+confirm capture still works. Run `pkill -TERM -x seaside` inside `foot` to
+return to the original shell. Record `seaside READY cursor-plane=...`, any
+startup or cleanup error, and the PNG dimensions.
+
+From the original shell, run
+`PIPEWIRE_REMOTE=seaside-missing WLR_RENDERER=pixman build/seaside` to simulate
+a missing required service. It should print `seaside FAIL service=pipewire`
+and return to that shell. A normal launch again demonstrates that the
+previous run released its resources.
 
 Native hardware cursor, latency, VRR, tearing, colour and suspend/resume evidence
 remain separate. Later window/workspace/layout/IPC/compatibility parts have not

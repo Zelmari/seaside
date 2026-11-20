@@ -15,6 +15,7 @@ struct seaside_tty_drm_observation {
     bool active;
     bool failed;
     bool cursor_presented;
+    bool output_pending;
     uint32_t connector_id;
     uint32_t cursor_plane_id;
     uint64_t presented_frames;
@@ -27,7 +28,11 @@ struct seaside_tty_drm_observation {
 extern "C" {
 #endif
 
-/* Owns the seat. On success transfer both returned handles to Server::start;
+/* A real foreground VT is required before acquiring a seat or user resources. */
+bool seaside_tty_active_console(void);
+
+/* Owns the seat. A NULL device uses wlroots' normal seat GPU discovery.
+ * On success transfer both returned handles to Server::start;
  * if not transferred, the caller must destroy them before destroying display.
  * Destroy the backend/display before releasing this owner. All calls use the
  * display event-loop thread. Session activation may dispatch that loop briefly. */
@@ -45,6 +50,7 @@ struct wlr_output *seaside_tty_drm_enable(struct seaside_tty_drm *drm,
 /* Absolute coordinates are normalized, relative coordinates are logical pixels.
  * The accepted move count advances only for a changed cursor position. */
 bool seaside_tty_drm_move(struct seaside_tty_drm *drm, bool absolute, double x, double y);
+bool seaside_tty_drm_change_vt(struct seaside_tty_drm *drm, unsigned vt);
 struct seaside_tty_drm_observation seaside_tty_drm_observation(const struct seaside_tty_drm *drm);
 
 #ifdef __cplusplus

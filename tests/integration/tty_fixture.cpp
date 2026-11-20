@@ -6,20 +6,15 @@
 #include "wlroots_bridge.h"
 
 #include <algorithm>
-#include <array>
-#include <charconv>
 #include <chrono>
 #include <cinttypes>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <expected>
-#include <linux/vt.h>
 #include <memory>
 #include <string_view>
-#include <sys/ioctl.h>
 #include <sys/wait.h>
-#include <unistd.h>
 #include <wayland-server-core.h>
 
 namespace {
@@ -39,25 +34,6 @@ bool card_path(std::string_view path) {
     path.remove_prefix(device_prefix.size());
     return !path.empty() &&
            std::ranges::all_of(path, [](char value) { return value >= '0' && value <= '9'; });
-}
-
-bool active_console() {
-    std::array<char, 64> name{};
-    if (ttyname_r(STDIN_FILENO, name.data(), name.size()) != 0) {
-        return false;
-    }
-    constexpr std::string_view prefix = "/dev/tty";
-    const std::string_view path(name.data());
-    if (!path.starts_with(prefix)) {
-        return false;
-    }
-    const auto number = path.substr(prefix.size());
-    unsigned int vt = 0;
-    const auto [end, error] = std::from_chars(number.data(), number.data() + number.size(), vt);
-    vt_stat active{};
-    return error == std::errc{} && end == number.data() + number.size() && vt > 0 &&
-           tcgetpgrp(STDIN_FILENO) == getpgrp() && ioctl(STDIN_FILENO, VT_GETSTATE, &active) == 0 &&
-           vt == active.v_active;
 }
 
 struct Fixture {
@@ -201,6 +177,7 @@ std::expected<Result, const char *> run_fixture(const char *device, bool termina
         .motion = Fixture::move_pointer,
         .exit_requested = terminal_mode ? nullptr : Fixture::exit_requested,
         .launch_requested = terminal_mode ? Fixture::launch_terminal : nullptr,
+        .shortcut_pressed = nullptr,
     };
     std::unique_ptr<seaside_tty_input, decltype(&seaside_tty_input_destroy)> input(
         seaside_tty_input_create(backend, &callbacks, &fixture), seaside_tty_input_destroy);
@@ -293,7 +270,7 @@ int main(int argc, char **argv) {
         std::fputs("Usage: seaside-tty-fixture [--terminal] [/dev/dri/cardN]\n", stderr);
         return 2;
     }
-    if (!active_console()) {
+    if (!seaside_tty_active_console()) {
         std::fputs("TTY fixture BLOCKED: run as a foreground job on the active Linux console\n",
                    stderr);
         return unavailable;

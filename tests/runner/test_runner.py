@@ -531,7 +531,7 @@ class ResultEvidenceTests(unittest.TestCase):
         self.assertEqual(report["part_results"]["3"]["software_status"], "pass")
         self.assertEqual(report["part_results"]["3"]["qualification"],
                          "headless_milestone_only_pending_arch_vm_tty_seat_display_input_and_service_preflight")
-        self.assertIn("Part 3 is a partial headless milestone", (self.root / "summary.txt").read_text())
+        self.assertIn("Part 3 full TTY startup", (self.root / "summary.txt").read_text())
 
     def parse(self, xml, aggregate="OK", rows=None, log_limit=1024):
         if xml is not None:

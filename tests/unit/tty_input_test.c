@@ -12,6 +12,7 @@
 #include <wlr/interfaces/wlr_keyboard.h>
 #include <wlr/interfaces/wlr_pointer.h>
 #include <wlr/types/wlr_compositor.h>
+#include <xkbcommon/xkbcommon-keysyms.h>
 
 static void check(bool condition, const char *message) {
     if (!condition) {
@@ -24,6 +25,8 @@ struct observation {
     unsigned motions;
     unsigned exits;
     unsigned launches;
+    unsigned configured_shortcuts;
+    unsigned vt_switches;
     bool absolute;
     double x, y;
 };
@@ -44,6 +47,19 @@ static void record_exit(void *data) {
 static void record_launch(void *data) {
     struct observation *observation = data;
     ++observation->launches;
+}
+
+static bool record_shortcut(void *data, uint8_t modifiers, uint32_t keysym) {
+    struct observation *observation = data;
+    if (modifiers == 2 && keysym == XKB_KEY_Return) {
+        ++observation->configured_shortcuts;
+        return true;
+    }
+    if (keysym == XKB_KEY_XF86Switch_VT_2) {
+        ++observation->vt_switches;
+        return true;
+    }
+    return false;
 }
 
 static const struct wlr_backend_impl backend_impl = {0};
@@ -297,8 +313,10 @@ static void exercise_wayland_keyboard(void) {
     struct wlr_backend backend = {0};
     wlr_backend_init(&backend, &backend_impl);
     struct observation observation = {0};
-    const struct seaside_tty_input_callbacks terminal_callbacks = {.launch_requested =
-                                                                       record_launch};
+    const struct seaside_tty_input_callbacks terminal_callbacks = {
+        .launch_requested = record_launch,
+        .shortcut_pressed = record_shortcut,
+    };
     struct seaside_tty_input *input =
         seaside_tty_input_create(&backend, &terminal_callbacks, &observation);
     check(input && seaside_tty_input_enable_keyboard(input, server), "keyboard seat setup failed");
@@ -379,6 +397,17 @@ static void exercise_wayland_keyboard(void) {
     check(!unfocused.has_keyboard_focus &&
               unfocused.forwarded_key_events == received.forwarded_key_events,
           "surface destruction left stale keyboard focus");
+
+    key(&second, KEY_LEFTCTRL, WL_KEYBOARD_KEY_STATE_PRESSED);
+    key(&second, KEY_ENTER, WL_KEYBOARD_KEY_STATE_PRESSED);
+    key(&second, KEY_ENTER, WL_KEYBOARD_KEY_STATE_RELEASED);
+    key(&second, KEY_LEFTALT, WL_KEYBOARD_KEY_STATE_PRESSED);
+    key(&second, KEY_F2, WL_KEYBOARD_KEY_STATE_PRESSED);
+    key(&second, KEY_F2, WL_KEYBOARD_KEY_STATE_RELEASED);
+    key(&second, KEY_LEFTALT, WL_KEYBOARD_KEY_STATE_RELEASED);
+    key(&second, KEY_LEFTCTRL, WL_KEYBOARD_KEY_STATE_RELEASED);
+    check(observation.configured_shortcuts == 1 && observation.vt_switches == 1,
+          "configured Ctrl+Return or standard VT keysym did not reach the compositor");
 
     wl_keyboard_release(keyboard_client.keyboard);
     wl_seat_release(keyboard_client.seat);

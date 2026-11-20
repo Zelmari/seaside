@@ -402,6 +402,58 @@ TEST_F(PipeWireProbeTest, PrivateRealServerCompletesCoreRoundtrip) {
     EXPECT_EQ(completions, 1U);
 }
 
+TEST_F(PipeWireProbeTest, RetainedCoreReportsRuntimeDisconnectWithoutChangingStartupResult) {
+    ASSERT_TRUE(start_server()) << server_log();
+    unsigned faults = 0;
+    auto result = PipeWireProbe::create(
+        loop, {.remote = socket()},
+        [&](PipeWireResult value) {
+            completed = value;
+            ++completions;
+        },
+        [&](int error) {
+            EXPECT_LT(error, 0);
+            EXPECT_EQ(probe->result().status, PipeWireStatus::ready);
+            ++faults;
+            probe.reset();
+            EXPECT_EQ(wl_event_loop_dispatch(loop, 0), 0);
+        });
+    ASSERT_TRUE(result);
+    probe = std::move(*result);
+    ASSERT_TRUE(dispatch_until([&] { return completions != 0; }));
+    ASSERT_EQ(completed.status, PipeWireStatus::ready);
+    EXPECT_EQ(faults, 0U);
+
+    stop_server();
+    ASSERT_TRUE(dispatch_until([&] { return faults != 0; }));
+    dispatch_quietly();
+    EXPECT_EQ(faults, 1U);
+    EXPECT_EQ(completions, 1U);
+}
+
+TEST_F(PipeWireProbeTest, CancelAfterReadinessSilentlyReleasesRuntimeConnection) {
+    ASSERT_TRUE(start_server()) << server_log();
+    unsigned faults = 0;
+    auto result = PipeWireProbe::create(
+        loop, {.remote = socket()},
+        [&](PipeWireResult value) {
+            completed = value;
+            ++completions;
+        },
+        [&](int) { ++faults; });
+    ASSERT_TRUE(result);
+    probe = std::move(*result);
+    ASSERT_TRUE(dispatch_until([&] { return completions != 0; }));
+    ASSERT_EQ(completed.status, PipeWireStatus::ready);
+    ASSERT_TRUE(probe->cancel());
+
+    stop_server();
+    dispatch_quietly();
+    EXPECT_EQ(faults, 0U);
+    EXPECT_EQ(completions, 1U);
+    EXPECT_EQ(probe->result().status, PipeWireStatus::ready);
+}
+
 TEST_F(PipeWireProbeTest, ConnectedButSilentPeerTimesOutWhileWaylandKeepsDispatching) {
     ASSERT_TRUE(stall_peer());
     unsigned beats = 0;

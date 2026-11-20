@@ -17,6 +17,9 @@ struct seaside_tty_input_callbacks {
     void (*exit_requested)(void *data);
     /* An optional exact Super+Return shortcut in the terminal fixture. */
     void (*launch_requested)(void *data);
+    /* Modifier bits match the binding table (Super, Ctrl, Alt, Shift).
+     * Returning true consumes both the press and release. */
+    bool (*shortcut_pressed)(void *data, uint8_t modifiers, uint32_t keysym);
 };
 
 struct seaside_tty_input_snapshot {
