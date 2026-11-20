@@ -783,6 +783,8 @@ def write_report(run_dir: Path, report: dict) -> None:
             "software_status": software,
             "counts": dict(Counter(row["status"] for row in rows)),
             "qualification": "pending_arch_vm_drm_and_interactive_checks" if part == 1 else
+                             "headless_milestone_only_pending_arch_vm_tty_seat_display_input_and_service_preflight"
+                             if part == 3 else
                              "software_evidence_only_designated_vm_qualification_not_established",
         }
     report["part1_qualification"] = "pending_arch_vm_drm_and_interactive_checks"
@@ -805,6 +807,9 @@ def write_report(run_dir: Path, report: dict) -> None:
         "GoogleTest cases: " + ", ".join(f"{count} {status}" for status, count in report["case_counts"].items()),
         f"Baseline: {report.get('baseline', 'not collected')}",
     ]
+    if 3 in parts:
+        lines.append("Part 3 is a partial headless milestone; real TTY/seat/display/input "
+                     "and service-preflight qualification remain PENDING Arch VM checks.")
     for row in report["commands"]:
         lines.append(f"{row['status'].upper()}: {row['id']} — {shlex.join(row['command'])}")
         if row.get("error") or row.get("cleanup_error"):
@@ -867,7 +872,8 @@ def main(argv: list[str] | None = None, *, repository_root: Path | None = None) 
             gtest_dir = run_dir / "gtest"
             gtest_dir.mkdir(mode=0o700)
             child_env["GTEST_OUTPUT"] = "xml:" + str(gtest_dir) + "/"
-            for key, leaf in (("XDG_RUNTIME_DIR", "runtime"), ("XDG_STATE_HOME", "state"), ("XDG_CONFIG_HOME", "config")):
+            for key, leaf in (("XDG_RUNTIME_DIR", "runtime"), ("XDG_STATE_HOME", "state"),
+                              ("XDG_CONFIG_HOME", "config"), ("TMPDIR", "tmp")):
                 directory = fixture_root / leaf
                 directory.mkdir(mode=0o700)
                 child_env[key] = str(directory)

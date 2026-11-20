@@ -514,6 +514,25 @@ class ResultEvidenceTests(unittest.TestCase):
                     "SEASIDE_REQUIREMENTS": "8.1,8.2"},
         }
 
+    def test_part3_discovery_keeps_its_requirements_and_suite(self):
+        declaration = self.declaration(name="startup", part="3", suite="part3")
+        declaration["env"]["SEASIDE_REQUIREMENTS"] = "3,12.2b"
+        manifest = self.manifest([declaration], ["part3"])
+        self.assertEqual(len(manifest), 1)
+        self.assertEqual(manifest[0]["part"], 3)
+        self.assertEqual(manifest[0]["requirement_sections"], ["3", "12.2b"])
+
+    def test_part3_software_pass_does_not_qualify_the_real_graphical_session(self):
+        self.metadata[0]["part"] = 3
+        self.metadata[0]["requirement_sections"] = ["3", "12.2b"]
+        rows = self.parse(self.xml([self.case()]))
+        report = self.report(rows)
+        self.assertEqual(report["parts"], [3])
+        self.assertEqual(report["part_results"]["3"]["software_status"], "pass")
+        self.assertEqual(report["part_results"]["3"]["qualification"],
+                         "headless_milestone_only_pending_arch_vm_tty_seat_display_input_and_service_preflight")
+        self.assertIn("Part 3 is a partial headless milestone", (self.root / "summary.txt").read_text())
+
     def parse(self, xml, aggregate="OK", rows=None, log_limit=1024):
         if xml is not None:
             path = self.gtest_dir / "config-tests.xml"

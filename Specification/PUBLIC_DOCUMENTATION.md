@@ -30,6 +30,14 @@ normal/sanitizer verification and external static review completed in Arch WSL2.
 Designated VM/native qualification remains pending. The [plan](PART2_PLAN.md) retains
 the acceptance cases and scope; the specification retains the requirements.
 
+[Part 3 headless groundwork](PART3.md) adds a live Wayland socket, minimal
+XDG/scene ownership, asynchronous direct sd-bus and libpipewire adapters, and
+mandatory-service result coordination. Real-client offscreen pixels and private
+service exchanges provide software evidence; systemd activation, actual portal
+readiness, TTY/seat/output/input and hardware cursors remain unqualified. The
+owner-approved [milestone boundary](PART3_PLAN.md) stops for the first Arch-VM
+checks before extending the real graphical session.
+
 ## Approved technology choices
 
 | Area | Selected approach | Specification |

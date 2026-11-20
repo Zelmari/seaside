@@ -2,6 +2,7 @@
 #include "wlroots_bridge.h"
 
 #include <new>
+#include <pthread.h>
 #include <wayland-server-core.h>
 
 namespace seaside {
@@ -63,7 +64,97 @@ Server::~Server() noexcept {
     finish();
 }
 
+std::expected<std::string_view, ServerError> Server::listen(std::string_view name) noexcept {
+    if (!display_ || socket_name_) {
+        return std::unexpected(ServerError::invalid_state);
+    }
+    if (name.find('\0') != std::string_view::npos) {
+        return std::unexpected(ServerError::invalid_arguments);
+    }
+    if (name.empty()) {
+        socket_name_ = wl_display_add_socket_auto(display_.get());
+    } else {
+        try {
+            std::string copied(name);
+            if (wl_display_add_socket(display_.get(), copied.c_str()) < 0) {
+                return std::unexpected(ServerError::socket_creation);
+            }
+            named_socket_ = std::move(copied);
+            socket_name_ = named_socket_.c_str();
+        } catch (const std::bad_alloc &) {
+            return std::unexpected(ServerError::allocation);
+        }
+    }
+    if (!socket_name_) {
+        return std::unexpected(ServerError::socket_creation);
+    }
+    return std::string_view(socket_name_);
+}
+
+int Server::on_shutdown_signal(int, void *data) noexcept {
+    static_cast<Server *>(data)->terminate();
+    return 0;
+}
+
+std::expected<void, ServerError> Server::install_shutdown_signals() noexcept {
+    if (!display_ || owns_signal_mask_) {
+        return std::unexpected(ServerError::invalid_state);
+    }
+    if (pthread_sigmask(SIG_SETMASK, nullptr, &previous_signal_mask_) != 0) {
+        return std::unexpected(ServerError::signal_registration);
+    }
+    owns_signal_mask_ = true;
+    auto *loop = wl_display_get_event_loop(display_.get());
+    terminate_signal_ = wl_event_loop_add_signal(loop, SIGTERM, on_shutdown_signal, this);
+    interrupt_signal_ = wl_event_loop_add_signal(loop, SIGINT, on_shutdown_signal, this);
+    if (!terminate_signal_ || !interrupt_signal_) {
+        release_shutdown_signals();
+        return std::unexpected(ServerError::signal_registration);
+    }
+    return {};
+}
+
+void Server::release_shutdown_signals() noexcept {
+    if (terminate_signal_) {
+        wl_event_source_remove(terminate_signal_);
+        terminate_signal_ = nullptr;
+    }
+    if (interrupt_signal_) {
+        wl_event_source_remove(interrupt_signal_);
+        interrupt_signal_ = nullptr;
+    }
+    if (owns_signal_mask_) {
+        // Preserve the caller's mask across explicit signal-source ownership;
+        // changing unrelated signal bits could interfere with another subsystem.
+        for (const int signal : {SIGTERM, SIGINT}) {
+            sigset_t set;
+            sigemptyset(&set);
+            sigaddset(&set, signal);
+            pthread_sigmask(sigismember(&previous_signal_mask_, signal) ? SIG_BLOCK : SIG_UNBLOCK,
+                            &set, nullptr);
+        }
+        owns_signal_mask_ = false;
+    }
+}
+
+std::expected<void, ServerError> Server::run() noexcept {
+    if (!display_ || !socket_name_ || running_) {
+        return std::unexpected(ServerError::invalid_state);
+    }
+    running_ = true;
+    wl_display_run(display_.get());
+    running_ = false;
+    return {};
+}
+
+void Server::terminate() noexcept {
+    if (display_) {
+        wl_display_terminate(display_.get());
+    }
+}
+
 void Server::finish() noexcept {
+    release_shutdown_signals();
     // Disconnect clients while their surface listeners and renderer still live.
     // Backend teardown releases output swapchains before allocator destruction.
     if (display_) {
@@ -74,6 +165,8 @@ void Server::finish() noexcept {
     renderer_.reset();
     display_.reset();
     compositor_ = nullptr;
+    socket_name_ = nullptr;
+    named_socket_.clear();
 }
 
 } // namespace seaside

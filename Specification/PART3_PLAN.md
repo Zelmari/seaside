@@ -5,6 +5,9 @@ Scope: implement the independent, headless-testable foundation of specification
 its first required Arch-VM qualification. This is a partial Part 3 milestone,
 not completion of Part 3 or gates G1/G2/G7.
 
+Status: implemented and software-verified in Arch WSL2. The [handoff](PART3.md)
+records the final normal/sanitizer results, review fixes and remaining VM work.
+
 | Block | Implementation | Evidence |
 |---|---|---|
 | Live core and scene | Own a Wayland socket, dispatch and shutdown sources; add minimal XDG configure/map/unmap ownership and wlroots scene integration | Real isolated Wayland client, configure/ack/SHM commit/frame lifecycle, offscreen black/client pixels, cleanup and existing lifecycle regressions |

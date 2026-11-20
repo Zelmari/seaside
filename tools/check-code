@@ -18,9 +18,10 @@ def main():
     args = parser.parse_args()
     build_dir = args.build_dir.resolve()
     formatted = sorted(
-        path for directory in ('src', 'tests/unit')
+        path for directory in ('src', 'tests/unit', 'tests/integration')
         for path in (ROOT / directory).rglob('*')
         if path.suffix in ('.c', '.h', '.cpp', '.hpp')
+        and path != ROOT / 'tests/integration/headless.c'
     )
     try:
         if not formatted:

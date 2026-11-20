@@ -5,14 +5,18 @@
 #include <cstdlib>
 #include <filesystem>
 #include <gtest/gtest.h>
+#include <string>
 #include <system_error>
 
 namespace seaside::test {
 class Directory {
   public:
     Directory() {
-        char pattern[] = "/tmp/seaside-unit-XXXXXX";
-        auto *created = ::mkdtemp(pattern);
+        // The supervising runner owns TMPDIR, including after a killed test
+        // cannot run this destructor. Direct invocations use the normal temp root.
+        std::string pattern =
+            (std::filesystem::temp_directory_path() / "seaside-unit-XXXXXX").string();
+        auto *created = ::mkdtemp(pattern.data());
         if (!created)
             throw std::system_error(errno, std::generic_category(), "test directory");
         path_ = created;

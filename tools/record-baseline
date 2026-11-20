@@ -19,12 +19,14 @@ ROOT = Path(__file__).resolve().parent.parent
 DEPENDENCIES = (
     'wlroots-0.20', 'wayland-server', 'wayland-client',
     'wayland-protocols', 'libdrm', 'pixman-1', 'gtest_main', 'tomlplusplus', 'xkbcommon',
+    'libsystemd', 'libpipewire-0.3',
 )
 PACKAGES = (
     'gcc', 'gcc-libs', 'glibc', 'binutils', 'pkgconf', 'meson', 'ninja', 'python',
     'gtest', 'clang', 'gdb', 'tomlplusplus',
     'wlroots0.20', 'wayland', 'wayland-protocols', 'libdrm', 'pixman',
     'libinput', 'libxkbcommon', 'mesa', 'seatd',
+    'systemd', 'systemd-libs', 'libpipewire', 'pipewire', 'dbus',
 )
 
 
@@ -103,7 +105,7 @@ def collect(build_dir: Path) -> dict:
         errors.append('No installed wlroots API/library artifacts were found')
 
     supporting_api_files = []
-    for package in ('tomlplusplus', 'libxkbcommon'):
+    for package in ('tomlplusplus', 'libxkbcommon', 'systemd-libs', 'libpipewire'):
         listing = command(['pacman', '-Qlq', package])
         artifacts = []
         if listing['returncode'] == 0:
@@ -171,6 +173,11 @@ def collect(build_dir: Path) -> dict:
         else:
             errors.append('Cannot locate configured C++ standard library')
 
+    session_support_files = [digest(Path(name)) for name in (
+        '/usr/bin/dbus-daemon', '/usr/bin/pipewire',
+        '/usr/share/dbus-1/session.conf', '/usr/share/pipewire/client.conf',
+    )]
+
     observations = {
         'git_head': command(['git', 'rev-parse', 'HEAD']),
         'git_worktree': command(['git', 'status', '--porcelain=v1']),
@@ -184,7 +191,8 @@ def collect(build_dir: Path) -> dict:
         if observation['returncode'] != 0:
             errors.append(f'Cannot record required {name} observation')
     repository_databases = [digest(path) for path in sorted(Path('/var/lib/pacman/sync').glob('*.db'))]
-    for artifact in api_files + supporting_api_files + protocol_xml + source_hashes + repository_databases + standard_library:
+    for artifact in (api_files + supporting_api_files + protocol_xml + source_hashes
+                     + repository_databases + standard_library + session_support_files):
         if artifact['sha256'] is None:
             errors.append(f"Cannot hash required artifact {artifact['path']}")
     for package, artifacts in package_archives.items():
@@ -219,6 +227,7 @@ def collect(build_dir: Path) -> dict:
         'package_artifacts': package_archives,
         'wlroots_api_artifacts': api_files,
         'supporting_api_artifacts': supporting_api_files,
+        'session_support_artifacts': session_support_files,
         'protocol_xml_artifacts': protocol_xml,
         'repository_databases': repository_databases,
         'build_metadata': build_metadata,
