@@ -65,13 +65,13 @@ core = static_library(
 tty_foundation = static_library(
   'seaside-tty-foundation', ['src/tty_drm.c', 'src/tty_input.c'],
   include_directories: include_directories('src'),
-  dependencies: [wlroots, wayland_server, libdrm], install: false,
+  dependencies: [wlroots, wayland_server, libdrm, xkbcommon], install: false,
 )
 
 tty_fixture = executable(
-  'seaside-tty-fixture', 'tests/integration/tty_fixture.cpp',
+  'seaside-tty-fixture', ['tests/integration/tty_fixture.cpp', 'tests/integration/tty_terminal.cpp'],
   include_directories: include_directories('src'),
-  dependencies: [wlroots, wayland_server, pixman, libdrm, threads],
+  dependencies: [wlroots, wayland_server, pixman, libdrm, threads, xkbcommon],
   link_with: [core, tty_foundation], install: false,
 )
 test('part3-tty-guard', python, args: [files('tests/integration/test_tty_guard.py'), tty_fixture],
@@ -82,10 +82,20 @@ test('part3-tty-guard', python, args: [files('tests/integration/test_tty_guard.p
 tty_input_test = executable(
   'seaside-tty-input-test', 'tests/unit/tty_input_test.c',
   include_directories: include_directories('src'),
-  dependencies: [wlroots, wayland_server], link_with: tty_foundation, install: false,
+  dependencies: [wlroots, wayland_server, wayland_client, xkbcommon],
+  link_with: tty_foundation, install: false,
 )
 test('part3-tty-input', tty_input_test, suite: ['unit', 'part3'], timeout: 10,
   env: {'SEASIDE_TEST_PART': '3', 'SEASIDE_REQUIREMENTS': '3,12.2b'},
+)
+
+tty_terminal_test = executable(
+  'seaside-tty-terminal-tests', ['tests/unit/tty_terminal_test.cpp', 'tests/integration/tty_terminal.cpp'],
+  include_directories: include_directories('tests/unit', 'tests/integration'),
+  dependencies: [gtest, threads], install: false,
+)
+test('part3-tty-terminal-child', tty_terminal_test, suite: ['unit', 'part3'], timeout: 15,
+  env: {'SEASIDE_GTEST': '1', 'SEASIDE_TEST_PART': '3', 'SEASIDE_REQUIREMENTS': '2.1,3,12.2b'},
 )
 
 config_foundation = static_library(

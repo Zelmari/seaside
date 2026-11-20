@@ -3,7 +3,8 @@
 Status: headless milestone software-verified in Arch WSL2. The Arch VirtualBox
 guest passed the original harness and the live console fixture with Pixman.
 Automatic renderer selection failed on this guest. Part 3 and release
-qualification remain pending.
+qualification remain pending. The keyboard and terminal trial passed offscreen
+software checks and is ready for its VirtualBox run.
 
 This implements the bounded [Part 3 plan](PART3_PLAN.md) against specification
 §§2.1–2.2, 3–3.1, 12.2b and 14. Work stops at the first Arch-VM qualification
@@ -186,12 +187,56 @@ Local verification for this checkpoint:
   A separate synthetic input test exercises relative and absolute pointer
   delivery, the fixture exit gesture, and input/backend teardown order.
 
-After that check, extend the real session with keyboard delivery and an
-on-demand `foot` window. The following startup milestone needs a live Wayland
-socket, session-owned activation environment, and the genuine capture globals
-expected by the selected portal backend. Test real service activation and
-failure-to-TTY in the dedicated graphical guest. Qualify VT switching and
-session isolation with the real session lifecycle.
+## VirtualBox keyboard and terminal checkpoint
+
+The TTY fixture's `--terminal` argument adds a keyboard seat with the default
+XKB keymap and repeat information. Super+Return starts one standalone `foot`
+process. The shortcut is handled by the fixture and its Return press and
+release stay out of the client event stream. A mapped XDG surface receives
+keyboard focus and activation when its Wayland peer PID matches the owned
+child. Focus clears on unmap and shutdown. `foot` requires the Wayland
+data-device global to connect. Clipboard actions and drag-and-drop remain in
+their assigned milestone. [Foot 1.28.0 startup checks](https://codeberg.org/dnkl/foot/src/tag/1.28.0/wayland.c#L1835-L1863)
+
+The fixture uses an empty `foot` configuration for repeatable tests and passes
+the private Wayland socket name to the child. It watches that child without
+waiting for exec from the input callback and reaps it when the trial ends.
+The original cursor-only invocation still uses Escape or a 15-second timeout.
+The terminal trial forwards Escape normally and has a 60-second time limit.
+
+Install `foot` and a monospace font in the VM. A minimal Arch install can use
+`sudo pacman -S --needed foot ttf-dejavu`. After updating the checkout and
+building with `ninja -C build`, run the trial from the active guest console:
+
+```sh
+WLR_RENDERER=pixman build/seaside-tty-fixture --terminal
+```
+
+Press Super+Return, then type `echo ok` and press Enter in `foot`. Verify that
+the terminal displays `ok`. Type `exit` and press Enter to return to the same
+console. Record that observation and the final `TTY terminal` result line. A
+pass requires a hardware cursor presentation, a mapped terminal, at least one
+forwarded key press and a clean exit from the owned child.
+
+An offscreen run with Arch `foot` 1.28.0-2 and DejaVu Sans Mono used the new code
+with a synthetic keyboard and a test shell. Super+Return opened the real
+terminal, the watched surface mapped, and three key presses delivered `ab`
+followed by Enter to that shell. It returned zero after checking the exact
+received line. The guest trial still needs physical key input and visible
+terminal output.
+
+`tools/run-tests --build-dir build` passed 15 Meson entries, all 139 GoogleTest
+cases and the formatting and static analysis checks. The discovery-only DRM
+probe reported one hardware skip. The report is
+`test-results/20261120T180118Z-a82f50db/summary.txt`. All eight Part 3 entries
+also passed with ASan/UBSan and leak detection using
+`meson test -C build-asan --suite part3 --print-errorlogs`.
+
+The following startup milestone needs a live Wayland socket, session-owned
+activation environment, and the genuine capture globals expected by the
+selected portal backend. Test real service activation and failure-to-TTY in
+the dedicated graphical guest. Qualify VT switching and session isolation with
+the real session lifecycle.
 
 The portal candidate (`xdg-desktop-portal-wlr` 0.8.4) requests embedded cursors
 by default. The wlroots 0.20.2 output capture helper responds by switching the

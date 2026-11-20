@@ -18,6 +18,7 @@ if __name__ == "__main__":
     fixture = sys.argv[1]
     expect(fixture, subprocess.DEVNULL, ["/dev/dri/renderD128"], 2, "Usage:")
     expect(fixture, subprocess.DEVNULL, [], 77, "active Linux console")
+    expect(fixture, subprocess.DEVNULL, ["--terminal"], 77, "active Linux console")
     master, slave = pty.openpty()
     try:
         expect(fixture, slave, [], 77, "active Linux console")
