@@ -1,0 +1,41 @@
+#ifndef SEASIDE_TTY_INPUT_H
+#define SEASIDE_TTY_INPUT_H
+
+#include <stdbool.h>
+#include <stddef.h>
+
+struct wlr_backend;
+struct seaside_tty_input;
+
+struct seaside_tty_input_callbacks {
+    /* Absolute coordinates are normalized. Relative values are wlroots deltas. */
+    void (*motion)(void *data, bool absolute, double x, double y);
+    /* Escape requests shutdown only in the TTY qualification fixture. */
+    void (*exit_requested)(void *data);
+};
+
+struct seaside_tty_input_snapshot {
+    size_t pointers;
+    size_t keyboards;
+    bool failed;
+};
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* Borrows the backend and copies callbacks. Attach on the Wayland thread before
+ * starting the backend: device discovery can happen synchronously at start.
+ * Callbacks may request loop termination. Destroy after dispatch has stopped. */
+struct seaside_tty_input *
+seaside_tty_input_create(struct wlr_backend *backend,
+                         const struct seaside_tty_input_callbacks *callbacks, void *data);
+void seaside_tty_input_destroy(struct seaside_tty_input *input);
+struct seaside_tty_input_snapshot
+seaside_tty_input_get_snapshot(const struct seaside_tty_input *input);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif

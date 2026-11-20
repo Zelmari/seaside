@@ -62,6 +62,32 @@ core = static_library(
   install: false,
 )
 
+tty_foundation = static_library(
+  'seaside-tty-foundation', ['src/tty_drm.c', 'src/tty_input.c'],
+  include_directories: include_directories('src'),
+  dependencies: [wlroots, wayland_server, libdrm], install: false,
+)
+
+tty_fixture = executable(
+  'seaside-tty-fixture', 'tests/integration/tty_fixture.cpp',
+  include_directories: include_directories('src'),
+  dependencies: [wlroots, wayland_server, pixman, libdrm, threads],
+  link_with: [core, tty_foundation], install: false,
+)
+test('part3-tty-guard', python, args: [files('tests/integration/test_tty_guard.py'), tty_fixture],
+  suite: ['integration', 'part3'], timeout: 15,
+  env: {'SEASIDE_TEST_PART': '3', 'SEASIDE_REQUIREMENTS': '3,12.2b'},
+)
+
+tty_input_test = executable(
+  'seaside-tty-input-test', 'tests/unit/tty_input_test.c',
+  include_directories: include_directories('src'),
+  dependencies: [wlroots, wayland_server], link_with: tty_foundation, install: false,
+)
+test('part3-tty-input', tty_input_test, suite: ['unit', 'part3'], timeout: 10,
+  env: {'SEASIDE_TEST_PART': '3', 'SEASIDE_REQUIREMENTS': '3,12.2b'},
+)
+
 config_foundation = static_library(
   'seaside-config-foundation',
   ['src/config.cpp', 'src/bindings.cpp', 'src/config_store.cpp',
@@ -246,7 +272,7 @@ summary({
   'Protocol XML package': wayland_protocols.version(),
   'libdrm': libdrm.version(),
   'Fixture renderer': 'pixman, offscreen tests only',
-  'Installed product targets': 'none; part 3 headless groundwork only',
+  'Installed product targets': 'none; Part 3 development fixtures',
   'C++ standard': 'C++23',
   'GoogleTest': gtest.version(),
   'TOML parser (strict 1.0)': tomlplusplus.version(),

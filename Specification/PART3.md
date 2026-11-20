@@ -1,7 +1,8 @@
 # Part 3: headless session groundwork
 
-Status: headless milestone implemented and software-verified in Arch WSL2.
-Part 3, G1/G2 and native hardware qualification are not complete.
+Status: headless milestone software-verified in Arch WSL2. The Arch VirtualBox
+guest passed the original harness, and the live console fixture awaits its
+first VM run. Part 3 and release qualification are pending.
 
 This implements the bounded [Part 3 plan](PART3_PLAN.md) against specification
 §§2.1–2.2, 3–3.1, 12.2b and 14. Work stops at the first Arch-VM qualification
@@ -130,21 +131,64 @@ failing with reentrant cancellation/destruction. Removing PipeWire's absolute
 deadline checks in an ignored counterfactual build makes the overdue-reply
 regression fail, demonstrating that it protects the intended ordering.
 
-## First required VM work
+## VirtualBox console checkpoint
 
-1. Choose the Windows-hosted Arch VM and virtual GPU. In its logged-in guest,
-   install the documented build/test dependencies and run a clean build and
-   `tools/run-tests`. Retain actual versions and reports.
-2. Run `build/seaside-probe-drm` in that guest and retain its capability report.
-   No accessible DRM device or no usable cursor plane is a blocked/failed
-   environment check, not a reason to add software-cursor fallback. A virtual
-   GPU result still does not qualify the Framework's native AMD cursor planes.
-3. Use that evidence before extending the production TTY/seat/DRM path,
-   renderer/output/input integration and one on-demand `foot` window.
-4. In the dedicated graphical session, implement/qualify activation-environment
-   publication, systemd target ownership, the chosen portal frontend/backend
-   exchange and strict asynchronous startup/cleanup. Test real failure-to-TTY,
-   VT switching and session isolation. No shipped preflight bypass is allowed.
+The first Arch guest harness run passed. The console reported `vmwgfx` on
+`/dev/dri/card0` with a render node, and the owner counted eight cursor-plane
+entries in `drm_info`. Those observations establish that the guest is a
+candidate for testing real cursor presentation. The watchdog reported stalls
+during that run, and the harness completed successfully.
+
+`seaside-tty-fixture` is a development executable for one DRM output. It opens
+the guest seat through wlroots, starts the DRM and libinput backends, uses the
+existing scene to render black, and moves a hardware cursor from real pointer
+events. It checks presentation and records the DRM connector and cursor plane.
+It uses a fixture-specific Wayland socket and leaves user service activation
+for the graphical session milestone. Run the following from the active guest
+console as the logged-in user:
+
+```sh
+meson compile -C build seaside-tty-fixture
+build/seaside-tty-fixture
+```
+
+Move the pointer across the black screen for a few seconds. Wait for the
+fixture to return to the same console, or press Escape after moving the
+pointer. The display trial runs for 15 seconds after startup. The startup
+observation has a five-second deadline for a presented cursor frame and
+pointer discovery. A final `TTY fixture PASS` line requires at least one
+presented pointer move. Record that line and whether the pointer moved visibly
+and the original console returned. If setup fails, record the last diagnostic
+and the `TTY fixture FAIL` or `BLOCKED` line. The dedicated fixture runs only
+when invoked explicitly. The normal suite exercises console refusal and input
+lifetimes independently.
+
+Local verification for this checkpoint:
+
+- `tools/run-tests --build-dir build` passed 14 Meson entries and all 136
+  GoogleTest cases. The discovery-only hardware probe reported one skip.
+  The report is `test-results/20261120T174302Z-ef6bd079/summary.txt`.
+- All seven Part 3 entries passed under ASan/UBSan with leak detection using
+  `meson test -C build-asan --suite part3 --print-errorlogs`.
+- The signal regression verifies that shutdown during startup prevents later
+  dispatch and that shutdown signals stay blocked while destroying the display.
+  A separate synthetic input test exercises relative and absolute pointer
+  delivery, the fixture exit gesture, and input/backend teardown order.
+
+After that check, extend the real session with keyboard delivery and an
+on-demand `foot` window. The following startup milestone needs a live Wayland
+socket, session-owned activation environment, and the genuine capture globals
+expected by the selected portal backend. Test real service activation and
+failure-to-TTY in the dedicated graphical guest. Qualify VT switching and
+session isolation with the real session lifecycle.
+
+The portal candidate (`xdg-desktop-portal-wlr` 0.8.4) requests embedded cursors
+by default. The wlroots 0.20.2 output capture helper responds by switching the
+output to software cursors. Qualifying this backend requires verifying cursor
+composition in the captured frames while preserving the hardware cursor on
+the display. The portal gate also needs a real capture source before it can
+test backend startup. [Portal capture request](https://github.com/emersion/xdg-desktop-portal-wlr/blob/v0.8.4/src/screencast/ext_image_copy.c#L278-L284)
+and [wlroots output capture behavior](https://gitlab.freedesktop.org/wlroots/wlroots/-/blob/0.20.2/types/ext_image_capture_source_v1/output.c#L40-L70).
 
 Native hardware cursor, latency, VRR, tearing, colour and suspend/resume evidence
 remain separate. Later window/workspace/layout/IPC/compatibility parts have not
