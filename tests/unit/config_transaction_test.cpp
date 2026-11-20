@@ -16,12 +16,12 @@ using namespace seaside;
 LoadedConfig startup(std::string_view text = "") {
     auto parsed = parse_config(text);
     EXPECT_TRUE(parsed);
-    return {*parsed, std::string(text), ConfigSource::user, {}};
+    return {parsed.value(), std::string(text), ConfigSource::user, {}};
 }
 ConfigCandidate candidate(std::uint64_t generation, std::string text) {
     auto parsed = parse_config(text);
     EXPECT_TRUE(parsed);
-    return {generation, *parsed, std::move(text)};
+    return {generation, parsed.value(), std::move(text)};
 }
 auto schema_only = [](const Config &, const Config &) -> std::expected<void, Diagnostic> {
     return {};
@@ -30,7 +30,7 @@ auto schema_only = [](const Config &, const Config &) -> std::expected<void, Dia
 TEST(ConfigTransaction, RestartOnlyRequestedModeAndNightLightOverrides) {
     ConfigTransaction transaction(startup());
     transaction.set_runtime_night_light(true);
-    auto generation = *transaction.begin_reload();
+    auto generation = transaction.begin_reload().value();
     auto result = transaction.commit(
         candidate(generation, "[workspaces]\nmode='per-monitor'\n[window]\ngaps_outer=14\n"),
         schema_only);
@@ -49,7 +49,7 @@ TEST(ConfigTransaction, RestartOnlyRequestedModeAndNightLightOverrides) {
 }
 TEST(ConfigTransaction, OnlyCommittedLayoutOrTilingChangesResetOverrides) {
     ConfigTransaction transaction(startup());
-    auto generation = *transaction.begin_reload();
+    auto generation = transaction.begin_reload().value();
     auto changed = candidate(generation, "[window]\nlayout='scrolling'\n");
     auto rejected = transaction.commit(
         changed, [](const Config &, const Config &) -> std::expected<void, Diagnostic> {
@@ -63,7 +63,7 @@ TEST(ConfigTransaction, OnlyCommittedLayoutOrTilingChangesResetOverrides) {
     ASSERT_TRUE(committed);
     EXPECT_TRUE(committed->reset_tiling_overrides);
     EXPECT_FALSE(transaction.diagnostic());
-    generation = *transaction.begin_reload();
+    generation = transaction.begin_reload().value();
     auto unchanged =
         transaction.commit(candidate(generation, "[window]\nlayout='scrolling'\n"), schema_only);
     ASSERT_TRUE(unchanged);
@@ -71,9 +71,9 @@ TEST(ConfigTransaction, OnlyCommittedLayoutOrTilingChangesResetOverrides) {
 }
 TEST(ConfigTransaction, StaleParseAndPersistenceResultsCannotReplaceNewState) {
     ConfigTransaction transaction(startup());
-    auto first = *transaction.begin_reload();
+    auto first = transaction.begin_reload().value();
     auto stale = candidate(first, "[window]\ngaps_outer=1\n");
-    auto second = *transaction.begin_reload();
+    auto second = transaction.begin_reload().value();
     EXPECT_FALSE(transaction.commit(stale, schema_only));
     ASSERT_TRUE(transaction.commit(candidate(second, "[window]\ngaps_outer=2\n"), schema_only));
     transaction.reject(first, Diagnostic{"bad", 1, 1, "", "old error"});
@@ -87,7 +87,7 @@ TEST(ConfigTransaction, StaleParseAndPersistenceResultsCannotReplaceNewState) {
 }
 TEST(ConfigTransaction, SnapshotFailureKeepsCommittedStateAndSeparateDiagnostic) {
     ConfigTransaction transaction(startup());
-    auto generation = *transaction.begin_reload();
+    auto generation = transaction.begin_reload().value();
     ASSERT_TRUE(
         transaction.commit(candidate(generation, "[window]\ngaps_inner=21\n"), schema_only));
     transaction.persisted(generation,
@@ -109,14 +109,14 @@ TEST(ConfigTransaction, SnapshotFailureKeepsCommittedStateAndSeparateDiagnostic)
 TEST(ConfigTransaction, UnchangedConfiguredNightLightPreservesSessionOverride) {
     ConfigTransaction transaction(startup());
     transaction.set_runtime_night_light(true);
-    auto g = *transaction.begin_reload();
+    auto g = transaction.begin_reload().value();
     ASSERT_TRUE(transaction.commit(candidate(g, "[night_light]\nenabled=true\n"), schema_only));
     transaction.set_runtime_night_light(false);
-    g = *transaction.begin_reload();
+    g = transaction.begin_reload().value();
     ASSERT_TRUE(transaction.commit(
         candidate(g, "[night_light]\nenabled=true\ntemperature_kelvin=5000\n"), schema_only));
     EXPECT_FALSE(transaction.runtime_night_light());
-    g = *transaction.begin_reload();
+    g = transaction.begin_reload().value();
     auto changed = transaction.commit(candidate(g, "[night_light]\nenabled=false\n"), schema_only);
     ASSERT_TRUE(changed);
     EXPECT_TRUE(changed->night_light_changed);
@@ -124,7 +124,7 @@ TEST(ConfigTransaction, UnchangedConfiguredNightLightPreservesSessionOverride) {
 }
 TEST(ConfigTransaction, PreparationExceptionsAndReentrantGenerationDoNotCommit) {
     ConfigTransaction transaction(startup());
-    auto g = *transaction.begin_reload();
+    auto g = transaction.begin_reload().value();
     auto data = candidate(g, "[window]\ngaps_outer=99\n");
     EXPECT_FALSE(transaction.commit(
         data, [](const Config &, const Config &) -> std::expected<void, Diagnostic> {
@@ -150,7 +150,7 @@ TEST(ConfigTransaction, NonOwnerMutationsAreRejectedAndParsingDoesNotExecuteComm
     EXPECT_FALSE(transaction.runtime_night_light());
     seaside::test::Directory directory;
     auto sentinel = directory.path() / "must-not-exist";
-    auto g = *transaction.begin_reload();
+    auto g = transaction.begin_reload().value();
     std::string text = "[autostart]\ncommands=['touch " + sentinel.string() +
                        "']\n[keybinds]\n'Super+T'='exec touch " + sentinel.string() + "'\n";
     ASSERT_TRUE(transaction.commit(candidate(g, text), schema_only));
@@ -159,11 +159,11 @@ TEST(ConfigTransaction, NonOwnerMutationsAreRejectedAndParsingDoesNotExecuteComm
 
 TEST(ConfigTransaction, ReentrantSuccessCannotBeOverwrittenByStaleErrorsOrDuplicateCommit) {
     ConfigTransaction transaction(startup());
-    auto first = *transaction.begin_reload();
+    auto first = transaction.begin_reload().value();
     auto outer = candidate(first, "[window]\ngaps_outer=30\n");
     auto failed = transaction.commit(
         outer, [&](const Config &, const Config &) -> std::expected<void, Diagnostic> {
-            auto second = *transaction.begin_reload();
+            auto second = transaction.begin_reload().value();
             EXPECT_TRUE(
                 transaction.commit(candidate(second, "[window]\ngaps_outer=40\n"), schema_only));
             return std::unexpected(Diagnostic{"stale", 1, 1, "", "old preparation error"});
@@ -178,7 +178,7 @@ TEST(ConfigTransaction, ReentrantSuccessCannotBeOverwrittenByStaleErrorsOrDuplic
 
 TEST(ConfigTransaction, MissingPreparationCannotBypassValidationAndIoDiagnosticsAreBounded) {
     ConfigTransaction transaction(startup());
-    auto g = *transaction.begin_reload();
+    auto g = transaction.begin_reload().value();
     EXPECT_FALSE(transaction.commit(candidate(g, "[window]\ngaps_outer=99\n"), {}));
     EXPECT_EQ(transaction.active().window.gaps_outer, 10);
     std::string path = "/tmp/";
@@ -200,12 +200,22 @@ class AsyncConfigTest : public testing::Test {
         ASSERT_TRUE(created);
         queue = std::move(*created);
     }
-    void pump_until(const bool &complete) {
+    bool pump_until(const std::function<bool()> &complete) {
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-        while (!complete && std::chrono::steady_clock::now() < deadline) {
-            ASSERT_GE(wl_event_loop_dispatch(loop.get(), 10), 0);
+        while (!complete() && std::chrono::steady_clock::now() < deadline) {
+            if (wl_event_loop_dispatch(loop.get(), 10) < 0)
+                return false;
         }
-        EXPECT_TRUE(complete);
+        return complete();
+    }
+    bool pump_until(const bool &complete) {
+        return pump_until(std::function<bool()>([&] { return complete; }));
+    }
+    bool wait_for_completed(std::uint64_t count) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (queue->stats().completed < count && std::chrono::steady_clock::now() < deadline)
+            std::this_thread::yield();
+        return queue->stats().completed >= count;
     }
     seaside::test::Directory directory;
     std::unique_ptr<wl_event_loop, decltype(&wl_event_loop_destroy)> loop{nullptr,
@@ -226,7 +236,7 @@ TEST_F(AsyncConfigTest, RealLoadCommitStateEffectAndSnapshotThroughMainLoop) {
     ASSERT_TRUE(id);
     ASSERT_TRUE(state.set_tiling_override(*id, false));
     AsyncConfigIo async(*queue, store);
-    auto g = *transaction.begin_reload();
+    auto g = transaction.begin_reload().value();
     bool complete = false;
     const auto owner = std::this_thread::get_id();
     ASSERT_TRUE(async.load(user, g, [&](auto result) {
@@ -241,11 +251,16 @@ TEST_F(AsyncConfigTest, RealLoadCommitStateEffectAndSnapshotThroughMainLoop) {
             complete = true;
         }));
     }));
-    pump_until(complete);
+    ASSERT_TRUE(pump_until(complete));
     EXPECT_TRUE(transaction.recovery_persisted());
     EXPECT_TRUE(transaction.restart_pending());
-    EXPECT_FALSE(state.window(*id)->tiling_override);
-    EXPECT_EQ(**store.read(recovery, true), text);
+    auto *window = state.window(id.value());
+    ASSERT_NE(window, nullptr);
+    EXPECT_FALSE(window->tiling_override);
+    auto read_back = store.read(recovery, true);
+    ASSERT_TRUE(read_back);
+    ASSERT_TRUE(read_back.value());
+    EXPECT_EQ(read_back.value().value(), text);
 }
 TEST_F(AsyncConfigTest, NewGenerationDiscardsOldLoadAndMissingInputIsDiagnostic) {
     ConfigStore store;
@@ -259,12 +274,17 @@ TEST_F(AsyncConfigTest, NewGenerationDiscardsOldLoadAndMissingInputIsDiagnostic)
         }
         complete = true;
     }));
-    pump_until(complete);
+    ASSERT_TRUE(pump_until(
+        std::function<bool()>([&] { return complete && queue->stats().outstanding == 0; })));
     EXPECT_FALSE(old_delivered);
     bool persisted = false;
-    EXPECT_TRUE(
-        async.persist(directory.path() / "recovery", "", 2, [&](auto) { persisted = true; }));
-    pump_until(persisted);
+    ASSERT_TRUE(async.persist(directory.path() / "recovery", "", 2, [&](auto error) {
+        EXPECT_FALSE(error);
+        persisted = true;
+    }));
+    ASSERT_TRUE(pump_until(
+        std::function<bool()>([&] { return persisted && queue->stats().outstanding == 0; })));
+    EXPECT_FALSE(old_delivered);
     EXPECT_FALSE(async.persist(directory.path() / "recovery", "", 1, [](auto) {}));
 }
 TEST_F(AsyncConfigTest, DestroyedAsyncRecipientNeverReceivesQueuedCompletion) {
@@ -272,36 +292,46 @@ TEST_F(AsyncConfigTest, DestroyedAsyncRecipientNeverReceivesQueuedCompletion) {
     {
         AsyncConfigIo async(*queue, ConfigStore{});
         ASSERT_TRUE(async.load(directory.path() / "missing", 1, [&](auto) { delivered = true; }));
+        ASSERT_TRUE(wait_for_completed(1));
     }
-    EXPECT_TRUE(queue->shutdown());
-    EXPECT_GE(wl_event_loop_dispatch(loop.get(), 0), 0);
+    ASSERT_TRUE(pump_until(std::function<bool()>([&] { return queue->stats().outstanding == 0; })));
     EXPECT_FALSE(delivered);
+    EXPECT_EQ(queue->stats().discarded, 1U);
 }
 
 TEST_F(AsyncConfigTest, EmptyCallbacksAndNonOwnerRequestsCannotQueueWork) {
     ConfigStore store;
     AsyncConfigIo async(*queue, store);
-    EXPECT_EQ(async.load(directory.path() / "missing", 1, {}).error(), WorkError::invalid_job);
-    EXPECT_EQ(async.persist(directory.path() / "recovery", "", 1, {}).error(),
-              WorkError::invalid_job);
-    bool rejected = false;
-    std::jthread worker([&] {
-        rejected = async.load(directory.path() / "missing", 1, [](auto) {}).error() ==
-                   WorkError::wrong_thread;
-    });
+    auto empty_load = async.load(directory.path() / "missing", 1, {});
+    auto empty_save = async.persist(directory.path() / "recovery", "", 1, {});
+    ASSERT_FALSE(empty_load);
+    ASSERT_FALSE(empty_save);
+    EXPECT_EQ(empty_load.error(), WorkError::invalid_job);
+    EXPECT_EQ(empty_save.error(), WorkError::invalid_job);
+    std::expected<void, WorkError> non_owner;
+    std::jthread worker(
+        [&] { non_owner = async.load(directory.path() / "missing", 1, [](auto) {}); });
     worker.join();
-    EXPECT_TRUE(rejected);
+    ASSERT_FALSE(non_owner);
+    EXPECT_EQ(non_owner.error(), WorkError::wrong_thread);
     EXPECT_EQ(queue->stats().submitted, 0U);
     bool complete = false;
-    EXPECT_TRUE(async.load(directory.path() / "missing", 1, [&](auto) { complete = true; }));
-    EXPECT_EQ(async.load(directory.path() / "missing", 1, [](auto) {}).error(),
-              WorkError::cancelled);
-    pump_until(complete);
+    ASSERT_TRUE(async.load(directory.path() / "missing", 1, [&](auto) { complete = true; }));
+    auto duplicate = async.load(directory.path() / "missing", 1, [](auto) {});
+    ASSERT_FALSE(duplicate);
+    EXPECT_EQ(duplicate.error(), WorkError::cancelled);
+    ASSERT_TRUE(pump_until(complete));
 }
 
 class PausedSaveIo : public StorageIo {
   public:
     std::error_code check(StorageStep step) noexcept override {
+        if (step == StorageStep::waiting_for_publication) {
+            std::lock_guard lock(mutex);
+            contended = true;
+            condition.notify_all();
+            return {};
+        }
         if (step != StorageStep::sync_file)
             return {};
         std::unique_lock lock(mutex);
@@ -315,6 +345,10 @@ class PausedSaveIo : public StorageIo {
         std::unique_lock lock(mutex);
         return condition.wait_for(lock, std::chrono::seconds(5), [&] { return entered; });
     }
+    bool wait_until_contended() {
+        std::unique_lock lock(mutex);
+        return condition.wait_for(lock, std::chrono::seconds(5), [&] { return contended; });
+    }
     void release() {
         std::lock_guard lock(mutex);
         released = true;
@@ -324,15 +358,21 @@ class PausedSaveIo : public StorageIo {
   private:
     std::mutex mutex;
     std::condition_variable condition;
-    bool entered = false, released = false;
+    bool entered = false, released = false, contended = false;
+};
+
+struct ReleaseSaveGate {
+    std::shared_ptr<PausedSaveIo> io;
+    ~ReleaseSaveGate() { io->release(); }
 };
 
 TEST_F(AsyncConfigTest, InvalidNewAttemptDoesNotCancelPriorValidSnapshot) {
     auto io = std::make_shared<PausedSaveIo>();
     ConfigStore store(io);
     AsyncConfigIo async(*queue, store);
+    ReleaseSaveGate release{io};
     ConfigTransaction transaction(startup());
-    auto first = *transaction.begin_reload();
+    auto first = transaction.begin_reload().value();
     std::string valid = "[window]\ngaps_outer=17\n";
     ASSERT_TRUE(transaction.commit(candidate(first, valid), schema_only));
     bool saved = false;
@@ -342,7 +382,7 @@ TEST_F(AsyncConfigTest, InvalidNewAttemptDoesNotCancelPriorValidSnapshot) {
         saved = true;
     }));
     ASSERT_TRUE(io->wait_until_entered());
-    auto second = *transaction.begin_reload();
+    auto second = transaction.begin_reload().value();
     bool invalid = false;
     ASSERT_TRUE(async.load(directory.path() / "missing", second, [&](auto result) {
         EXPECT_FALSE(result);
@@ -350,12 +390,77 @@ TEST_F(AsyncConfigTest, InvalidNewAttemptDoesNotCancelPriorValidSnapshot) {
             transaction.reject(second, result.error());
         invalid = true;
     }));
-    pump_until(invalid);
+    ASSERT_TRUE(pump_until(invalid));
     io->release();
-    pump_until(saved);
+    ASSERT_TRUE(pump_until(saved));
     EXPECT_EQ(transaction.active().window.gaps_outer, 17);
     EXPECT_TRUE(transaction.diagnostic());
     EXPECT_TRUE(transaction.recovery_persisted());
-    EXPECT_EQ(**store.read(recovery, true), valid);
+    auto read_back = store.read(recovery, true);
+    ASSERT_TRUE(read_back);
+    ASSERT_TRUE(read_back.value());
+    EXPECT_EQ(read_back.value().value(), valid);
+}
+
+TEST_F(AsyncConfigTest, NewerAcceptedSnapshotWaitsForPriorWriterAndPersistsLatest) {
+    auto io = std::make_shared<PausedSaveIo>();
+    ConfigStore store(io);
+    AsyncConfigIo async(*queue, store);
+    ReleaseSaveGate release{io};
+    const auto recovery = directory.path() / "recovery";
+    bool first_delivered = false, second_delivered = false;
+    std::optional<StorageError> second_error;
+    ASSERT_TRUE(
+        async.persist(recovery, "window.gaps_outer=17", 1, [&](auto) { first_delivered = true; }));
+    ASSERT_TRUE(io->wait_until_entered());
+    ASSERT_TRUE(async.persist(recovery, "window.gaps_outer=23", 2, [&](auto error) {
+        second_error = std::move(error);
+        second_delivered = true;
+    }));
+    // This phase is reached only after the newer worker actually observes the
+    // older writer holding publication, not merely after it was submitted.
+    ASSERT_TRUE(io->wait_until_contended());
+    io->release();
+    ASSERT_TRUE(pump_until(std::function<bool()>(
+        [&] { return second_delivered && queue->stats().outstanding == 0; })));
+    EXPECT_FALSE(first_delivered);
+    EXPECT_FALSE(second_error);
+    auto read_back = store.read(recovery, true);
+    ASSERT_TRUE(read_back);
+    ASSERT_TRUE(read_back.value());
+    EXPECT_EQ(read_back.value().value(), "window.gaps_outer=23");
+}
+
+TEST_F(AsyncConfigTest, RejectedNewSnapshotDoesNotCancelAlreadyAcceptedWriter) {
+    WorkQueue::Limits limits;
+    limits.max_tasks = 1;
+    auto created = WorkQueue::create(loop.get(), limits);
+    ASSERT_TRUE(created);
+    queue = std::move(created.value());
+    auto io = std::make_shared<PausedSaveIo>();
+    ConfigStore store(io);
+    AsyncConfigIo async(*queue, store);
+    ReleaseSaveGate release{io};
+    const auto recovery = directory.path() / "recovery";
+    bool first_delivered = false, second_delivered = false;
+    std::optional<StorageError> first_error;
+    ASSERT_TRUE(async.persist(recovery, "window.gaps_outer=17", 1, [&](auto error) {
+        first_error = std::move(error);
+        first_delivered = true;
+    }));
+    ASSERT_TRUE(io->wait_until_entered());
+    auto rejected =
+        async.persist(recovery, "window.gaps_outer=23", 2, [&](auto) { second_delivered = true; });
+    ASSERT_FALSE(rejected);
+    EXPECT_EQ(rejected.error(), WorkError::full);
+    io->release();
+    ASSERT_TRUE(pump_until(
+        std::function<bool()>([&] { return first_delivered && queue->stats().outstanding == 0; })));
+    EXPECT_FALSE(first_error);
+    EXPECT_FALSE(second_delivered);
+    auto read_back = store.read(recovery, true);
+    ASSERT_TRUE(read_back);
+    ASSERT_TRUE(read_back.value());
+    EXPECT_EQ(read_back.value().value(), "window.gaps_outer=17");
 }
 } // namespace

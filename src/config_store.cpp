@@ -161,11 +161,14 @@ ConfigStore::read(const std::filesystem::path &path, bool private_state) const {
 std::expected<PublishResult, StorageError>
 ConfigStore::publish(const std::filesystem::path &path, std::string_view text, PublishMode mode,
                      const std::function<bool()> &still_current) const {
-    std::unique_lock publication_lock(publication_->mutex, std::try_to_lock);
-    if (!publication_lock.owns_lock())
-        return std::unexpected(
-            failure(StorageStep::publish, path,
-                    std::make_error_code(std::errc::resource_unavailable_try_again)));
+    std::unique_lock publication_lock(publication_->mutex, std::defer_lock);
+    if (!publication_lock.try_lock()) {
+        // Main-loop callers enqueue work instead of entering this function.
+        // A busy writer serializes here; contention is not a filesystem error.
+        if (auto error = io_->check(StorageStep::waiting_for_publication))
+            return std::unexpected(failure(StorageStep::waiting_for_publication, path, error));
+        publication_lock.lock();
+    }
     auto stale = [&]() noexcept {
         try {
             return still_current && !still_current();
@@ -259,6 +262,7 @@ ConfigStore::publish(const std::filesystem::path &path, std::string_view text, P
     // Keep the old inode until directory synchronization confirms publication.
     // A failed post-rename sync can then restore the previous recovery file.
     const auto backup = temporary + ".previous";
+    const auto quarantined = temporary + ".rollback";
     bool has_backup = false;
     if (mode == PublishMode::replace_snapshot) {
         struct stat previous{};
@@ -311,7 +315,6 @@ ConfigStore::publish(const std::filesystem::path &path, std::string_view text, P
                 !same_inode(current, authored)) {
                 uncertain = true;
             } else {
-                const auto quarantined = temporary + ".rollback";
                 // The inode can change after fstat. Move it without overwriting
                 // another entry, then recheck before removing any file content.
                 auto rollback_error = io_->check(StorageStep::rollback);

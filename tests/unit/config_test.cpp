@@ -164,9 +164,10 @@ temperature_kelvin=6000
     EXPECT_EQ(c.night_light.temperature_kelvin, 6000);
     ASSERT_EQ(c.keybinds.size(), 1U);
     EXPECT_EQ(c.keybinds.begin()->second.kind, seaside::ActionKind::close_window);
-    EXPECT_EQ(c.keybinds.begin()->first, *seaside::parse_chord("Super+Q"));
-    EXPECT_EQ(seaside::parse_config("[render]\nadaptive_sync='fullscreen'")->render.adaptive_sync,
-              seaside::AdaptiveSync::fullscreen);
+    EXPECT_EQ(c.keybinds.begin()->first, seaside::parse_chord("Super+Q").value());
+    EXPECT_EQ(
+        seaside::parse_config("[render]\nadaptive_sync='fullscreen'").value().render.adaptive_sync,
+        seaside::AdaptiveSync::fullscreen);
 }
 
 TEST_F(ConfigTest, EveryTableRejectsUnknownFields) {
@@ -293,12 +294,12 @@ TEST_F(ConfigTest, BindingTablesReplaceInsteadOfMergeAndRejectNormalizedDuplicat
     auto single = seaside::parse_config("[keybinds]\n'Super+Q'='close_window'");
     ASSERT_TRUE(single);
     EXPECT_EQ(single->keybinds.size(), 1U);
-    EXPECT_FALSE(single->keybinds.contains(*seaside::parse_chord("Super+Return")));
+    EXPECT_FALSE(single->keybinds.contains(seaside::parse_chord("Super+Return").value()));
     EXPECT_FALSE(
         seaside::parse_config("[keybinds]\n'Super+Ctrl+A'='exit'\n'Ctrl+Super+A'='close_window'"));
     EXPECT_FALSE(seaside::parse_config("[keybinds]\n'Prior'='exit'\n'Page_Up'='close_window'"));
-    EXPECT_EQ(seaside::parse_config("[keybinds]")->keybinds.size(), 0U);
-    EXPECT_EQ(seaside::parse_config("")->keybinds.size(), 12U);
+    EXPECT_EQ(seaside::parse_config("[keybinds]").value().keybinds.size(), 0U);
+    EXPECT_EQ(seaside::parse_config("").value().keybinds.size(), 12U);
 }
 
 TEST_F(ConfigTest, NonRepresentableIntegerToFloatConversionsAreRejected) {
@@ -365,6 +366,7 @@ TEST_F(ConfigTest, OverrideFieldTypesRangesAndExplicitZeroValuesAreValidated) {
     auto zero = seaside::parse_config("[monitors]\nrotation=90\nposition=[100,200]\n" + prefix +
                                       "rotation=0\nposition=[0,0]\nscale=0.5");
     ASSERT_TRUE(zero);
+    ASSERT_EQ(zero->monitors.output.size(), 1U);
     auto effective =
         seaside::effective_monitor_settings(zero->monitors.defaults, zero->monitors.output.front());
     EXPECT_EQ(effective.rotation, 0);

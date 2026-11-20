@@ -29,11 +29,18 @@ enum class WorkError {
 
 class WorkLifetime {
   public:
-    void invalidate() noexcept { active_.store(false); }
-    bool active() const noexcept { return active_.load(); }
+    WorkLifetime() = default;
+    WorkLifetime(const WorkLifetime &) = delete;
+    WorkLifetime &operator=(const WorkLifetime &) = delete;
+    ~WorkLifetime() noexcept { invalidate(); }
+    void invalidate() noexcept { active_->store(false); }
+    bool active() const noexcept { return active_->load(); }
 
   private:
-    std::atomic<bool> active_{true};
+    friend class WorkQueue;
+    // Workers observe only this flag; locking a user-owned weak_ptr there could
+    // otherwise run its final custom deleter on the worker.
+    std::shared_ptr<std::atomic<bool>> active_ = std::make_shared<std::atomic<bool>>(true);
 };
 
 struct WorkResult {
@@ -82,6 +89,8 @@ class WorkQueue final {
     // caller bounds job allocations accordingly; arbitrary C++ closures cannot
     // be measured automatically. Charge persists through queued completion, not
     // merely until the worker finishes. Callback-owned results leave this budget.
+    // Accepted completion captures are retained and destroyed only on the owner,
+    // including cancellation/stale-result discard and shutdown paths.
     std::expected<void, WorkError> submit(std::uint64_t generation,
                                           std::weak_ptr<const WorkLifetime> lifetime,
                                           std::size_t reservation_bytes, Job job,

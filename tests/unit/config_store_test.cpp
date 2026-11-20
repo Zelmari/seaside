@@ -58,14 +58,19 @@ class StoreTest : public testing::Test {
 TEST_F(StoreTest, MissingEmptyAndBoundedRegularFiles) {
     seaside::ConfigStore store;
     auto path = root / "config.toml";
-    ASSERT_TRUE(store.read(path));
-    EXPECT_FALSE(*store.read(path));
+    auto missing = store.read(path);
+    ASSERT_TRUE(missing);
+    EXPECT_FALSE(missing->has_value());
     write(path, "");
-    ASSERT_TRUE(store.read(path));
-    ASSERT_TRUE(*store.read(path));
-    EXPECT_EQ(**store.read(path), "");
+    auto empty = store.read(path);
+    ASSERT_TRUE(empty);
+    ASSERT_TRUE(empty->has_value());
+    EXPECT_EQ(**empty, "");
     write(path, std::string(seaside::max_config_bytes, '#'));
-    EXPECT_EQ((**store.read(path)).size(), seaside::max_config_bytes);
+    auto maximum = store.read(path);
+    ASSERT_TRUE(maximum);
+    ASSERT_TRUE(maximum->has_value());
+    EXPECT_EQ((**maximum).size(), seaside::max_config_bytes);
     write(path, std::string(seaside::max_config_bytes + 1, '#'));
     EXPECT_FALSE(store.read(path));
     EXPECT_FALSE(store.read(root));
@@ -76,8 +81,10 @@ TEST_F(StoreTest, UserSymlinksAllowedAndRecoverySymlinksRejected) {
     seaside::ConfigStore store;
     write(root / "real", "[window]\ngaps_outer=3\n");
     std::filesystem::create_symlink(root / "real", root / "config");
-    ASSERT_TRUE(store.read(root / "config"));
-    EXPECT_EQ(**store.read(root / "config"), read(root / "real"));
+    auto linked = store.read(root / "config");
+    ASSERT_TRUE(linked);
+    ASSERT_TRUE(linked->has_value());
+    EXPECT_EQ(**linked, read(root / "real"));
     EXPECT_FALSE(store.read(root / "config", true));
     EXPECT_FALSE(store.publish(root / "config", "other", seaside::PublishMode::replace_snapshot));
     EXPECT_EQ(read(root / "real"), "[window]\ngaps_outer=3\n");
@@ -85,10 +92,12 @@ TEST_F(StoreTest, UserSymlinksAllowedAndRecoverySymlinksRejected) {
 TEST_F(StoreTest, FirstUsePublicationNeverClobbersExistingFile) {
     seaside::ConfigStore store;
     auto path = root / "new" / "config.toml";
-    ASSERT_EQ(*store.publish(path, "first", seaside::PublishMode::create_user_file),
-              seaside::PublishResult::written);
-    ASSERT_EQ(*store.publish(path, "second", seaside::PublishMode::create_user_file),
-              seaside::PublishResult::already_exists);
+    auto first = store.publish(path, "first", seaside::PublishMode::create_user_file);
+    ASSERT_TRUE(first);
+    EXPECT_EQ(*first, seaside::PublishResult::written);
+    auto second = store.publish(path, "second", seaside::PublishMode::create_user_file);
+    ASSERT_TRUE(second);
+    EXPECT_EQ(*second, seaside::PublishResult::already_exists);
     EXPECT_EQ(read(path), "first");
     struct stat mode{};
     ASSERT_EQ(::stat(path.c_str(), &mode), 0);
@@ -105,8 +114,10 @@ TEST_F(StoreTest, ShortInterruptedIoAndChangingSource) {
     seaside::ConfigStore store(io);
     auto path = root / "config";
     ASSERT_TRUE(store.publish(path, "abcdef", seaside::PublishMode::replace_snapshot));
-    ASSERT_TRUE(store.read(path));
-    EXPECT_EQ(**store.read(path), "abcdef");
+    auto interrupted = store.read(path);
+    ASSERT_TRUE(interrupted);
+    ASSERT_TRUE(interrupted->has_value());
+    EXPECT_EQ(**interrupted, "abcdef");
     bool once = false;
     io->observe = [&](seaside::StorageStep step) {
         if (step == seaside::StorageStep::read && !std::exchange(once, true))

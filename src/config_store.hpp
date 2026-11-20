@@ -27,6 +27,7 @@ enum class StorageStep {
     cleanup,
     sync_ancestor,
     rollback,
+    waiting_for_publication,
 };
 struct StorageError {
     StorageStep operation;
@@ -58,6 +59,8 @@ class ConfigStore {
     // be a regular file, not a symlink. Nonblocking opens reject FIFOs/devices.
     std::expected<std::optional<std::string>, StorageError> read(const std::filesystem::path &path,
                                                                  bool private_state = false) const;
+    // Blocking serialization belongs on workers (or before the event loop).
+    // StorageIo hooks and generation predicates must not reenter publication.
     std::expected<PublishResult, StorageError>
     publish(const std::filesystem::path &path, std::string_view text, PublishMode mode,
             const std::function<bool()> &still_current = {}) const;

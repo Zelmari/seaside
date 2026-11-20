@@ -18,9 +18,17 @@ TEST_F(BindingsTest, ModifierOrderAndXkbAliasesNormalizeWithoutInferringShift) {
     ASSERT_TRUE(a);
     ASSERT_TRUE(b);
     EXPECT_EQ(*a, *b);
-    EXPECT_EQ(seaside::parse_chord("Prior"), seaside::parse_chord("Page_Up"));
-    EXPECT_NE(seaside::parse_chord("D"), seaside::parse_chord("d"));
-    EXPECT_EQ(seaside::parse_chord("D")->modifiers, 0);
+    auto prior = seaside::parse_chord("Prior");
+    auto page_up = seaside::parse_chord("Page_Up");
+    auto upper_d = seaside::parse_chord("D");
+    auto lower_d = seaside::parse_chord("d");
+    ASSERT_TRUE(prior);
+    ASSERT_TRUE(page_up);
+    ASSERT_TRUE(upper_d);
+    ASSERT_TRUE(lower_d);
+    EXPECT_EQ(prior.value(), page_up.value());
+    EXPECT_NE(upper_d.value(), lower_d.value());
+    EXPECT_EQ(upper_d.value().modifiers, 0);
     EXPECT_TRUE(seaside::parse_chord("XF86AudioMute"));
     EXPECT_TRUE(seaside::parse_chord("Ctrl+Alt+Shift+Super+F12"));
 }
@@ -35,7 +43,7 @@ TEST_F(BindingsTest, MissingUnknownAndDuplicateChordTokensAreRejected) {
 }
 
 TEST_F(BindingsTest, EveryApprovedKeyboardActionParsesWithItsArguments) {
-    auto chord = *seaside::parse_chord("Super+A");
+    auto chord = seaside::parse_chord("Super+A").value();
     for (auto action : {"toggle_window_tiling",
                         "focus left",
                         "focus right",
@@ -63,14 +71,14 @@ TEST_F(BindingsTest, EveryApprovedKeyboardActionParsesWithItsArguments) {
         SCOPED_TRACE(action);
         EXPECT_TRUE(seaside::parse_action(action, chord));
     }
-    EXPECT_EQ(seaside::parse_action("resize_window left", chord)->argument, 32);
-    EXPECT_EQ(seaside::parse_action("workspace 2147483647", chord)->argument, 2147483647);
-    EXPECT_EQ(seaside::parse_action("night_light off", chord)->night_light,
+    EXPECT_EQ(seaside::parse_action("resize_window left", chord).value().argument, 32);
+    EXPECT_EQ(seaside::parse_action("workspace 2147483647", chord).value().argument, 2147483647);
+    EXPECT_EQ(seaside::parse_action("night_light off", chord).value().night_light,
               seaside::NightLightAction::off);
 }
 
 TEST_F(BindingsTest, ArityDirectionsAndIntegerOverflowAreRejected) {
-    auto chord = *seaside::parse_chord("A");
+    auto chord = seaside::parse_chord("A").value();
     for (auto action : {"",
                         "exit now",
                         "not_an_action",
@@ -122,7 +130,7 @@ TEST_F(BindingsTest, TypedActionResultsRetainTheirSpecificKindsAndArguments) {
         std::pair{"exit", K::exit},
         std::pair{"exec foot", K::exec},
     };
-    auto chord = *seaside::parse_chord("A");
+    auto chord = seaside::parse_chord("A").value();
     for (auto [text, kind] : definitions) {
         SCOPED_TRACE(text);
         auto parsed = seaside::parse_action(text, chord);
@@ -134,36 +142,43 @@ TEST_F(BindingsTest, TypedActionResultsRetainTheirSpecificKindsAndArguments) {
           std::pair{"right", seaside::Direction::right}, std::pair{"up", seaside::Direction::up},
           std::pair{"down", seaside::Direction::down}}) {
         SCOPED_TRACE(text);
-        EXPECT_EQ(seaside::parse_action(std::string("focus ") + text, chord)->direction, direction);
+        EXPECT_EQ(seaside::parse_action(std::string("focus ") + text, chord).value().direction,
+                  direction);
     }
-    EXPECT_EQ(seaside::parse_action("move_window right", chord)->direction,
+    EXPECT_EQ(seaside::parse_action("move_window right", chord).value().direction,
               seaside::Direction::right);
-    EXPECT_EQ(seaside::parse_action("swap_window up", chord)->direction, seaside::Direction::up);
+    EXPECT_EQ(seaside::parse_action("swap_window up", chord).value().direction,
+              seaside::Direction::up);
     auto resize = seaside::parse_action("resize_window down 99", chord);
+    ASSERT_TRUE(resize);
     EXPECT_EQ(resize->direction, seaside::Direction::down);
     EXPECT_EQ(resize->argument, 99);
-    EXPECT_EQ(seaside::parse_action("workspace 7", chord)->argument, 7);
-    EXPECT_EQ(seaside::parse_action("move_to_workspace 8", chord)->argument, 8);
-    EXPECT_EQ(seaside::parse_action("transfer_workspace identity:serial", chord)->text,
+    EXPECT_EQ(seaside::parse_action("workspace 7", chord).value().argument, 7);
+    EXPECT_EQ(seaside::parse_action("move_to_workspace 8", chord).value().argument, 8);
+    EXPECT_EQ(seaside::parse_action("transfer_workspace identity:serial", chord).value().text,
               "identity:serial");
-    EXPECT_EQ(seaside::parse_action("night_light on", chord)->night_light,
+    EXPECT_EQ(seaside::parse_action("night_light on", chord).value().night_light,
               seaside::NightLightAction::on);
-    EXPECT_EQ(seaside::parse_action("night_light off", chord)->night_light,
+    EXPECT_EQ(seaside::parse_action("night_light off", chord).value().night_light,
               seaside::NightLightAction::off);
-    EXPECT_EQ(seaside::parse_action("night_light toggle", chord)->night_light,
+    EXPECT_EQ(seaside::parse_action("night_light toggle", chord).value().night_light,
               seaside::NightLightAction::toggle);
-    EXPECT_EQ(seaside::parse_action("exec foot", chord)->text, "foot");
+    EXPECT_EQ(seaside::parse_action("exec foot", chord).value().text, "foot");
     EXPECT_EQ(
-        seaside::parse_action("move_window", *seaside::parse_chord("Super+MouseLeftDrag"))->kind,
+        seaside::parse_action("move_window", seaside::parse_chord("Super+MouseLeftDrag").value())
+            .value()
+            .kind,
         K::move_window);
     EXPECT_EQ(
-        seaside::parse_action("resize_window", *seaside::parse_chord("Super+MouseRightDrag"))->kind,
+        seaside::parse_action("resize_window", seaside::parse_chord("Super+MouseRightDrag").value())
+            .value()
+            .kind,
         K::resize_window);
 }
 
 TEST_F(BindingsTest, MouseGestureAndActionContextsMustMatch) {
-    auto left = *seaside::parse_chord("Super+MouseLeftDrag");
-    auto right = *seaside::parse_chord("Super+MouseRightDrag");
+    auto left = seaside::parse_chord("Super+MouseLeftDrag").value();
+    auto right = seaside::parse_chord("Super+MouseRightDrag").value();
     EXPECT_TRUE(seaside::parse_action("move_window", left));
     EXPECT_TRUE(seaside::parse_action("resize_window", right));
     EXPECT_FALSE(seaside::parse_action("resize_window", left));
@@ -177,7 +192,7 @@ TEST_F(BindingsTest, MouseGestureAndActionContextsMustMatch) {
 }
 
 TEST_F(BindingsTest, ShellCommandBytesArePreservedAsData) {
-    auto chord = *seaside::parse_chord("A");
+    auto chord = seaside::parse_chord("A").value();
     std::string command = "printf '%s\\n' \"$(echo untouched)\"; # comment\n echo next  ";
     auto parsed = seaside::parse_action("exec " + command, chord);
     ASSERT_TRUE(parsed);
@@ -199,7 +214,7 @@ TEST_F(BindingsTest, SelectorsUseExactPrefixesAndOpaqueValues) {
 }
 
 TEST_F(BindingsTest, TransferWorkspacePreservesTheWholeOpaqueSelectorSuffix) {
-    auto chord = *seaside::parse_chord("A");
+    auto chord = seaside::parse_chord("A").value();
     for (auto selector : {"identity:Model A", "identity: Model A  ", "connector:Display Name"}) {
         SCOPED_TRACE(selector);
         auto parsed = seaside::parse_action(std::string("transfer_workspace ") + selector, chord);
@@ -216,10 +231,10 @@ TEST_F(BindingsTest, TransferWorkspacePreservesTheWholeOpaqueSelectorSuffix) {
 TEST_F(BindingsTest, DefaultsHaveOnlyTheTwelveApprovedBindings) {
     auto map = seaside::default_bindings();
     ASSERT_EQ(map.size(), 12U);
-    EXPECT_EQ(map.at(*seaside::parse_chord("Super+Return")).text, "foot");
-    EXPECT_EQ(map.at(*seaside::parse_chord("XF86AudioRaiseVolume")).text,
+    EXPECT_EQ(map.at(seaside::parse_chord("Super+Return").value()).text, "foot");
+    EXPECT_EQ(map.at(seaside::parse_chord("XF86AudioRaiseVolume").value()).text,
               "wpctl set-volume --limit 1 @DEFAULT_AUDIO_SINK@ 5%+");
     for (auto key : {"Super+Q", "Super+1", "Super+N", "Super+Shift+E", "Super+F"})
-        EXPECT_FALSE(map.contains(*seaside::parse_chord(key)));
+        EXPECT_FALSE(map.contains(seaside::parse_chord(key).value()));
 }
 } // namespace

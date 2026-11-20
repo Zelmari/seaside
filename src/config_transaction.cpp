@@ -1,6 +1,7 @@
 #include "config_transaction.hpp"
 
 #include <algorithm>
+#include <latch>
 #include <limits>
 #include <utility>
 
@@ -192,34 +193,45 @@ std::expected<void, WorkError> AsyncConfigIo::persist(std::filesystem::path path
         return std::unexpected(WorkError::cancelled);
     if (text.size() > max_config_bytes)
         return std::unexpected(WorkError::result_too_large);
-    accepted_generation_->store(generation);
     auto store = store_;
     auto latest = accepted_generation_;
+    auto admission = std::make_shared<std::latch>(1);
+    auto error_path = path;
     std::weak_ptr<WorkLifetime> lifetime = lifetime_;
-    return queue_.submit(
+    auto submitted = queue_.submit(
         0, lifetime_, 2 * max_config_bytes,
-        [store = std::move(store), latest, lifetime = std::move(lifetime), path = std::move(path),
-         text = std::move(text), generation](std::stop_token stop) -> WorkResult {
+        [store = std::move(store), latest, admission, lifetime = std::move(lifetime),
+         path = std::move(path), text = std::move(text),
+         generation](std::stop_token stop) -> WorkResult {
+            // Publish acceptance only after successful queue admission, before
+            // any worker can write. A rejected newer request cannot cancel an
+            // older accepted save; a fast new worker cannot publish out of order.
+            admission->wait();
+            auto error = std::make_shared<std::optional<StorageError>>();
             auto current = [&] {
                 auto owner = lifetime.lock();
                 return owner && owner->active() && !stop.stop_requested() &&
                        latest->load() == generation;
             };
             auto saved = store.publish(path, text, PublishMode::replace_snapshot, current);
-            auto error = std::make_shared<std::optional<StorageError>>();
             if (!saved)
                 *error = std::move(saved.error());
             return {std::move(error), sizeof(StorageError), WorkError::none};
         },
-        [latest, generation, completion = std::move(completion)](WorkResult result) {
+        [latest, generation, error_path = std::move(error_path),
+         completion = std::move(completion)](WorkResult result) {
             if (generation != latest->load())
                 return;
             if (result.error != WorkError::none || !result.value)
-                completion(StorageError{
-                    StorageStep::write, {}, std::make_error_code(std::errc::io_error), false});
+                completion(StorageError{StorageStep::write, error_path,
+                                        std::make_error_code(std::errc::io_error), true});
             else
                 completion(
                     *std::static_pointer_cast<const std::optional<StorageError>>(result.value));
         });
+    if (submitted)
+        accepted_generation_->store(generation);
+    admission->count_down();
+    return submitted;
 }
 } // namespace seaside
