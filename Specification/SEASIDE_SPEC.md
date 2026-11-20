@@ -6,7 +6,7 @@
 **Target:** Arch Linux only (initial development and testing inside an Arch VM hosted on Windows; final validation on native Arch / Framework Desktop, Ryzen AI Max+ 395 / Radeon 8060S)  
 **Implementation target:** standalone C++23 Wayland compositor using wlroots; no required desktop shell
 
-**Stack decision status — 2026-11-20:** The owner selected C++23, wlroots, wlroots' existing scene graph and renderers, and automatic renderer selection as the foundation, superseding the original C17 language target. The existing wlroots 0.20 API baseline is the starting point for C++ integration checks; the recorded C build does not qualify a C++ build. Supporting libraries and the build system remain under discussion before further development. C17-specific descriptions below apply to the original part 1 prototype, whose implementation and recorded test results remain unchanged. Finalize the remaining dependency boundaries and update the affected contracts before migration; all approved product behavior still applies.
+**Stack decision status — 2026-11-20:** The owner selected C++23, wlroots, wlroots' existing scene graph and renderers, automatic renderer selection, and Meson/Ninja as the foundation, superseding the original C17 language target. The existing wlroots 0.20 API baseline is the starting point for C++ integration checks; the recorded C build does not qualify a C++ build. Supporting libraries remain under discussion before further development. C17-specific descriptions below apply to the original part 1 prototype, whose implementation and recorded test results remain unchanged. Finalize the remaining dependency boundaries and update the affected contracts before migration; all approved product behavior still applies.
 
 > **Source of truth:** This file and the owner's subsequent explicit corrections define the current requirements. The historical files `SEASIDE_DECISION_ARCHIVE.md` and `SEASIDE_REPO_AUDIT.md` were referenced by the supplied draft but are **not present in this workspace**. Do not invent their contents or assume they authorize features. If recovered, treat the former as historical decisions and the latter as research; the newest explicit owner decision controls. Commented TOML examples and implementation convenience do not create approved features.
 >
@@ -927,6 +927,8 @@ Use C for fixture clients and tests linked to the compositor's C modules, with a
 
 Compare like-for-like hardware, kernel, game settings and output modes. The acceptance condition is **correct behavior and demonstrably low overhead without regressions**, not an invented claim that the smallest program is automatically the fastest. Avoid collecting high-volume traces unless explicitly enabled.
 
+**Future investigations:** [Response time and performance notes](Research/PERFORMANCE.md) track renderer comparisons and other possible optimizations, their measurement requirements and the current implementation boundary. These are investigation candidates, not claims of measured improvements or additional product requirements. The selected stack and approved behavior remain the baseline.
+
 ### 12.4 Release checklist
 
 Distinguish three milestones; requiring completed code before allowing implementation would be circular:
@@ -979,7 +981,7 @@ The following sequence verifies the **existing approved** contract. It does not 
 
 Use **10 development parts**, each ending in concrete test evidence. A part may contain several small implementation tasks/changes; it is not a requirement to produce one large diff or stop for approval after every part. The harness starts in part 1 and grows with the code under §12.2b. These are incremental engineering milestones, not authorization to invent features. The workspace now contains the part 1 software foundation; [the part 1 handoff](PART1.md) records actual checks separately from pending full Arch-VM and hardware qualification. It is not yet an installable desktop compositor.
 
-**Prototype build convention (ENGINEERING CHOICE):** The existing part 1 prototype uses Meson/Ninja and an Arch C17 toolchain with the Linux/POSIX interfaces required by wlroots. The selected implementation target is now C++23 with wlroots; retaining or replacing the build system remains under discussion. Keep separate compositor/CLI/test targets and layout/focus/config state tests independent of physical DRM outputs. Select the TOML 1.0 parser and small image decoder after checking their real APIs and licences as part of the remaining stack decisions. Current prototype build commands are:
+**Build convention (APPROVED):** Retain Meson/Ninja for the C++23/wlroots implementation. The existing part 1 prototype still uses an Arch C17 toolchain; verify and record the C++23 toolchain/API baseline during migration. Keep separate compositor/CLI/test targets and layout/focus/config state tests independent of physical DRM outputs. Select the TOML 1.0 parser and small image decoder after checking their real APIs and licences as part of the remaining stack decisions. Current prototype build commands are:
 
 ```sh
 meson setup build --buildtype=debug
@@ -1090,3 +1092,7 @@ The supplied draft referenced `SEASIDE_DECISION_ARCHIVE.md` for a full chronolog
 **Owner decision — 2026-11-20 (rendering infrastructure):** Use wlroots' existing scene graph and renderers. Seaside retains its own approved window-management policy. The production GPU backend (OpenGL ES or Vulkan) remains to be discussed; this decision does not add a renderer setting or change the hardware-cursor requirement.
 
 **Owner decision — 2026-11-20 (renderer selection):** Use wlroots' automatic renderer selection. Do not hard-code OpenGL ES or Vulkan as the production default. Record and qualify the actual renderer on the target AMD hardware; the choice does not guarantee the lowest latency or alter the graphics APIs applications may use.
+
+**Owner decision — 2026-11-20 (build system):** Keep Meson and Ninja for the C++23 implementation and its tests.
+
+**Owner direction — 2026-11-20 (performance notes):** Keep renderer comparisons and other future response-time optimization investigations in a separate file under `Specification/`. [The research notes](Research/PERFORMANCE.md) record hypotheses and required evidence; they do not authorize changing the selected stack or approved behavior without the applicable decision.

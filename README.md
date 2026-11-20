@@ -1,7 +1,8 @@
 # Seaside
 
 An Arch Linux Wayland compositor with **C++23 and wlroots selected as the
-foundation**. The remaining stack is under review. The current implementation is
+foundation**, retaining **Meson + Ninja** for builds. Supporting libraries remain
+under review. The current implementation is
 the original **C/wlroots part 1 build and test foundation**: a private server
 lifecycle library, a real-client headless fixture, a bounded test runner and a
 DRM inspection tool.
@@ -9,6 +10,8 @@ The installable compositor session and window manager belong to later parts.
 
 The product contract is in [the design](Specification/SEASIDE_SPEC.md). Build and
 verification details are in [the part 1 handoff](Specification/PART1.md).
+Future latency investigations are tracked in
+[the performance research notes](Specification/Research/PERFORMANCE.md).
 
 ## Build and test
 
