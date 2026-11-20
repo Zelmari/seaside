@@ -4,9 +4,9 @@
 **Updated:** 2026-11-20\
 **Owner-approved product behavior:** frozen provisionally; changes require explicit approval  
 **Target:** Arch Linux only (initial development and testing inside an Arch VM hosted on Windows; final validation on native Arch / Framework Desktop, Ryzen AI Max+ 395 / Radeon 8060S)  
-**Implementation target:** standalone C++23 Wayland compositor; compositor/backend library under review; no required desktop shell
+**Implementation target:** standalone C++23 Wayland compositor using wlroots; no required desktop shell
 
-**Stack decision status — 2026-11-20:** The owner selected C++23 as the implementation language and standard, superseding the original C17 target. The remaining stack choices are being discussed before further development. C17/wlroots-specific architecture and API references below describe the original design and existing part 1 prototype; they do not settle the revised stack. The current C/wlroots/Meson implementation and its recorded test results remain unchanged. Language and standard selection do not select Aquamarine, custom protocol/rendering implementations or a different build system. Finalize the dependency boundaries and update the affected contracts before migration; all approved product behavior still applies.
+**Stack decision status — 2026-11-20:** The owner selected C++23 and wlroots as the foundation, superseding the original C17 language target while retaining wlroots. The existing wlroots 0.20 API baseline is the starting point for C++ integration checks; the recorded C build does not qualify a C++ build. Renderer, supporting-library and build-system choices remain under discussion before further development. C17-specific descriptions below apply to the original part 1 prototype, whose implementation and recorded test results remain unchanged. Selecting wlroots does not independently settle use of its scene graph, a particular GPU renderer or a custom renderer. Finalize the remaining dependency boundaries and update the affected contracts before migration; all approved product behavior still applies.
 
 > **Source of truth:** This file and the owner's subsequent explicit corrections define the current requirements. The historical files `SEASIDE_DECISION_ARCHIVE.md` and `SEASIDE_REPO_AUDIT.md` were referenced by the supplied draft but are **not present in this workspace**. Do not invent their contents or assume they authorize features. If recovered, treat the former as historical decisions and the latter as research; the newest explicit owner decision controls. Commented TOML examples and implementation convenience do not create approved features.
 >
@@ -55,7 +55,7 @@ xdg-desktop-portal frontend + tested portal backend.
 - **APPROVED:** `wlr-layer-shell` support permits external panels, overlays and launchers; nonessential shell overlays are suppressed on an output with fullscreen content. This is not a blanket promise to hide security-critical or protocol-required surfaces.
 - **APPROVED:** Unix-socket IPC is served inside the compositor, without a separate daemon. No IPC work may block the render/input event loop.
 
-### 2.1 Internal C modules (engineering structure; not additional features)
+### 2.1 Planned internal C++ modules (engineering structure; not additional features)
 
 | Module | Owns | Communicates with |
 |---|---|---|
@@ -977,7 +977,7 @@ The following sequence verifies the **existing approved** contract. It does not 
 
 Use **10 development parts**, each ending in concrete test evidence. A part may contain several small implementation tasks/changes; it is not a requirement to produce one large diff or stop for approval after every part. The harness starts in part 1 and grows with the code under §12.2b. These are incremental engineering milestones, not authorization to invent features. The workspace now contains the part 1 software foundation; [the part 1 handoff](PART1.md) records actual checks separately from pending full Arch-VM and hardware qualification. It is not yet an installable desktop compositor.
 
-**Build convention (ENGINEERING CHOICE):** Use Meson/Ninja, a pinned Arch C toolchain targeting C17 with the Linux/POSIX interfaces required by wlroots, and separate compositor/CLI/test targets. Choose the TOML 1.0 parser and small image decoder as build dependencies after checking their real APIs and licences. Keep layout/focus/config state tests independent of physical DRM outputs. Standard build commands, to be provided by the initial implementation, are:
+**Prototype build convention (ENGINEERING CHOICE):** The existing part 1 prototype uses Meson/Ninja and an Arch C17 toolchain with the Linux/POSIX interfaces required by wlroots. The selected implementation target is now C++23 with wlroots; retaining or replacing the build system remains under discussion. Keep separate compositor/CLI/test targets and layout/focus/config state tests independent of physical DRM outputs. Select the TOML 1.0 parser and small image decoder after checking their real APIs and licences as part of the remaining stack decisions. Current prototype build commands are:
 
 ```sh
 meson setup build --buildtype=debug
@@ -1082,3 +1082,5 @@ The supplied draft referenced `SEASIDE_DECISION_ARCHIVE.md` for a full chronolog
 **Owner decision — 2026-11-20 (implementation language):** Select C++ for Seaside and discuss the remaining technology stack before proceeding. The earlier Rust/Smithay proposal was not adopted. The exact C++ standard, compositor/backend library, renderer, supporting dependencies and any build-system change remain to be decided; no runtime functionality or implementation migration is inferred from this language decision.
 
 **Owner decision — 2026-11-20 (language standard):** Use C++23. This settles the standard left open in the language decision above. Backend, rendering, supporting-library and build-system choices remain under discussion. The current C prototype has not been migrated or verified as C++23.
+
+**Owner decision — 2026-11-20 (compositor library):** Use wlroots with C++23. This settles the compositor-library choice; Aquamarine and a library-free implementation were discussed but not selected. Renderer/scene-graph ownership, supporting libraries and the build system remain to be settled. C++ interoperability and the approved rendering/capture/hardware requirements still need implementation evidence.

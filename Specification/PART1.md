@@ -4,9 +4,9 @@ This records the software foundation for the first development part in §14 of
 `SEASIDE_SPEC.md`.
 
 This is the original C/wlroots/Meson prototype and its historical verification
-record. On 2026-11-20 the owner selected C++23 for future implementation; the
-remaining stack and migration are pending. The results below do not establish
-a C++ build or compatibility with a replacement backend.
+record. On 2026-11-20 the owner selected C++23 with wlroots for future
+implementation; the remaining stack and language migration are pending. The
+results below do not establish a C++ build.
 
 Requirements covered are the shared event-loop/lifetime boundary (§2), bounded
 test tooling and isolation (§12.2b), and actual build/API evidence for G1 (§13).
