@@ -1,6 +1,6 @@
 # Seaside
 
-An Arch Linux Wayland compositor with **C++ selected as the implementation
+An Arch Linux Wayland compositor with **C++23 selected as the implementation
 language**. The remaining stack is under review. The current implementation is
 the original **C/wlroots part 1 build and test foundation**: a private server
 lifecycle library, a real-client headless fixture, a bounded test runner and a
