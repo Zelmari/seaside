@@ -62,7 +62,7 @@ and font baseline still need resolution and evidence.
   meaningful acceptance/regression coverage with each part.
 - Report commands and actual results, separating simulated, headless and native
   hardware evidence. Record unresolved qualification explicitly.
-- Follow [the Git workflow](../skills/GIT.md): Conventional Commit subjects and
+- Use Conventional Commit subjects and
   PR/MR titles, concise descriptions with important review details, meaningful
   coherent local commits and genuine human attribution. Agents do not add
   themselves as contributors. External Git actions need task authorization.
