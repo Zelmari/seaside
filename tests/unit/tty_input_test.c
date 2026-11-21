@@ -33,6 +33,12 @@ struct observation {
     unsigned launches;
     unsigned configured_shortcuts;
     unsigned vt_switches;
+    unsigned digit_shortcuts;
+    unsigned explicit_symbol_shortcuts;
+    unsigned shadowed_digit_shortcuts;
+    unsigned alternate_case_shortcuts;
+    unsigned exact_case_shortcuts;
+    unsigned shadowed_case_shortcuts;
     unsigned modifier_changes;
     uint8_t modifiers;
     bool absolute;
@@ -66,6 +72,32 @@ static bool record_shortcut(void *data, uint8_t modifiers, uint32_t keysym) {
     if (keysym == XKB_KEY_XF86Switch_VT_2) {
         ++observation->vt_switches;
         return true;
+    }
+    if (modifiers == 1) {
+        switch (keysym) {
+        case XKB_KEY_D:
+            ++observation->alternate_case_shortcuts;
+            return true;
+        case XKB_KEY_e:
+            ++observation->exact_case_shortcuts;
+            return true;
+        case XKB_KEY_E:
+            ++observation->shadowed_case_shortcuts;
+            return true;
+        }
+    }
+    if (modifiers == (1 | 8)) {
+        switch (keysym) {
+        case XKB_KEY_2:
+            ++observation->digit_shortcuts;
+            return true;
+        case XKB_KEY_dollar:
+            ++observation->explicit_symbol_shortcuts;
+            return true;
+        case XKB_KEY_4:
+            ++observation->shadowed_digit_shortcuts;
+            return true;
+        }
     }
     return false;
 }
@@ -531,13 +563,45 @@ static void exercise_wayland_keyboard(void) {
               received.forwarded_key_presses == 3 && received.launch_requests == 1 &&
               observation.exits == 0 && keyboard_client.escaped,
           "terminal Escape or keyboard delivery counters failed");
+
+    key(&second, KEY_LEFTMETA, WL_KEYBOARD_KEY_STATE_PRESSED);
+    key(&second, KEY_D, WL_KEYBOARD_KEY_STATE_PRESSED);
+    key(&second, KEY_D, WL_KEYBOARD_KEY_STATE_RELEASED);
+    key(&second, KEY_E, WL_KEYBOARD_KEY_STATE_PRESSED);
+    key(&second, KEY_E, WL_KEYBOARD_KEY_STATE_RELEASED);
+    check(observation.alternate_case_shortcuts == 1 && observation.exact_case_shortcuts == 1 &&
+              observation.shadowed_case_shortcuts == 0,
+          "an unshifted letter did not dispatch its case alias or lost exact case precedence");
+    key(&second, KEY_LEFTSHIFT, WL_KEYBOARD_KEY_STATE_PRESSED);
+    key(&second, KEY_2, WL_KEYBOARD_KEY_STATE_PRESSED);
+    key(&second, KEY_2, WL_KEYBOARD_KEY_STATE_RELEASED);
+    key(&second, KEY_4, WL_KEYBOARD_KEY_STATE_PRESSED);
+    key(&second, KEY_4, WL_KEYBOARD_KEY_STATE_RELEASED);
+    key(&second, KEY_LEFTMETA, WL_KEYBOARD_KEY_STATE_RELEASED);
+    round_trip(server, client);
+    check(observation.digit_shortcuts == 1 && observation.explicit_symbol_shortcuts == 1 &&
+              observation.shadowed_digit_shortcuts == 0 && keyboard_client.key_events == 10,
+          "Super+Shift+digit failed to dispatch or shadowed the effective symbol binding");
+    key(&second, KEY_2, WL_KEYBOARD_KEY_STATE_PRESSED);
+    round_trip(server, client);
+    check(keyboard_client.key_events == 11 && keyboard_client.key == KEY_2 &&
+              keyboard_client.key_state == WL_KEYBOARD_KEY_STATE_PRESSED,
+          "the compositor consumed an unbound Shift+digit press");
+    key(&second, KEY_2, WL_KEYBOARD_KEY_STATE_RELEASED);
+    round_trip(server, client);
+    check(keyboard_client.key_events == 12 && keyboard_client.key == KEY_2 &&
+              keyboard_client.key_state == WL_KEYBOARD_KEY_STATE_RELEASED,
+          "the compositor consumed an unbound Shift+digit release");
+    key(&second, KEY_LEFTSHIFT, WL_KEYBOARD_KEY_STATE_RELEASED);
+    const unsigned previous_modifier_changes = observation.modifier_changes;
+    const uint64_t previous_forwarded = seaside_tty_input_get_snapshot(input).forwarded_key_events;
+
     wl_surface_destroy(surface);
     round_trip(server, client);
     key(&second, KEY_A, WL_KEYBOARD_KEY_STATE_PRESSED);
     key(&second, KEY_A, WL_KEYBOARD_KEY_STATE_RELEASED);
     const struct seaside_tty_input_snapshot unfocused = seaside_tty_input_get_snapshot(input);
-    check(!unfocused.has_keyboard_focus &&
-              unfocused.forwarded_key_events == received.forwarded_key_events,
+    check(!unfocused.has_keyboard_focus && unfocused.forwarded_key_events == previous_forwarded,
           "surface destruction left stale keyboard focus");
 
     key(&second, KEY_LEFTCTRL, WL_KEYBOARD_KEY_STATE_PRESSED);
@@ -550,7 +614,8 @@ static void exercise_wayland_keyboard(void) {
     key(&second, KEY_LEFTCTRL, WL_KEYBOARD_KEY_STATE_RELEASED);
     check(observation.configured_shortcuts == 1 && observation.vt_switches == 1,
           "configured Ctrl+Return or standard VT keysym did not reach the compositor");
-    check(observation.modifier_changes == 8 && observation.modifiers == 0,
+    check(previous_modifier_changes == 8 && observation.modifier_changes == 12 &&
+              observation.modifiers == 0,
           "compositor modifier tracking missed release or unplug transitions");
 
     wl_keyboard_release(keyboard_client.keyboard);

@@ -532,8 +532,34 @@ static bool configured_shortcut(struct seaside_tty_input *input, uint32_t keycod
         return false;
     }
     /* Ignore lock modifier bits while using the effective XKB keysym. */
-    const uint32_t keysym = xkb_state_key_get_one_sym(input->shortcut_state, keycode + 8);
-    return input->callbacks.shortcut_pressed(input->data, binding_modifiers(state), keysym);
+    struct xkb_state *xkb = input->shortcut_state;
+    const xkb_keycode_t code = keycode + 8;
+    const uint8_t modifiers = binding_modifiers(state);
+    const xkb_keysym_t effective = xkb_state_key_get_one_sym(xkb, code);
+    if (input->callbacks.shortcut_pressed(input->data, modifiers, effective)) {
+        return true;
+    }
+
+    /* Try the active layout's base symbol using the same modifiers. A binding
+     * for the explicit shifted symbol still takes priority over Shift+digit. */
+    const xkb_layout_index_t layout = xkb_state_key_get_layout(xkb, code);
+    const xkb_keysym_t *level_zero = NULL;
+    xkb_keysym_t base = XKB_KEY_NoSymbol;
+    if (layout != XKB_LAYOUT_INVALID &&
+        xkb_keymap_key_get_syms_by_level(xkb_state_get_keymap(xkb), code, layout, 0, &level_zero) ==
+            1) {
+        base = level_zero[0];
+        if (base != effective && input->callbacks.shortcut_pressed(input->data, modifiers, base)) {
+            return true;
+        }
+    }
+
+    // The documented Super+D uses an uppercase name for the unshifted key.
+    // Match XKB's case equivalent only after exact matches, with the same modifiers.
+    const xkb_keysym_t upper = xkb_keysym_to_upper(effective);
+    const xkb_keysym_t opposite = upper != effective ? upper : xkb_keysym_to_lower(effective);
+    return opposite != effective && opposite != base &&
+           input->callbacks.shortcut_pressed(input->data, modifiers, opposite);
 }
 
 static void update_binding_modifiers(struct seaside_tty_input *input) {
