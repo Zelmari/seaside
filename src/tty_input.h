@@ -7,6 +7,7 @@
 
 struct wl_display;
 struct wlr_backend;
+struct wlr_drag_icon;
 struct wlr_seat;
 struct wlr_surface;
 struct seaside_tty_input;
@@ -40,6 +41,8 @@ struct seaside_tty_input_callbacks {
     void (*pointer_locked)(void *data, bool locked);
     /* The initiating device disappeared before its consumed button release. */
     void (*pointer_cancelled)(void *data);
+    /* The icon is borrowed. The scene removes its node on icon destruction. */
+    void (*drag_icon)(void *data, struct wlr_drag_icon *icon);
 };
 
 struct seaside_tty_input_snapshot {
@@ -71,6 +74,7 @@ void seaside_tty_input_set_focus(struct seaside_tty_input *input, struct wlr_sur
 struct wlr_seat *seaside_tty_input_get_seat(const struct seaside_tty_input *input);
 /* Reevaluate hover after a scene change, even when the cursor has not moved. */
 void seaside_tty_input_refresh_pointer(struct seaside_tty_input *input);
+void seaside_tty_input_cancel_drag(struct seaside_tty_input *input);
 void seaside_tty_input_destroy(struct seaside_tty_input *input);
 struct seaside_tty_input_snapshot
 seaside_tty_input_get_snapshot(const struct seaside_tty_input *input);

@@ -16,6 +16,8 @@
 #include <wlr/types/wlr_keyboard_group.h>
 #include <wlr/types/wlr_pointer.h>
 #include <wlr/types/wlr_pointer_constraints_v1.h>
+#include <wlr/types/wlr_primary_selection.h>
+#include <wlr/types/wlr_primary_selection_v1.h>
 #include <wlr/types/wlr_relative_pointer_v1.h>
 #include <wlr/types/wlr_seat.h>
 #include <wlr/util/region.h>
@@ -61,6 +63,12 @@ struct seaside_tty_input {
     struct wl_listener pointer_grab_begin;
     struct wl_listener pointer_grab_end;
     struct wl_listener keyboard_grab_end;
+    struct wl_listener request_selection;
+    struct wl_listener request_primary_selection;
+    struct wl_listener request_drag;
+    struct wl_listener drag_destroy;
+    struct wl_listener drag_origin_destroy;
+    struct tty_device *pointer_grab_device;
 };
 
 struct tty_device {
@@ -75,6 +83,9 @@ struct tty_device {
     struct wlr_keyboard *keyboard;
     struct libinput_device *pointer_device;
     bool consumed_buttons[KEY_CNT];
+    bool suppressed_drag_buttons[KEY_CNT];
+    bool drag_release_pending;
+    uint32_t drag_release_button, drag_release_time;
     bool direct_key;
 };
 
@@ -289,6 +300,22 @@ static void refresh_capabilities(struct seaside_tty_input *input) {
     }
 }
 
+static void cancel_drag(struct wlr_seat *seat) {
+    struct wlr_drag *drag = seat ? seat->drag : NULL;
+    if (!drag) {
+        return;
+    }
+    if (drag->source && !drag->dropped) {
+        wlr_data_source_destroy(drag->source);
+    } else {
+        wlr_seat_pointer_end_grab(seat);
+    }
+}
+
+void seaside_tty_input_cancel_drag(struct seaside_tty_input *input) {
+    cancel_drag(input ? input->seat : NULL);
+}
+
 static void remove_device(struct tty_device *device) {
     struct seaside_tty_input *input = device->input;
     wl_list_remove(&device->link);
@@ -299,6 +326,17 @@ static void remove_device(struct tty_device *device) {
         wl_list_remove(&device->button.link);
         wl_list_remove(&device->axis.link);
         wl_list_remove(&device->frame.link);
+        if (input->pointer_grab_device == device) {
+            input->pointer_grab_device = NULL;
+            if (input->seat && input->seat->drag) {
+                const uint32_t button = input->seat->pointer_state.grab_button;
+                seaside_tty_input_cancel_drag(input);
+                // Clear the held seat button after cancelling, so an unplug
+                // cannot perform the drop or block hover on surviving devices.
+                wlr_seat_pointer_notify_button(input->seat, monotonic_msec(), button,
+                                               WL_POINTER_BUTTON_STATE_RELEASED);
+            }
+        }
         const size_t old_consumed = input->consumed_button_count;
         for (size_t button = 0; button < KEY_CNT; ++button) {
             if (device->consumed_buttons[button]) {
@@ -393,13 +431,82 @@ static void handle_pointer_grab_begin(struct wl_listener *listener, void *data) 
 static void handle_pointer_grab_end(struct wl_listener *listener, void *data) {
     (void)data;
     struct seaside_tty_input *input = wl_container_of(listener, input, pointer_grab_end);
-    seaside_tty_input_refresh_pointer(input);
+    if (!input->seat->drag) {
+        seaside_tty_input_refresh_pointer(input);
+    }
 }
 
 static void handle_keyboard_grab_end(struct wl_listener *listener, void *data) {
     (void)data;
     struct seaside_tty_input *input = wl_container_of(listener, input, keyboard_grab_end);
     refresh_focus(input);
+}
+
+static bool focused_selection_serial(struct wlr_seat *seat, uint32_t serial) {
+    /* wlroots already checked the serial against the requesting client. The
+     * focused client's serials also rule out writes using background input. */
+    struct wlr_seat_client *focused = seat->keyboard_state.focused_client;
+    return focused && wlr_seat_client_validate_event_serial(focused, serial);
+}
+
+static void handle_selection(struct wl_listener *listener, void *data) {
+    struct seaside_tty_input *input = wl_container_of(listener, input, request_selection);
+    const struct wlr_seat_request_set_selection_event *event = data;
+    struct wlr_seat *seat = input->seat;
+    if (focused_selection_serial(seat, event->serial) &&
+        (!event->source || event->source != seat->drag_source)) {
+        wlr_seat_set_selection(seat, event->source, event->serial);
+    }
+}
+
+static void handle_primary_selection(struct wl_listener *listener, void *data) {
+    struct seaside_tty_input *input = wl_container_of(listener, input, request_primary_selection);
+    const struct wlr_seat_request_set_primary_selection_event *event = data;
+    if (focused_selection_serial(input->seat, event->serial)) {
+        wlr_seat_set_primary_selection(input->seat, event->source, event->serial);
+    }
+}
+
+static void handle_drag_destroy(struct wl_listener *listener, void *data) {
+    (void)data;
+    struct seaside_tty_input *input = wl_container_of(listener, input, drag_destroy);
+    wl_list_remove(&input->drag_destroy.link);
+    wl_list_remove(&input->drag_origin_destroy.link);
+    /* wlroots ends its pointer grab before sending the data-device leave. */
+    seaside_tty_input_refresh_pointer(input);
+}
+
+static void handle_drag_origin_destroy(struct wl_listener *listener, void *data) {
+    (void)data;
+    struct seaside_tty_input *input = wl_container_of(listener, input, drag_origin_destroy);
+    seaside_tty_input_cancel_drag(input);
+}
+
+static void handle_drag_request(struct wl_listener *listener, void *data) {
+    struct seaside_tty_input *input = wl_container_of(listener, input, request_drag);
+    const struct wlr_seat_request_start_drag_event *event = data;
+    struct wlr_drag *drag = event->drag;
+    struct wlr_seat *seat = input->seat;
+    const bool unused_source =
+        drag->source && drag->source != seat->selection_source && drag->source != seat->drag_source;
+    if (event->origin && input->pointer_grab_device && !input->constraint &&
+        !wlr_seat_pointer_has_grab(seat) && !wlr_seat_keyboard_has_grab(seat) &&
+        wlr_seat_validate_pointer_grab_serial(seat, event->origin, event->serial) &&
+        seat->pointer_state.buttons[0].n_pressed == 1 && (!drag->source || unused_source)) {
+        wlr_seat_start_pointer_drag(seat, drag, event->serial);
+        wl_signal_add(&drag->events.destroy, &input->drag_destroy);
+        wl_signal_add(&event->origin->events.destroy, &input->drag_origin_destroy);
+        if (drag->icon && input->callbacks.drag_icon) {
+            input->callbacks.drag_icon(input->data, drag->icon);
+        }
+        seaside_tty_input_refresh_pointer(input);
+    } else if (unused_source) {
+        wlr_data_source_destroy(drag->source);
+    } else {
+        /* A source-less request has no source destroy signal to dispose of
+         * its unstarted grab. Preserve sources already in use by the seat. */
+        drag->pointer_grab.interface->cancel(&drag->pointer_grab);
+    }
 }
 
 static void move_pointer(struct seaside_tty_input *input, uint32_t time_msec, bool absolute,
@@ -463,6 +570,16 @@ static void handle_pointer_button(struct wl_listener *listener, void *data) {
     }
     const uint32_t button = event->button;
     const bool pressed = event->state == WL_POINTER_BUTTON_STATE_PRESSED;
+    if (button < KEY_CNT && device->suppressed_drag_buttons[button]) {
+        device->suppressed_drag_buttons[button] = pressed;
+        return;
+    }
+    if (seat->drag && (pressed || device != input->pointer_grab_device)) {
+        if (pressed && button < KEY_CNT) {
+            device->suppressed_drag_buttons[button] = true;
+        }
+        return;
+    }
     if (button < KEY_CNT && device->consumed_buttons[button]) {
         if (!pressed) {
             if (input->gesture_device == device && input->gesture_button == button) {
@@ -484,6 +601,18 @@ static void handle_pointer_button(struct wl_listener *listener, void *data) {
         }
         return;
     }
+    if (!pressed && input->pointer_grab_device == device &&
+        button == seat->pointer_state.grab_button) {
+        if (seat->drag) {
+            /* Unplugging emits synthetic releases without a pointer frame.
+             * Complete a drop only on a framed release from its own device. */
+            device->drag_release_pending = true;
+            device->drag_release_button = button;
+            device->drag_release_time = event->time_msec;
+            return;
+        }
+        input->pointer_grab_device = NULL;
+    }
     const uint64_t window = update_pointer_target(input, event->time_msec);
     if (input->callbacks.pointer_button && !wlr_seat_pointer_has_grab(seat) && !input->constraint &&
         (seat->pointer_state.button_count == 0 || !pressed) &&
@@ -496,7 +625,11 @@ static void handle_pointer_button(struct wl_listener *listener, void *data) {
         wlr_seat_pointer_notify_clear_focus(seat);
         return;
     }
-    wlr_seat_pointer_notify_button(seat, event->time_msec, button, event->state);
+    const bool first_press = pressed && seat->pointer_state.button_count == 0;
+    if (wlr_seat_pointer_notify_button(seat, event->time_msec, button, event->state) &&
+        first_press && !wlr_seat_pointer_has_grab(seat)) {
+        input->pointer_grab_device = device;
+    }
     if (!pressed && seat->pointer_state.button_count == 0) {
         update_pointer_target(input, event->time_msec);
     }
@@ -519,6 +652,14 @@ static void handle_pointer_frame(struct wl_listener *listener, void *data) {
     struct tty_device *device = wl_container_of(listener, device, frame);
     struct seaside_tty_input *input = device->input;
     if (input->seat) {
+        if (device->drag_release_pending) {
+            device->drag_release_pending = false;
+            input->pointer_grab_device = NULL;
+            update_pointer_target(input, device->drag_release_time);
+            wlr_seat_pointer_notify_button(input->seat, device->drag_release_time,
+                                           device->drag_release_button,
+                                           WL_POINTER_BUTTON_STATE_RELEASED);
+        }
         if (input->gesture_device == device && input->gesture_released) {
             const uint32_t button = input->gesture_button;
             device->consumed_buttons[button] = false;
@@ -676,6 +817,12 @@ static void handle_group_key(struct wl_listener *listener, void *data) {
             input->consumed[event->keycode] = true;
             return;
         }
+        if (event->keycode == KEY_ESC && input->modifiers == 0 && input->seat &&
+            input->seat->drag) {
+            input->consumed[event->keycode] = true;
+            seaside_tty_input_cancel_drag(input);
+            return;
+        }
         if (launch_shortcut(input, event->keycode)) {
             input->consumed[event->keycode] = true;
             ++input->snapshot.launch_requests;
@@ -820,6 +967,7 @@ static void detach(struct seaside_tty_input *input) {
         return;
     }
     input->attached = false;
+    seaside_tty_input_cancel_drag(input);
     leave_constraint(input, true);
     seaside_tty_input_set_focus(input, NULL);
     wl_list_remove(&input->new_input.link);
@@ -873,10 +1021,18 @@ static void handle_seat_destroy(struct wl_listener *listener, void *data) {
     wl_list_remove(&input->pointer_grab_begin.link);
     wl_list_remove(&input->pointer_grab_end.link);
     wl_list_remove(&input->keyboard_grab_end.link);
+    wl_list_remove(&input->request_selection.link);
+    wl_list_remove(&input->request_primary_selection.link);
+    wl_list_remove(&input->request_drag.link);
     wl_list_remove(&input->focus_destroy.link);
     wl_list_init(&input->focus_destroy.link);
     input->focus = NULL;
+    struct wlr_seat *seat = input->seat;
     input->seat = NULL;
+    cancel_drag(seat);
+    /* A chosen drop can outlive its grab. Retire the source before its
+     * destroy callback could access the freed seat. */
+    wlr_data_source_destroy(seat->drag_source);
 }
 
 bool seaside_tty_input_enable_keyboard(struct seaside_tty_input *input,
@@ -913,7 +1069,8 @@ bool seaside_tty_input_enable_keyboard(struct seaside_tty_input *input,
         constraints = wlr_pointer_constraints_v1_create(display);
     }
     if (!seat || (input->callbacks.pointer_target && (!relative_pointer || !constraints)) ||
-        !wlr_data_device_manager_create(display)) {
+        !wlr_data_device_manager_create(display) ||
+        !wlr_primary_selection_v1_device_manager_create(display)) {
         xkb_state_unref(shortcut_state);
         wlr_seat_destroy(seat);
         if (group) {
@@ -932,6 +1089,11 @@ bool seaside_tty_input_enable_keyboard(struct seaside_tty_input *input,
     input->pointer_grab_begin.notify = handle_pointer_grab_begin;
     input->pointer_grab_end.notify = handle_pointer_grab_end;
     input->keyboard_grab_end.notify = handle_keyboard_grab_end;
+    input->request_selection.notify = handle_selection;
+    input->request_primary_selection.notify = handle_primary_selection;
+    input->request_drag.notify = handle_drag_request;
+    input->drag_destroy.notify = handle_drag_destroy;
+    input->drag_origin_destroy.notify = handle_drag_origin_destroy;
     input->focus_destroy.notify = handle_focus_destroy;
     input->group_key.notify = handle_group_key;
     input->group_modifiers.notify = handle_group_modifiers;
@@ -942,6 +1104,9 @@ bool seaside_tty_input_enable_keyboard(struct seaside_tty_input *input,
     wl_signal_add(&seat->events.pointer_grab_begin, &input->pointer_grab_begin);
     wl_signal_add(&seat->events.pointer_grab_end, &input->pointer_grab_end);
     wl_signal_add(&seat->events.keyboard_grab_end, &input->keyboard_grab_end);
+    wl_signal_add(&seat->events.request_set_selection, &input->request_selection);
+    wl_signal_add(&seat->events.request_set_primary_selection, &input->request_primary_selection);
+    wl_signal_add(&seat->events.request_start_drag, &input->request_drag);
     wl_signal_add(&group->keyboard.events.key, &input->group_key);
     wl_signal_add(&group->keyboard.events.modifiers, &input->group_modifiers);
     wl_signal_add(&group->events.enter, &input->group_enter);

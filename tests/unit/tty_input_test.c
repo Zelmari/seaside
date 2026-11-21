@@ -2,9 +2,11 @@
 #include "tty_input.h"
 
 #include "pointer-constraints-client-protocol.h"
+#include "primary-selection-client-protocol.h"
 #include "relative-pointer-client-protocol.h"
 
 #include <drm_fourcc.h>
+#include <fcntl.h>
 #include <linux/input-event-codes.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,6 +19,7 @@
 #include <wlr/interfaces/wlr_keyboard.h>
 #include <wlr/interfaces/wlr_pointer.h>
 #include <wlr/types/wlr_compositor.h>
+#include <wlr/types/wlr_data_device.h>
 #include <wlr/types/wlr_shm.h>
 #include <xkbcommon/xkbcommon-keysyms.h>
 
@@ -199,8 +202,11 @@ struct keyboard_client {
     unsigned key_events;
     uint32_t key;
     uint32_t key_state;
+    uint32_t key_serial, button_serial, pointer_enter_serial;
     uint32_t depressed;
     bool data_device_manager;
+    uint32_t data_manager_name, primary_manager_name;
+    bool data_control;
     bool escaped;
     bool entered_with_return;
     unsigned pointer_enters;
@@ -253,12 +259,12 @@ static void client_leave(void *data, struct wl_keyboard *keyboard, uint32_t seri
 static void client_key(void *data, struct wl_keyboard *keyboard, uint32_t serial, uint32_t time,
                        uint32_t key, uint32_t state) {
     (void)keyboard;
-    (void)serial;
     (void)time;
     struct keyboard_client *client = data;
     ++client->key_events;
     client->key = key;
     client->key_state = state;
+    client->key_serial = serial;
     if (key == KEY_ESC && state == WL_KEYBOARD_KEY_STATE_PRESSED) {
         client->escaped = true;
     }
@@ -295,10 +301,10 @@ static const struct wl_keyboard_listener keyboard_listener = {
 static void pointer_enter(void *data, struct wl_pointer *pointer, uint32_t serial,
                           struct wl_surface *surface, wl_fixed_t sx, wl_fixed_t sy) {
     (void)pointer;
-    (void)serial;
     (void)surface;
     struct keyboard_client *client = data;
     ++client->pointer_enters;
+    client->pointer_enter_serial = serial;
     client->pointer_x = wl_fixed_to_double(sx);
     client->pointer_y = wl_fixed_to_double(sy);
 }
@@ -324,11 +330,13 @@ static void pointer_motion(void *data, struct wl_pointer *pointer, uint32_t time
 static void pointer_button(void *data, struct wl_pointer *pointer, uint32_t serial, uint32_t time,
                            uint32_t button, uint32_t state) {
     (void)pointer;
-    (void)serial;
     (void)time;
     (void)button;
-    (void)state;
-    ++((struct keyboard_client *)data)->pointer_buttons;
+    struct keyboard_client *client = data;
+    if (state == WL_POINTER_BUTTON_STATE_PRESSED) {
+        client->button_serial = serial;
+    }
+    ++client->pointer_buttons;
 }
 
 static void pointer_axis(void *data, struct wl_pointer *pointer, uint32_t time, uint32_t axis,
@@ -423,6 +431,12 @@ static void registry_global(void *data, struct wl_registry *registry, uint32_t n
         wl_seat_add_listener(client->seat, &seat_listener, client);
     } else if (strcmp(interface, wl_data_device_manager_interface.name) == 0) {
         client->data_device_manager = version >= 3;
+        client->data_manager_name = name;
+    } else if (strcmp(interface, zwp_primary_selection_device_manager_v1_interface.name) == 0) {
+        client->primary_manager_name = name;
+    } else if (strcmp(interface, "ext_data_control_manager_v1") == 0 ||
+               strcmp(interface, "zwlr_data_control_manager_v1") == 0) {
+        client->data_control = true;
     } else if (strcmp(interface, wl_shm_interface.name) == 0) {
         client->shm = wl_registry_bind(registry, name, &wl_shm_interface, 1);
         wl_shm_add_listener(client->shm, &shm_listener, client);
@@ -635,6 +649,7 @@ struct pointer_scene {
     struct wlr_surface *surfaces[2];
     double x, y;
     unsigned move_calls, clicks, consumed_releases, cancelled;
+    unsigned drag_icons;
     bool locked;
 };
 
@@ -695,6 +710,11 @@ static void scene_locked(void *data, bool locked) {
 
 static void scene_cancelled(void *data) {
     ++((struct pointer_scene *)data)->cancelled;
+}
+
+static void scene_drag_icon(void *data, struct wlr_drag_icon *icon) {
+    check(icon && icon->surface, "missing requested drag icon");
+    ++((struct pointer_scene *)data)->drag_icons;
 }
 
 struct pointer_client {
@@ -792,7 +812,9 @@ static struct wlr_surface *connect_pointer_client(struct wl_display *server,
 }
 
 static void disconnect_pointer_client(struct wl_display *server, struct pointer_client *client) {
-    wl_surface_destroy(client->surface);
+    if (client->surface) {
+        wl_surface_destroy(client->surface);
+    }
     wl_buffer_destroy(client->buffer);
     zwp_relative_pointer_v1_destroy(client->relative);
     zwp_relative_pointer_manager_v1_destroy(client->events.relative_pointer_manager);
@@ -837,19 +859,16 @@ static void axis(struct wlr_pointer *pointer) {
     wl_signal_emit_mutable(&pointer->events.frame, pointer);
 }
 
-static void exercise_wayland_pointer(void) {
-    struct wl_display *server = wl_display_create();
+static void create_pointer_seat(struct wl_display *server, struct wlr_backend *backend,
+                                struct wlr_keyboard *keyboard, struct wlr_pointer *pointer,
+                                struct pointer_scene *scene) {
     const uint32_t formats[] = {DRM_FORMAT_XRGB8888, DRM_FORMAT_ARGB8888};
     check(server && wlr_compositor_create(server, 6, NULL) &&
               wlr_shm_create(server, 1, formats, sizeof(formats) / sizeof(formats[0])),
           "pointer test compositor setup failed");
-    struct wlr_backend backend = {0};
-    struct wlr_keyboard keyboard = {0};
-    struct wlr_pointer pointer = {0};
-    wlr_backend_init(&backend, &backend_impl);
-    wlr_keyboard_init(&keyboard, &keyboard_impl, "pointer test keyboard");
-    wlr_pointer_init(&pointer, &pointer_impl, "pointer test pointer");
-    struct pointer_scene scene = {.x = 10, .y = 10};
+    wlr_backend_init(backend, &backend_impl);
+    wlr_keyboard_init(keyboard, &keyboard_impl, "pointer test keyboard");
+    wlr_pointer_init(pointer, &pointer_impl, "pointer test pointer");
     const struct seaside_tty_input_callbacks seat_callbacks = {
         .motion = scene_motion,
         .pointer_target = scene_target,
@@ -857,13 +876,23 @@ static void exercise_wayland_pointer(void) {
         .pointer_locked = scene_locked,
         .pointer_absolute_delta = scene_absolute_delta,
         .pointer_cancelled = scene_cancelled,
+        .drag_icon = scene_drag_icon,
     };
-    scene.input = seaside_tty_input_create(&backend, &seat_callbacks, &scene);
-    check(scene.input && seaside_tty_input_enable_keyboard(scene.input, server) &&
-              seaside_tty_input_get_seat(scene.input),
+    scene->input = seaside_tty_input_create(backend, &seat_callbacks, scene);
+    check(scene->input && seaside_tty_input_enable_keyboard(scene->input, server) &&
+              seaside_tty_input_get_seat(scene->input),
           "pointer test seat setup failed");
-    wl_signal_emit_mutable(&backend.events.new_input, &keyboard.base);
-    wl_signal_emit_mutable(&backend.events.new_input, &pointer.base);
+    wl_signal_emit_mutable(&backend->events.new_input, &keyboard->base);
+    wl_signal_emit_mutable(&backend->events.new_input, &pointer->base);
+}
+
+static void exercise_wayland_pointer(void) {
+    struct wl_display *server = wl_display_create();
+    struct wlr_backend backend = {0};
+    struct wlr_keyboard keyboard = {0};
+    struct wlr_pointer pointer = {0};
+    struct pointer_scene scene = {.x = 10, .y = 10};
+    create_pointer_seat(server, &backend, &keyboard, &pointer, &scene);
 
     struct pointer_client left = {0}, right = {0};
     scene.surfaces[0] = connect_pointer_client(server, &left);
@@ -1007,6 +1036,430 @@ static void exercise_wayland_pointer(void) {
     wl_display_destroy(server);
 }
 
+static const char mime[] = "text/plain;charset=utf-8";
+
+struct data_client {
+    struct pointer_client pointer;
+    struct wl_data_device_manager *manager;
+    struct wl_data_device *device;
+    struct zwp_primary_selection_device_manager_v1 *primary_manager;
+    struct zwp_primary_selection_device_v1 *primary_device;
+    struct wl_data_offer *selection, *drag_offer;
+    struct zwp_primary_selection_offer_v1 *primary;
+    unsigned clipboard_mimes, primary_mimes, enters, motions, drops, leaves;
+    uint32_t enter_serial;
+};
+
+struct test_source {
+    const char *payload;
+    unsigned sends, cancelled, dropped, finished;
+};
+
+static void write_payload(struct test_source *source, const char *type, int32_t fd) {
+    const size_t size = strlen(source->payload);
+    check(strcmp(type, mime) == 0 && write(fd, source->payload, size) == (ssize_t)size,
+          "selection source could not write the negotiated MIME payload");
+    close(fd);
+    ++source->sends;
+}
+
+static void source_target(void *data, struct wl_data_source *source, const char *type) {
+    (void)data;
+    (void)source;
+    (void)type;
+}
+
+static void source_send(void *data, struct wl_data_source *source, const char *type, int32_t fd) {
+    (void)source;
+    write_payload(data, type, fd);
+}
+
+static void source_cancelled(void *data, struct wl_data_source *source) {
+    (void)source;
+    ++((struct test_source *)data)->cancelled;
+}
+
+static void source_dropped(void *data, struct wl_data_source *source) {
+    (void)source;
+    ++((struct test_source *)data)->dropped;
+}
+
+static void source_finished(void *data, struct wl_data_source *source) {
+    (void)source;
+    ++((struct test_source *)data)->finished;
+}
+
+static void source_action(void *data, struct wl_data_source *source, uint32_t action) {
+    (void)data;
+    (void)source;
+    check(action == WL_DATA_DEVICE_MANAGER_DND_ACTION_NONE ||
+              action == WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY,
+          "unexpected source drag action");
+}
+
+static struct wl_data_source *create_data_source(struct data_client *client,
+                                                 struct test_source *observation) {
+    static const struct wl_data_source_listener listener = {
+        .target = source_target,
+        .send = source_send,
+        .cancelled = source_cancelled,
+        .dnd_drop_performed = source_dropped,
+        .dnd_finished = source_finished,
+        .action = source_action,
+    };
+    struct wl_data_source *source = wl_data_device_manager_create_data_source(client->manager);
+    wl_data_source_add_listener(source, &listener, observation);
+    wl_data_source_offer(source, mime);
+    return source;
+}
+
+static void primary_source_send(void *data, struct zwp_primary_selection_source_v1 *source,
+                                const char *type, int32_t fd) {
+    (void)source;
+    write_payload(data, type, fd);
+}
+
+static void primary_source_cancelled(void *data, struct zwp_primary_selection_source_v1 *source) {
+    (void)source;
+    ++((struct test_source *)data)->cancelled;
+}
+
+static void data_offer_type(void *data, struct wl_data_offer *offer, const char *type) {
+    (void)offer;
+    check(strcmp(type, mime) == 0, "unexpected data offer MIME type");
+    ++((struct data_client *)data)->clipboard_mimes;
+}
+
+static void data_offer_actions(void *data, struct wl_data_offer *offer, uint32_t actions) {
+    (void)data;
+    (void)offer;
+    check(actions == WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY, "unexpected offered drag action");
+}
+
+static void data_offer_action(void *data, struct wl_data_offer *offer, uint32_t action) {
+    (void)data;
+    (void)offer;
+    check(action == WL_DATA_DEVICE_MANAGER_DND_ACTION_NONE ||
+              action == WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY,
+          "unexpected negotiated drag action");
+}
+
+static void data_offer(void *data, struct wl_data_device *device, struct wl_data_offer *offer) {
+    (void)device;
+    static const struct wl_data_offer_listener listener = {.offer = data_offer_type,
+                                                           .source_actions = data_offer_actions,
+                                                           .action = data_offer_action};
+    wl_data_offer_add_listener(offer, &listener, data);
+}
+
+static void data_enter(void *data, struct wl_data_device *device, uint32_t serial,
+                       struct wl_surface *surface, wl_fixed_t x, wl_fixed_t y,
+                       struct wl_data_offer *offer) {
+    (void)device;
+    (void)x;
+    (void)y;
+    struct data_client *client = data;
+    check(surface == client->pointer.surface && offer && !client->drag_offer,
+          "drag entered an unexpected target");
+    client->drag_offer = offer;
+    client->enter_serial = serial;
+    ++client->enters;
+}
+
+static void data_leave(void *data, struct wl_data_device *device) {
+    (void)device;
+    struct data_client *client = data;
+    if (client->drag_offer && client->drops == 0) {
+        wl_data_offer_destroy(client->drag_offer);
+        client->drag_offer = NULL;
+    }
+    ++client->leaves;
+}
+
+static void data_motion(void *data, struct wl_data_device *device, uint32_t time, wl_fixed_t x,
+                        wl_fixed_t y) {
+    (void)device;
+    (void)time;
+    (void)x;
+    (void)y;
+    ++((struct data_client *)data)->motions;
+}
+
+static void data_drop(void *data, struct wl_data_device *device) {
+    (void)device;
+    ++((struct data_client *)data)->drops;
+}
+
+static void data_selection(void *data, struct wl_data_device *device, struct wl_data_offer *offer) {
+    (void)device;
+    struct data_client *client = data;
+    if (client->selection) {
+        wl_data_offer_destroy(client->selection);
+    }
+    client->selection = offer;
+}
+
+static void primary_offer_type(void *data, struct zwp_primary_selection_offer_v1 *offer,
+                               const char *type) {
+    (void)offer;
+    check(strcmp(type, mime) == 0, "unexpected primary offer MIME type");
+    ++((struct data_client *)data)->primary_mimes;
+}
+
+static void primary_offer(void *data, struct zwp_primary_selection_device_v1 *device,
+                          struct zwp_primary_selection_offer_v1 *offer) {
+    (void)device;
+    static const struct zwp_primary_selection_offer_v1_listener listener = {.offer =
+                                                                                primary_offer_type};
+    zwp_primary_selection_offer_v1_add_listener(offer, &listener, data);
+}
+
+static void primary_selection(void *data, struct zwp_primary_selection_device_v1 *device,
+                              struct zwp_primary_selection_offer_v1 *offer) {
+    (void)device;
+    struct data_client *client = data;
+    if (client->primary) {
+        zwp_primary_selection_offer_v1_destroy(client->primary);
+    }
+    client->primary = offer;
+}
+
+static struct wlr_surface *connect_data_client(struct wl_display *server,
+                                               struct data_client *client) {
+    static const struct wl_data_device_listener device_listener = {
+        .data_offer = data_offer,
+        .enter = data_enter,
+        .leave = data_leave,
+        .motion = data_motion,
+        .drop = data_drop,
+        .selection = data_selection,
+    };
+    static const struct zwp_primary_selection_device_v1_listener primary_listener = {
+        .data_offer = primary_offer, .selection = primary_selection};
+    struct wlr_surface *surface = connect_pointer_client(server, &client->pointer);
+    struct keyboard_client *events = &client->pointer.events;
+    check(events->data_device_manager && events->primary_manager_name && !events->data_control,
+          "unexpected clipboard protocol globals");
+    client->manager = wl_registry_bind(client->pointer.registry, events->data_manager_name,
+                                       &wl_data_device_manager_interface, 3);
+    client->device = wl_data_device_manager_get_data_device(client->manager, events->seat);
+    wl_data_device_add_listener(client->device, &device_listener, client);
+    client->primary_manager =
+        wl_registry_bind(client->pointer.registry, events->primary_manager_name,
+                         &zwp_primary_selection_device_manager_v1_interface, 1);
+    client->primary_device =
+        zwp_primary_selection_device_manager_v1_get_device(client->primary_manager, events->seat);
+    zwp_primary_selection_device_v1_add_listener(client->primary_device, &primary_listener, client);
+    round_trip(server, client->pointer.display);
+    return surface;
+}
+
+static void disconnect_data_client(struct wl_display *server, struct data_client *client) {
+    if (client->selection) {
+        wl_data_offer_destroy(client->selection);
+    }
+    if (client->drag_offer) {
+        wl_data_offer_destroy(client->drag_offer);
+    }
+    if (client->primary) {
+        zwp_primary_selection_offer_v1_destroy(client->primary);
+    }
+    wl_data_device_release(client->device);
+    wl_data_device_manager_destroy(client->manager);
+    zwp_primary_selection_device_v1_destroy(client->primary_device);
+    zwp_primary_selection_device_manager_v1_destroy(client->primary_manager);
+    disconnect_pointer_client(server, &client->pointer);
+}
+
+static uint32_t data_key_serial(struct wl_display *server, struct data_client *client,
+                                struct wlr_keyboard *keyboard) {
+    key(keyboard, KEY_C, WL_KEYBOARD_KEY_STATE_PRESSED);
+    key(keyboard, KEY_C, WL_KEYBOARD_KEY_STATE_RELEASED);
+    round_trip(server, client->pointer.display);
+    check(client->pointer.events.key_serial != 0, "missing keyboard event serial");
+    return client->pointer.events.key_serial;
+}
+
+static void expect_payload(struct wl_display *server, struct data_client *writer,
+                           struct data_client *reader, struct wl_data_offer *offer,
+                           struct zwp_primary_selection_offer_v1 *primary, const char *payload) {
+    int pipe_ends[2];
+    check(pipe2(pipe_ends, O_CLOEXEC | O_NONBLOCK) == 0, "could not allocate selection pipe");
+    check((offer != NULL) != (primary != NULL), "missing selection or drag offer");
+    if (offer) {
+        wl_data_offer_receive(offer, mime, pipe_ends[1]);
+    } else {
+        zwp_primary_selection_offer_v1_receive(primary, mime, pipe_ends[1]);
+    }
+    close(pipe_ends[1]);
+    round_trip(server, reader->pointer.display);
+    round_trip(server, writer->pointer.display);
+    char bytes[64];
+    ssize_t length = read(pipe_ends[0], bytes, sizeof(bytes));
+    check(length == (ssize_t)strlen(payload) && memcmp(bytes, payload, (size_t)length) == 0,
+          "selection bytes differed from the source payload");
+    close(pipe_ends[0]);
+}
+
+static struct wl_data_source *start_data_drag(struct wl_display *server, struct data_client *client,
+                                              struct test_source *drag, struct wlr_pointer *pointer,
+                                              struct wl_surface *icon) {
+    struct wl_data_source *source = create_data_source(client, drag);
+    wl_data_source_set_actions(source, WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY);
+    button(pointer, BTN_LEFT, true);
+    round_trip(server, client->pointer.display);
+    wl_data_device_start_drag(client->device, source, client->pointer.surface, icon,
+                              client->pointer.events.button_serial);
+    round_trip(server, client->pointer.display);
+    return source;
+}
+
+static void exercise_data_device(void) {
+    struct wl_display *server = wl_display_create();
+    struct wlr_backend backend = {0};
+    struct wlr_keyboard keyboard = {0};
+    struct wlr_pointer pointer = {0};
+    struct pointer_scene scene = {.x = 10, .y = 10};
+    create_pointer_seat(server, &backend, &keyboard, &pointer, &scene);
+    struct wlr_seat *seat = seaside_tty_input_get_seat(scene.input);
+    struct data_client left = {0}, right = {0};
+    scene.surfaces[0] = connect_data_client(server, &left);
+    scene.surfaces[1] = connect_data_client(server, &right);
+    struct wl_display *sender = left.pointer.display, *receiver = right.pointer.display;
+
+    seaside_tty_input_set_focus(scene.input, scene.surfaces[0]);
+    const uint32_t left_serial = data_key_serial(server, &left, &keyboard);
+    struct test_source clipboard = {.payload = "clipboard"};
+    struct test_source primary = {.payload = "primary"};
+    struct wl_data_source *clipboard_source = create_data_source(&left, &clipboard);
+    struct zwp_primary_selection_source_v1 *primary_source =
+        zwp_primary_selection_device_manager_v1_create_source(left.primary_manager);
+    static const struct zwp_primary_selection_source_v1_listener primary_source_listener = {
+        .send = primary_source_send, .cancelled = primary_source_cancelled};
+    zwp_primary_selection_source_v1_add_listener(primary_source, &primary_source_listener,
+                                                 &primary);
+    zwp_primary_selection_source_v1_offer(primary_source, mime);
+    wl_data_device_set_selection(left.device, clipboard_source, left_serial);
+    zwp_primary_selection_device_v1_set_selection(left.primary_device, primary_source, left_serial);
+    round_trip(server, sender);
+    round_trip(server, receiver);
+    check(left.selection && left.primary && !right.selection && !right.primary,
+          "unfocused client received a clipboard or primary offer");
+
+    seaside_tty_input_set_focus(scene.input, scene.surfaces[1]);
+    data_key_serial(server, &right, &keyboard);
+    check(right.clipboard_mimes == 1 && right.primary_mimes == 1,
+          "focused client did not receive the selection MIME offers");
+    wl_data_device_set_selection(right.device, NULL, left_serial);
+    zwp_primary_selection_device_v1_set_selection(right.primary_device, NULL, left_serial);
+    round_trip(server, receiver);
+    check(right.selection && right.primary, "foreign serial cleared a focused selection");
+
+    // Hovering creates a valid pointer serial without transferring keyboard focus.
+    seaside_tty_input_refresh_pointer(scene.input);
+    round_trip(server, sender);
+    const uint32_t hover_serial = left.pointer.events.pointer_enter_serial;
+    check(hover_serial != 0 && hover_serial != left_serial, "background client did not see hover");
+    wl_data_device_set_selection(left.device, NULL, hover_serial);
+    zwp_primary_selection_device_v1_set_selection(left.primary_device, NULL, hover_serial);
+    round_trip(server, sender);
+    expect_payload(server, &left, &right, right.selection, NULL, clipboard.payload);
+    expect_payload(server, &left, &right, NULL, right.primary, primary.payload);
+    check(clipboard.sends == 1 && primary.sends == 1, "selection sources were not each read once");
+    wl_data_source_destroy(clipboard_source);
+    zwp_primary_selection_source_v1_destroy(primary_source);
+    round_trip(server, sender);
+    round_trip(server, receiver);
+    check(!right.selection && !right.primary, "source teardown left a cached selection");
+
+    struct test_source drag = {.payload = "dropped"};
+    struct wl_data_source *drag_source = create_data_source(&left, &drag);
+    const uint32_t copy = WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY;
+    wl_data_source_set_actions(drag_source, copy);
+    wl_data_device_start_drag(left.device, drag_source, left.pointer.surface, NULL, left_serial);
+    round_trip(server, sender);
+    check(drag.cancelled == 1 && !seat->drag, "non-button serial started a drag");
+    wl_data_source_destroy(drag_source);
+
+    struct wl_surface *icon = wl_compositor_create_surface(left.pointer.events.compositor);
+    drag_source = start_data_drag(server, &left, &drag, &pointer, icon);
+    check(seat->drag && scene.drag_icons == 1, "pointer serial failed to start drag with icon");
+
+    relative(&pointer, 110, 110);
+    round_trip(server, receiver);
+    check(right.drag_offer && right.enters == 1 && right.motions > 0,
+          "drag did not enter or move over its target");
+    wl_data_offer_accept(right.drag_offer, right.enter_serial, mime);
+    wl_data_offer_set_actions(right.drag_offer, copy, copy);
+    round_trip(server, receiver);
+    struct wlr_pointer other = {0};
+    wlr_pointer_init(&other, &pointer_impl, "second drag test pointer");
+    wl_signal_emit_mutable(&backend.events.new_input, &other.base);
+    button(&other, BTN_LEFT, true);
+    button(&pointer, BTN_LEFT, false);
+    round_trip(server, receiver);
+    check(!seat->drag && right.drops == 1 && right.leaves == 1 && right.drag_offer,
+          "drop did not finish the grab and retain a transfer offer");
+    button(&other, BTN_LEFT, false);
+    expect_payload(server, &left, &right, right.drag_offer, NULL, drag.payload);
+    wl_data_offer_finish(right.drag_offer);
+    wl_data_offer_destroy(right.drag_offer);
+    right.drag_offer = NULL;
+    right.drops = 0;
+    round_trip(server, receiver);
+    round_trip(server, sender);
+    check(drag.dropped == 1 && drag.finished == 1, "source did not observe drop completion");
+    const unsigned previous_cancels = drag.cancelled;
+    wl_surface_destroy(icon);
+    wl_data_source_destroy(drag_source);
+
+    relative(&pointer, -110, -110);
+    drag_source = start_data_drag(server, &left, &drag, &pointer, NULL);
+    relative(&pointer, 110, 110);
+    round_trip(server, receiver);
+    check(right.drag_offer && seat->drag, "second drag could not reach target");
+    wl_data_offer_accept(right.drag_offer, right.enter_serial, mime);
+    wl_data_offer_set_actions(right.drag_offer, copy, copy);
+    round_trip(server, receiver);
+    wlr_pointer_finish(&pointer);
+    round_trip(server, receiver);
+    round_trip(server, sender);
+    check(!seat->drag && !right.drag_offer && right.drops == 0 &&
+              drag.cancelled == previous_cancels + 1,
+          "unplug emitted a drop or left the client drag active");
+    wl_data_source_destroy(drag_source);
+
+    relative(&other, -110, -110);
+    drag_source = start_data_drag(server, &left, &drag, &other, NULL);
+    relative(&other, 110, 110);
+    round_trip(server, receiver);
+    check(right.drag_offer && seat->drag && seat->drag->focus == scene.surfaces[1],
+          "third drag did not focus the target about to be destroyed");
+    wl_surface_destroy(right.pointer.surface);
+    right.pointer.surface = NULL;
+    scene.surfaces[1] = NULL;
+    round_trip(server, receiver);
+    check(!right.drag_offer && seat->drag && !seat->drag->focus,
+          "destroyed target kept its drag offer or focus");
+    key(&keyboard, KEY_ESC, WL_KEYBOARD_KEY_STATE_PRESSED);
+    key(&keyboard, KEY_ESC, WL_KEYBOARD_KEY_STATE_RELEASED);
+    button(&other, BTN_LEFT, false);
+    round_trip(server, sender);
+    check(!seat->drag && drag.cancelled == previous_cancels + 2 && !left.pointer.events.escaped &&
+              seat->keyboard_state.focused_surface == scene.surfaces[0],
+          "Escape did not cancel the drag and restore input focus cleanly");
+    wl_data_source_destroy(drag_source);
+    wlr_pointer_finish(&other);
+
+    disconnect_data_client(server, &left);
+    disconnect_data_client(server, &right);
+    wl_display_destroy_clients(server);
+    seaside_tty_input_destroy(scene.input);
+    wlr_backend_finish(&backend);
+    wlr_keyboard_finish(&keyboard);
+    wl_display_destroy(server);
+}
+
 int main(int argc, char **argv) {
     if (argc == 1 || (argc == 2 && strcmp(argv[1], "keyboard") == 0)) {
         exercise(true);
@@ -1016,8 +1469,11 @@ int main(int argc, char **argv) {
     if (argc == 1 || (argc == 2 && strcmp(argv[1], "pointer") == 0)) {
         exercise_wayland_pointer();
     }
-    if (argc > 2 ||
-        (argc == 2 && strcmp(argv[1], "keyboard") != 0 && strcmp(argv[1], "pointer") != 0)) {
+    if (argc == 1 || (argc == 2 && strcmp(argv[1], "data-device") == 0)) {
+        exercise_data_device();
+    }
+    if (argc > 2 || (argc == 2 && strcmp(argv[1], "keyboard") != 0 &&
+                     strcmp(argv[1], "pointer") != 0 && strcmp(argv[1], "data-device") != 0)) {
         return EXIT_FAILURE;
     }
     return EXIT_SUCCESS;

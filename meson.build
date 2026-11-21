@@ -56,14 +56,14 @@ activation_private_code = custom_target(
   'xdg-activation-private-code', input: activation_xml, output: 'xdg-activation-v1-protocol.c',
   command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'],
 )
-pointer_protocols = []
-foreach name : ['pointer-constraints', 'relative-pointer']
+seat_protocols = []
+foreach name : ['pointer-constraints', 'relative-pointer', 'primary-selection']
   xml = wayland_protocols.get_variable(pkgconfig: 'pkgdatadir') / 'unstable' / name / (name + '-unstable-v1.xml')
-  pointer_protocols += custom_target(
+  seat_protocols += custom_target(
     name + '-client-header', input: xml, output: name + '-client-protocol.h',
     command: [wayland_scanner, 'client-header', '@INPUT@', '@OUTPUT@'],
   )
-  pointer_protocols += custom_target(
+  seat_protocols += custom_target(
     name + '-private-code', input: xml, output: name + '-protocol.c',
     command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'],
   )
@@ -188,7 +188,7 @@ test('part3-tty-guard', python, args: [files('tests/integration/test_tty_guard.p
 )
 
 tty_input_test = executable(
-  'seaside-tty-input-test', ['tests/unit/tty_input_test.c', pointer_protocols],
+  'seaside-tty-input-test', ['tests/unit/tty_input_test.c', seat_protocols],
   include_directories: include_directories('src'),
   dependencies: [wlroots, wayland_server, wayland_client, pixman, xkbcommon],
   link_with: tty_foundation, install: false,
@@ -198,6 +198,9 @@ test('part3-tty-input', tty_input_test, args: ['keyboard'], suite: ['unit', 'par
 )
 test('part4-pointer-seat', tty_input_test, args: ['pointer'], suite: ['integration', 'part4'], timeout: 10,
   env: {'SEASIDE_TEST_PART': '4', 'SEASIDE_REQUIREMENTS': '4.4,6.2,12.2b'},
+)
+test('part7-data-device', tty_input_test, args: ['data-device'], suite: ['integration', 'part7'], timeout: 15,
+  env: {'SEASIDE_TEST_PART': '7', 'SEASIDE_REQUIREMENTS': '7.3,11,12.2b'},
 )
 
 tty_terminal_test = executable(

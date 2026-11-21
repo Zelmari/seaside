@@ -277,6 +277,14 @@ bool Scene::window_at(double x, double y, seaside_scene_target &target) noexcept
     return seaside_scene_window_at(bridge_, x, y, &target);
 }
 
+void Scene::set_drag_icon(wlr_drag_icon *icon) noexcept {
+    seaside_scene_set_drag_icon(bridge_, icon);
+}
+
+void Scene::move_drag_icon(int x, int y) noexcept {
+    seaside_scene_move_drag_icon(bridge_, x, y);
+}
+
 bool Scene::watch_client(pid_t pid, seaside_scene_focus_fn focus, void *data) noexcept {
     return seaside_scene_watch_client(bridge_, pid, focus, data);
 }

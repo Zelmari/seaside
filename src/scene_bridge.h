@@ -8,6 +8,7 @@
 
 struct wl_display;
 struct wlr_buffer;
+struct wlr_drag_icon;
 struct wlr_output;
 struct wlr_surface;
 struct seaside_scene_bridge;
@@ -87,6 +88,10 @@ extern "C" {
 
 struct seaside_scene_bridge *seaside_scene_create(struct wl_display *display);
 void seaside_scene_destroy(struct seaside_scene_bridge *scene);
+/* The borrowed icon removes its own scene node on destruction. Drag icons
+ * are rendered above windows and are excluded from pointer hit-testing. */
+void seaside_scene_set_drag_icon(struct seaside_scene_bridge *scene, struct wlr_drag_icon *icon);
+void seaside_scene_move_drag_icon(struct seaside_scene_bridge *scene, int x, int y);
 /* Output mode, renderer initialization and cursor policy belong to the caller.
  * This owns only the scene viewport and its frame/destroy listeners. */
 bool seaside_scene_add_output(struct seaside_scene_bridge *scene, struct wlr_output *output);

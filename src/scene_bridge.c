@@ -17,7 +17,7 @@
 struct seaside_scene_bridge {
     struct wl_display *display;
     struct wlr_scene *scene;
-    struct wlr_scene_tree *backgrounds, *windows, *decorations;
+    struct wlr_scene_tree *backgrounds, *windows, *drag_icons, *decorations;
     struct wlr_buffer *wallpaper;
     struct wlr_xdg_shell *shell;
     struct wlr_xdg_activation_v1 *activation;
@@ -763,8 +763,9 @@ struct seaside_scene_bridge *seaside_scene_create(struct wl_display *display) {
     }
     scene->backgrounds = wlr_scene_tree_create(&scene->scene->tree);
     scene->windows = wlr_scene_tree_create(&scene->scene->tree);
+    scene->drag_icons = wlr_scene_tree_create(&scene->scene->tree);
     scene->decorations = wlr_scene_tree_create(&scene->scene->tree);
-    if (!scene->backgrounds || !scene->windows || !scene->decorations) {
+    if (!scene->backgrounds || !scene->windows || !scene->drag_icons || !scene->decorations) {
         wlr_scene_node_destroy(&scene->scene->tree.node);
         free(scene);
         return NULL;
@@ -793,6 +794,18 @@ struct seaside_scene_bridge *seaside_scene_create(struct wl_display *display) {
     wl_signal_add(&scene->activation->events.request_activate, &scene->request_activation);
     scene->attached = true;
     return scene;
+}
+
+void seaside_scene_set_drag_icon(struct seaside_scene_bridge *scene, struct wlr_drag_icon *icon) {
+    if (scene && scene->attached && icon) {
+        wlr_scene_drag_icon_create(scene->drag_icons, icon);
+    }
+}
+
+void seaside_scene_move_drag_icon(struct seaside_scene_bridge *scene, int x, int y) {
+    if (scene && scene->attached && !wl_list_empty(&scene->drag_icons->children)) {
+        wlr_scene_node_set_position(&scene->drag_icons->node, x, y);
+    }
 }
 
 void seaside_scene_destroy(struct seaside_scene_bridge *scene) {

@@ -358,8 +358,11 @@ class Session {
         auto &session = *static_cast<Session *>(data);
         double x, y;
         seaside_scene_target hit{.surface = target->surface, .id = 0, .sx = 0, .sy = 0};
-        if (session.stopping_ || !seaside_tty_drm_cursor_position(session.drm_, &x, &y) ||
-            !session.scene_.window_at(x, y, hit)) {
+        if (session.stopping_ || !seaside_tty_drm_cursor_position(session.drm_, &x, &y)) {
+            return false;
+        }
+        session.scene_.move_drag_icon(static_cast<int>(x), static_cast<int>(y));
+        if (!session.scene_.window_at(x, y, hit)) {
             return false;
         }
         *target = {hit.surface, hit.sx, hit.sy, hit.id};
@@ -391,6 +394,10 @@ class Session {
         if (!session.stopping_) {
             session.desktop_.cancel_drag();
         }
+    }
+
+    static void drag_icon(void *data, wlr_drag_icon *icon) noexcept {
+        static_cast<Session *>(data)->scene_.set_drag_icon(icon);
     }
 
     static void modifiers_changed(void *data, std::uint8_t modifiers) noexcept {
@@ -864,6 +871,7 @@ class Session {
         auto display = seaside_tty_drm_observation(session.drm_);
         if (!display.active) {
             session.desktop_.cancel_drag();
+            seaside_tty_input_cancel_drag(session.input_);
         }
         const auto input = seaside_tty_input_get_snapshot(session.input_);
         if (display.failed || input.failed || session.scene_.snapshot().failed ||
@@ -988,6 +996,7 @@ std::expected<Outcome, const char *> run_session(seaside::LoadedConfig config,
         .pointer_absolute_delta = Session::pointer_absolute_delta,
         .pointer_locked = Session::pointer_locked,
         .pointer_cancelled = Session::pointer_cancelled,
+        .drag_icon = Session::drag_icon,
     };
     std::unique_ptr<seaside_tty_input, decltype(&seaside_tty_input_destroy)> input(
         seaside_tty_input_create(backend, &callbacks, &session), seaside_tty_input_destroy);
