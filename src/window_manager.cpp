@@ -155,12 +155,14 @@ void WindowManager::reveal(WindowId id, std::optional<Direction> direction) {
         return;
     }
     // A floating dialog also needs its tiled parent brought into view.
-    while (windows_.at(id).parent) {
-        id = *windows_.at(id).parent;
-    }
-    const auto &window = windows_.at(id);
-    if (!window.maximized && !window.fullscreen) {
-        layout_for(id).reveal(id, direction);
+    const Window *window = &windows_.at(id);
+    while (!window->maximized && !window->fullscreen) {
+        if (!window->parent) {
+            layout_for(id).reveal(id, direction);
+            return;
+        }
+        id = *window->parent;
+        window = &windows_.at(id);
     }
 }
 
@@ -1109,7 +1111,11 @@ bool WindowManager::move_to_workspace(WindowId id, WorkspaceId destination) {
         !relocate_window(id, destination)) {
         return false;
     }
-    set_focus(id);
+    if (is_visible(id)) {
+        set_focus(id);
+    } else {
+        restore_focus();
+    }
     return true;
 }
 
@@ -1121,9 +1127,10 @@ bool WindowManager::set_maximized(WindowId id, bool enabled) {
     cancel_move(id);
     finish_focus_cycle();
     found->second.maximized = enabled;
-    if (!enabled && focused_window_ == id) {
-        if (is_visible(id)) {
-            reveal(id);
+    if (!enabled && focused_window_ &&
+        (*focused_window_ == id || is_descendant(*focused_window_, id))) {
+        if (is_visible(*focused_window_)) {
+            reveal(*focused_window_);
         } else {
             restore_focus();
         }
@@ -1152,8 +1159,9 @@ bool WindowManager::set_fullscreen(WindowId id, bool enabled) {
         }
     } else if (focused_window_ && !is_visible(*focused_window_)) {
         restore_focus();
-    } else if (!enabled && focused_window_ == id) {
-        reveal(id);
+    } else if (!enabled && focused_window_ &&
+               (*focused_window_ == id || is_descendant(*focused_window_, id))) {
+        reveal(*focused_window_);
     }
     return true;
 }

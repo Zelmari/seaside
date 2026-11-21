@@ -259,5 +259,26 @@ TEST(Part5WindowManager, LeavingMaximizeRestoresFocusWhenTileNoLongerFits) {
     EXPECT_EQ(windows.focused_window(), first);
 }
 
+TEST(Part5WindowManager, RestoringAParentRevealsItsFocusedDialog) {
+    WindowManager windows(layout_config(Layout::scrolling));
+    ASSERT_TRUE(windows.add_output("main", output, output));
+    const auto first = open(windows);
+    open(windows);
+    open(windows);
+    open(windows);
+    ASSERT_LT(windows.view(first).geometry.x, 0);
+    ASSERT_TRUE(windows.set_maximized(first, true));
+    ASSERT_TRUE(windows.click(first));
+    const auto dialog = windows.create_window(first);
+    ASSERT_TRUE(dialog);
+    ASSERT_TRUE(windows.initialize_window(*dialog));
+    ASSERT_TRUE(windows.map_window(*dialog, client));
+    ASSERT_EQ(windows.focused_window(), dialog);
+    ASSERT_TRUE(windows.set_maximized(first, false));
+    EXPECT_EQ(windows.focused_window(), dialog);
+    EXPECT_EQ(windows.view(first).geometry.x, 0);
+    EXPECT_GE(windows.view(*dialog).geometry.x, 0);
+}
+
 } // namespace
 } // namespace seaside
