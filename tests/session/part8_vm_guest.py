@@ -223,7 +223,9 @@ def fixture(session, log, executable, *args, interactive=False):
 
 def run_geometry(session, state, original):
     physical = original["mode"]
+    cursor_log = f"output {original['connector']} presented with cursor plane "
     for rotation, scale in ((90, 1.25), (180, 1.5), (270, 1.25), (0, 1.0)):
+        cursor_checks = session.log.read_text(errors="replace").count(cursor_log)
         session.edit(f"[monitors]\nrotation = {rotation}\nscale = {scale}\n")
 
         def transformed():
@@ -239,6 +241,8 @@ def run_geometry(session, state, original):
         expected = (int(width / scale), int(height / scale))
         size = session.grab(output, f"rotated-{rotation}")
         require(size == expected, f"The rotated and scaled capture was {size}, expected {expected}")
+        session.wait(lambda: session.log.read_text(errors="replace").count(cursor_log) > cursor_checks,
+                     f"KMS cursor-plane revalidation after rotation {rotation}")
         state.setdefault("geometry", []).append({"rotation": rotation, "scale": scale, "logical_capture": size})
 
     snapshot = session.state_dir / "seaside/last-good-config.toml"
@@ -330,13 +334,14 @@ def run_adaptive_sync(session, state, output):
     state["adaptive_sync"] = {"status": "pass", "policies": outcomes}
 
 
-def run_portal(session, pattern, output, state):
+def run_portal(session, pattern, source_type, size, state):
+    outcomes = state.setdefault("fullscreen_portal", {})
     if not session.chooser:
-        state["fullscreen_portal"] = {"status": "blocked", "reason": "Wofi is unavailable in the guest trial"}
+        outcomes[source_type] = {"status": "blocked", "reason": "Wofi is unavailable in the guest trial"}
         return
-    log = session.results / "part8-portal.log"
+    log = session.results / f"part8-portal-{source_type}.log"
     for attempt in range(1, 4):
-        with fixture(session, log, "seaside-portal-stream", "monitor", "frame") as reader:
+        with fixture(session, log, "seaside-portal-stream", source_type, "frame") as reader:
             def chooser_focused():
                 focus = session.ctl("focus")["window_id"]
                 return any(row["id"] == focus and "wofi" in
@@ -344,7 +349,7 @@ def run_portal(session, pattern, output, state):
                            for row in session.ctl("windows")["windows"])
 
             wait_for(chooser_focused, 10, "the focused portal chooser", reader)
-            event("part8-input", "choose the real monitor for the portal receiver", key="monitor")
+            event("part8-input", f"choose the real {source_type} for the portal receiver", key=source_type)
             next_paint = 0.0
 
             def repaint_running():
@@ -359,20 +364,20 @@ def run_portal(session, pattern, output, state):
                 return None
 
             try:
-                wait_for(repaint_running, 8, "an active fullscreen monitor stream")
+                wait_for(repaint_running, 8, f"an active fullscreen {source_type} stream")
             except RuntimeError:
                 if attempt == 3 or "PipeWire stream state streaming" not in log.read_text(errors="replace"):
                     raise
                 event("part8", f"retrying linked portal stream without frames, attempt {attempt}")
-                state["portal_linked_retries"] = attempt
+                state.setdefault("portal_linked_retries", {})[source_type] = attempt
                 continue
             code = reader.wait(timeout=8)
             contents = log.read_text(errors="replace")
-            require(code == 0, f"The monitor stream did not complete: {contents}")
+            require(code == 0, f"The {source_type} stream did not complete: {contents}")
             frame = next((line.split()[1:] for line in contents.splitlines() if line.startswith("frame ")), [])
-            require(tuple(map(int, frame[:2])) == (output["mode"]["width"], output["mode"]["height"]) and
+            require(tuple(map(int, frame[:2])) == size and
                     set(frame[2:]) == {"64482c"}, f"Unexpected fullscreen portal frame {frame}")
-            state["fullscreen_portal"] = {"status": "pass", "frame": frame}
+            outcomes[source_type] = {"status": "pass", "frame": frame}
             return
 
 
@@ -404,7 +409,8 @@ def run_fullscreen(session, state, output):
                 f"Missing actual composition evidence: {diagnostic}")
         tearing = session.focused_output()["tearing"]
         require(tearing["applied"] is False, "The default synchronized fullscreen client was allowed to tear")
-        run_portal(session, pattern, output, state)
+        run_portal(session, pattern, "monitor", (width, height), state)
+        run_portal(session, pattern, "window", (264, 176), state)
         require(session.window(TITLE)["id"] == target["id"] and session.ctl("focus")["window_id"] == target["id"],
                 "Capture changed the fullscreen client's identity or focus")
         require(session.ctl("window", "toggle-fullscreen")["changed"], "Fullscreen did not exit")

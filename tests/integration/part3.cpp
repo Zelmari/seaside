@@ -495,6 +495,22 @@ bool run_round(bool abrupt, int stop_signal, bool hold = false,
            std::chrono::steady_clock::now() < first_frame_deadline) {
         wl_event_loop_dispatch(loop, 10);
     }
+    if (test_display_protocols) {
+        const auto before = scene->snapshot();
+        const auto pixels = part3_output_get_snapshot(output.get());
+        part8_reject_next_frame(part3_output_handle(output.get()));
+        const auto recovery_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        while (part3_output_get_snapshot(output.get()).black_frames == pixels.black_frames &&
+               std::chrono::steady_clock::now() < recovery_deadline) {
+            wl_event_loop_dispatch(loop, 10);
+        }
+        auto after = scene->snapshot();
+        if (after.failed_frames != before.failed_frames + 1 || after.failed ||
+            part3_output_get_snapshot(output.get()).black_frames <= pixels.black_frames) {
+            std::fputs("part8 headless output did not recover after a rejected frame\n", stderr);
+            return false;
+        }
+    }
     int pipe[2];
     if (pipe2(pipe, O_CLOEXEC | O_NONBLOCK) < 0) {
         return false;

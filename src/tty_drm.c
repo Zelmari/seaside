@@ -381,6 +381,10 @@ static void on_output_present(struct wl_listener *listener, void *data) {
     struct tty_output *view = wl_container_of(listener, view, present);
     struct seaside_tty_drm *drm = view->owner;
     const struct wlr_output_event_present *event = data;
+    if (!view->commit_pending || event->commit_seq != view->commit_seq) {
+        return;
+    }
+    view->commit_pending = false;
     if (event->presented) {
         ++view->presented_frames;
         if (event->when.tv_sec >= 0 && event->when.tv_nsec >= 0) {
@@ -390,10 +394,6 @@ static void on_output_present(struct wl_listener *listener, void *data) {
     } else {
         ++view->discarded_frames;
     }
-    if (!view->commit_pending || event->commit_seq != view->commit_seq) {
-        return;
-    }
-    view->commit_pending = false;
     if (drm->evidence.failed || !event->presented || !drm->evidence.active || view->rejected) {
         return;
     }
@@ -1003,10 +1003,13 @@ bool seaside_tty_drm_check_settings(struct wlr_output *output,
 bool seaside_tty_drm_apply_settings(struct seaside_tty_drm *drm, struct wlr_output *output,
                                     const struct seaside_drm_output_settings *settings) {
     struct tty_output *view = find_output(drm, output);
+    if (!available(view)) {
+        return false;
+    }
     const bool geometry_changed =
         output->current_mode != settings->mode || output->scale != settings->scale ||
         output->transform != (enum wl_output_transform)(settings->rotation / 90);
-    if (!available(view) || !configure_output(output, settings, false)) {
+    if (!configure_output(output, settings, false)) {
         return false;
     }
     if (geometry_changed) {

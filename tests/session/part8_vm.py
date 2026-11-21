@@ -8,7 +8,8 @@ from part5_vm import revision_bundle, run
 
 
 ARTIFACTS = {
-    "baseline.json", "part8-session.log", "part8-pattern.log", "part8-portal.log",
+    "baseline.json", "part8-session.log", "part8-pattern.log", "part8-portal-monitor.log",
+    "part8-portal-window.log",
     "part8-preserve.png", "part8-stretch.png", "part8-rotated-90.png",
     "part8-rotated-180.png", "part8-rotated-270.png", "part8-rotated-0.png",
 }
@@ -20,6 +21,8 @@ def send_input(runner, vm, message):
         runner.keys(vm, "e0", "5b", "31", "b1", "e0", "db")
     elif key == "monitor":
         runner.type_command(vm, "Monitor")
+    elif key == "window":
+        runner.type_command(vm, "Part 8 Fullscreen Pattern")
     else:
         raise RuntimeError(f"Unexpected Part 8 input request {key!r}")
 

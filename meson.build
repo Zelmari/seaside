@@ -447,10 +447,11 @@ headless_fixture = executable(
 
 part3_fixture = executable(
   'seaside-part3-fixture',
-  ['tests/integration/part3.cpp', 'tests/integration/part3_bridge.c',
+  ['tests/integration/part3.cpp', 'tests/integration/part3_bridge.c', 'tests/integration/part8_frame_fault.c',
    xdg_shell_client_header, xdg_shell_private_code, display_protocols],
   include_directories: include_directories('src', 'tests/integration'),
   dependencies: [wlroots, wayland_server, wayland_client, pixman, libdrm, threads],
+  link_args: ['-Wl,--wrap=wlr_output_commit_state'],
   link_with: core, install: false,
 )
 test('part3-headless-session', part3_fixture, suite: ['integration', 'part3'], timeout: 30,
