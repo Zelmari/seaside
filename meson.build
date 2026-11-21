@@ -491,10 +491,10 @@ portal_smoke = executable(
   dependencies: [wlroots, wayland_server, pixman, libdrm, systemd, pipewire, threads],
   link_with: [core, capture_foundation, session_foundation], install: false,
 )
-executable('seaside-portal-stream', 'tests/integration/portal_stream.cpp',
+portal_stream = executable('seaside-portal-stream', 'tests/integration/portal_stream.cpp',
   dependencies: [systemd, pipewire], install: false,
 )
-executable('seaside-part7-native-client',
+part7_native_client = executable('seaside-part7-native-client',
   ['tests/integration/part7_native_client.c', xdg_shell_client_header, xdg_shell_private_code],
   dependencies: wayland_client, install: false,
 )
@@ -503,6 +503,13 @@ test('part3-real-portals', python,
          files('packaging/seaside-portals.conf')],
   suite: ['integration', 'part3'], timeout: 35,
   env: {'SEASIDE_TEST_PART': '3', 'SEASIDE_REQUIREMENTS': '3.1,7,12.2b'},
+)
+test('part7-headless-portal-stream', python,
+  args: [files('tests/integration/test_real_portals.py'), portal_smoke,
+         files('packaging/seaside-portals.conf'), '--stream-receiver', portal_stream,
+         '--native-client', part7_native_client],
+  suite: ['integration', 'part7'], timeout: 45,
+  env: {'SEASIDE_TEST_PART': '7', 'SEASIDE_REQUIREMENTS': '7.2,11,12.2b'},
 )
 
 drm_probe = executable(

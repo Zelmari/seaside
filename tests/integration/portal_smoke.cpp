@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
+#include <string_view>
 #include <unistd.h>
 #include <wayland-server-core.h>
 
@@ -36,10 +37,20 @@ bool dispatch_until(wl_display *display, Clock::duration limit, Done done) {
     }
     return done();
 }
+
+bool wait_for_handshake(wl_display *display, Clock::duration limit) {
+    bool proceed = false;
+    const std::unique_ptr<wl_event_source, decltype(&wl_event_source_remove)> start(
+        wl_event_loop_add_fd(wl_display_get_event_loop(display), STDIN_FILENO, WL_EVENT_READABLE,
+                             start_received, &proceed),
+        wl_event_source_remove);
+    return start && dispatch_until(display, limit, [&] { return proceed; });
+}
 } // namespace
 
 int main(int argc, char **argv) {
-    if (argc != 2) {
+    const bool stream = argc == 3 && std::string_view(argv[2]) == "--stream";
+    if (argc != 2 && !stream) {
         return EXIT_FAILURE;
     }
     auto server = seaside::Server::create();
@@ -78,18 +89,16 @@ int main(int argc, char **argv) {
     if (!capture || !seaside_output_capture_add_output(capture.get(), head, 0, 0)) {
         return EXIT_FAILURE;
     }
-    auto *loop = wl_display_get_event_loop(display);
-    bool proceed = false;
-    {
-        const std::unique_ptr<wl_event_source, decltype(&wl_event_source_remove)> start(
-            wl_event_loop_add_fd(loop, STDIN_FILENO, WL_EVENT_READABLE, start_received, &proceed),
-            wl_event_source_remove);
-        if (!start || !dispatch_until(display, 12s, [&] { return proceed; })) {
-            std::fputs("Portal fixture did not receive the startup handshake\n", stderr);
-            return EXIT_FAILURE;
-        }
+    if (stream &&
+        !(*scene)->enable_window_capture((*server)->allocator(), renderer,
+                                         seaside_output_capture_copy_manager(capture.get()))) {
+        return EXIT_FAILURE;
     }
-    auto bus = seaside::SessionBus::connect(loop, argv[1]);
+    if (!wait_for_handshake(display, 20s)) {
+        std::fputs("Portal fixture did not receive the startup handshake\n", stderr);
+        return EXIT_FAILURE;
+    }
+    auto bus = seaside::SessionBus::connect(wl_display_get_event_loop(display), argv[1]);
     if (!bus) {
         return EXIT_FAILURE;
     }
@@ -98,7 +107,8 @@ int main(int argc, char **argv) {
     auto probe = seaside::PortalProbe::start(
         **bus, getuid(),
         [&](pid_t pid, uid_t uid) {
-            return seaside_output_capture_client_ready(capture.get(), pid, uid);
+            return seaside_output_capture_client_ready(capture.get(), pid, uid) &&
+                   (!stream || (*scene)->window_capture_client_ready(pid, uid));
         },
         [&](seaside::StartupService service, seaside::ServiceReport result) {
             std::fprintf(stderr, "portal service=%d failure=%d native=%d\n",
@@ -107,10 +117,13 @@ int main(int argc, char **argv) {
             failed |= result.failure != seaside::ServiceFailure::none;
             ++reports;
         },
-        7s, {}, seaside::PortalProbe::Sources::monitor);
+        7s, {},
+        stream ? seaside::PortalProbe::Sources::monitor_and_window
+               : seaside::PortalProbe::Sources::monitor);
     if (probe && dispatch_until(display, 8s, [&] { return failed || reports == 2; }) && !failed) {
         std::puts("portal smoke PASS frontend and capture backend");
-        return EXIT_SUCCESS;
+        std::fflush(stdout);
+        return !stream || wait_for_handshake(display, 36s) ? EXIT_SUCCESS : EXIT_FAILURE;
     }
     return EXIT_FAILURE;
 }
