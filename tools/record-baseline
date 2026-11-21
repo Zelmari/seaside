@@ -18,18 +18,20 @@ from datetime import datetime, timezone
 ROOT = Path(__file__).resolve().parent.parent
 DEPENDENCIES = (
     'wlroots-0.20', 'wayland-server', 'wayland-client',
-    'wayland-protocols', 'libdrm', 'pixman-1', 'gtest_main', 'tomlplusplus', 'xkbcommon',
+    'wayland-protocols', 'wlr-protocols', 'libdrm', 'pixman-1', 'gtest_main', 'tomlplusplus',
+    'xkbcommon', 'xau', 'xcb',
     'libsystemd', 'libpipewire-0.3',
     'libpng', 'libturbojpeg', 'libwebp', 'pangocairo', 'cairo', 'nlohmann_json',
 )
 PACKAGES = (
     'gcc', 'gcc-libs', 'glibc', 'binutils', 'pkgconf', 'meson', 'ninja', 'python',
     'gtest', 'clang', 'gdb', 'tomlplusplus',
-    'wlroots0.20', 'wayland', 'wayland-protocols', 'libdrm', 'pixman',
+    'wlroots0.20', 'wayland', 'wayland-protocols', 'wlr-protocols', 'libdrm', 'pixman',
     'libinput', 'libxkbcommon', 'mesa', 'seatd',
     'systemd', 'systemd-libs', 'libpipewire', 'pipewire', 'dbus',
     'xdg-desktop-portal', 'xdg-desktop-portal-wlr', 'xdg-desktop-portal-gtk',
-    'wireplumber', 'grim', 'foot',
+    'pipewire-audio', 'pipewire-pulse', 'wireplumber', 'grim', 'wf-recorder', 'wofi', 'foot',
+    'libxau', 'libxcb', 'xwayland-satellite', 'xorg-xwayland', 'obs-studio', 'discord',
     'libpng', 'libjpeg-turbo', 'libwebp', 'pango', 'cairo', 'fontconfig', 'ttf-dejavu',
     'nlohmann-json',
 )
@@ -124,16 +126,22 @@ def collect(build_dir: Path) -> dict:
             errors.append(f'Cannot hash required {package} API/library files')
         supporting_api_files.extend(artifacts)
 
-    protocol_dir_result = command(['pkg-config', '--variable=pkgdatadir', 'wayland-protocols'])
     protocol_xml = []
-    if protocol_dir_result['returncode'] == 0 and protocol_dir_result.get('stdout', '').strip():
-        protocol_dir = Path(protocol_dir_result['stdout'].strip())
-        for path in sorted(protocol_dir.rglob('*.xml')):
+    for package in ('wayland-protocols', 'wlr-protocols'):
+        observed = command(['pkg-config', '--variable=pkgdatadir', package])
+        directory = observed.get('stdout', '').strip()
+        if observed['returncode'] != 0 or not directory:
+            errors.append(f'Cannot find installed {package} XML')
+            continue
+        protocol_dir = Path(directory)
+        paths = sorted(protocol_dir.rglob('*.xml'))
+        if not paths:
+            errors.append(f'Cannot record installed {package} XML hashes')
+        for path in paths:
             item = digest(path)
+            item['package'] = package
             item['relative_path'] = str(path.relative_to(protocol_dir))
             protocol_xml.append(item)
-    if not protocol_xml:
-        errors.append('Cannot record installed protocol XML hashes')
 
     source_files = [ROOT / name for name in ('meson.build', '.clang-format', '.clang-tidy', 'LICENSE')]
     for directory in ('src', 'tests', 'tools', 'packaging'):

@@ -28,7 +28,8 @@ Install the build and test dependencies in the Arch development environment:
 
 ```sh
 sudo pacman -S --needed gcc pkgconf meson ninja python wlroots0.20 wayland wayland-protocols \
-  libdrm libinput pixman gtest clang gdb tomlplusplus nlohmann-json libxkbcommon systemd-libs \
+  wlr-protocols libdrm libinput pixman gtest clang gdb tomlplusplus nlohmann-json \
+  libxkbcommon libxau libxcb systemd-libs \
   libpipewire pipewire dbus libpng libjpeg-turbo libwebp pango cairo ttf-dejavu
 ```
 
