@@ -296,9 +296,10 @@ class VideoReceiver {
                                    SPA_VIDEO_FORMAT_BGRA, SPA_VIDEO_FORMAT_RGBx,
                                    SPA_VIDEO_FORMAT_RGBA)));
         // PipeWire defines these enum values as combinable flags.
-        // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange)
+        // NOLINTBEGIN(clang-analyzer-optin.core.EnumCastOutOfRange)
         const auto flags =
             static_cast<pw_stream_flags>(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS);
+        // NOLINTEND(clang-analyzer-optin.core.EnumCastOutOfRange)
         check(pw_stream_connect(stream_, PW_DIRECTION_INPUT, node, flags, &format, 1),
               "connect the PipeWire video stream");
     }
