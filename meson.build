@@ -19,6 +19,7 @@ wlroots = dependency('wlroots-0.20', version: ['>=0.20.2', '<0.21.0'], include_t
 wayland_server = dependency('wayland-server')
 wayland_client = dependency('wayland-client')
 wayland_protocols = dependency('wayland-protocols')
+wlr_protocols = dependency('wlr-protocols', method: 'pkg-config')
 pixman = dependency('pixman-1')
 libdrm = dependency('libdrm')
 libinput = dependency('libinput')
@@ -92,9 +93,21 @@ foreign_toplevel_client = custom_target(
   output: 'ext-foreign-toplevel-list-v1-client-protocol.h',
   command: [wayland_scanner, 'client-header', '@INPUT@', '@OUTPUT@'],
 )
+legacy_capture_xml = wlr_protocols.get_variable(pkgconfig: 'pkgdatadir') / 'unstable/wlr-screencopy-unstable-v1.xml'
+legacy_capture_server = custom_target(
+  'legacy-capture-server-header', input: legacy_capture_xml,
+  output: 'wlr-screencopy-unstable-v1-server-protocol.h',
+  command: [wayland_scanner, 'server-header', '@INPUT@', '@OUTPUT@'],
+)
+legacy_capture_code = custom_target(
+  'legacy-capture-private-code', input: legacy_capture_xml,
+  output: 'wlr-screencopy-unstable-v1-protocol.c',
+  command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'],
+)
 capture_foundation = static_library(
   'seaside-capture-foundation',
-  ['src/output_capture.c', capture_source_server, capture_source_code, foreign_toplevel_code],
+  ['src/output_capture.c', 'src/legacy_capture.c', capture_source_server, capture_source_code,
+   foreign_toplevel_code, legacy_capture_server, legacy_capture_code],
   include_directories: include_directories('src'),
   dependencies: [wlroots, wayland_server, pixman, libdrm], install: false,
 )

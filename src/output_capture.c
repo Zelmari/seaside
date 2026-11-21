@@ -1,4 +1,5 @@
 #include "output_capture.h"
+#include "legacy_capture.h"
 
 #include "ext-image-capture-source-v1-server-protocol.h"
 
@@ -23,6 +24,7 @@ struct seaside_output_capture {
     struct wl_display *display;
     struct wl_global *output_global;
     struct wlr_ext_image_copy_capture_manager_v1 *copy_manager;
+    struct seaside_legacy_capture *legacy;
     struct wlr_output_layout *layout;
     struct wl_list output_resources;
     struct wl_list outputs;
@@ -42,7 +44,9 @@ struct capture_output {
     struct wlr_buffer *pending_buffer;
     struct wlr_buffer *cursor_composite;
     uint32_t pending_sequence;
+    uint64_t content_revision;
     size_t active_sessions;
+    size_t legacy_frames;
     bool creating_with_cursor;
     bool constraints_ready;
 };
@@ -73,23 +77,34 @@ static void release_composite(struct capture_output *capture) {
     capture->cursor_composite = NULL;
 }
 
+static bool active(const struct capture_output *capture) {
+    return capture->active_sessions || capture->legacy_frames;
+}
+
+static void update_render_lock(struct capture_output *capture, bool was_active) {
+    if (active(capture) != was_active) {
+        wlr_output_lock_attach_render(capture->output, !was_active);
+        if (was_active) {
+            release_pending(capture);
+            release_composite(capture);
+        }
+    }
+}
+
 static void start_capture(struct wlr_ext_image_capture_source_v1 *source, bool with_cursor) {
     struct capture_output *capture = wl_container_of(source, capture, source);
     /* wlroots emits new_session synchronously after start, so its listener
      * can record the cursor option on the new session rather than the output. */
     capture->creating_with_cursor = with_cursor;
-    if (capture->active_sessions++ == 0) {
-        wlr_output_lock_attach_render(capture->output, true);
-    }
+    bool was_active = active(capture);
+    capture->active_sessions++;
+    update_render_lock(capture, was_active);
 }
 
 static void stop_capture(struct wlr_ext_image_capture_source_v1 *source) {
     struct capture_output *capture = wl_container_of(source, capture, source);
-    if (--capture->active_sessions == 0) {
-        wlr_output_lock_attach_render(capture->output, false);
-        release_pending(capture);
-        release_composite(capture);
-    }
+    capture->active_sessions--;
+    update_render_lock(capture, true);
 }
 
 static void request_frame(struct wlr_ext_image_capture_source_v1 *source, bool needs_frame) {
@@ -227,6 +242,12 @@ static bool update_constraints(struct capture_output *capture) {
 static void on_output_commit(struct wl_listener *listener, void *data) {
     struct capture_output *capture = wl_container_of(listener, capture, output_commit);
     const struct wlr_output_event_commit *event = data;
+    const uint32_t flags = event->state->committed;
+    if (!capture->output->enabled ||
+        (flags & (WLR_OUTPUT_STATE_MODE | WLR_OUTPUT_STATE_RENDER_FORMAT | WLR_OUTPUT_STATE_SCALE |
+                  WLR_OUTPUT_STATE_TRANSFORM))) {
+        seaside_legacy_capture_output_lost(capture->owner->legacy, capture->output);
+    }
     if (!capture->output->enabled) {
         if (capture->constraints_ready) {
             wlr_ext_image_capture_source_v1_finish(&capture->source);
@@ -247,7 +268,11 @@ static void on_output_commit(struct wl_listener *listener, void *data) {
             wlr_ext_image_capture_source_v1_init(&capture->source, &capture_impl);
         }
     }
-    if (capture->active_sessions && (event->state->committed & WLR_OUTPUT_STATE_BUFFER)) {
+    if ((flags & WLR_OUTPUT_STATE_BUFFER) &&
+        (!(flags & WLR_OUTPUT_STATE_DAMAGE) || pixman_region32_not_empty(&event->state->damage))) {
+        capture->content_revision++;
+    }
+    if (active(capture) && (flags & WLR_OUTPUT_STATE_BUFFER)) {
         release_pending(capture);
         capture->pending_buffer = wlr_buffer_lock(event->state->buffer);
         capture->pending_sequence = capture->output->commit_seq;
@@ -275,6 +300,17 @@ static void on_output_present(struct wl_listener *listener, void *data) {
         };
         wl_signal_emit_mutable(&capture->source.events.frame, &frame);
         pixman_region32_fini(&damage);
+        if (capture->legacy_frames) {
+            struct wlr_buffer *with_cursor = buffer;
+            const struct wlr_output_cursor *cursor = capture->output->hardware_cursor;
+            if (cursor && cursor->enabled && cursor->visible && cursor->texture &&
+                seaside_legacy_capture_wants_cursor(capture->owner->legacy, capture->output)) {
+                with_cursor =
+                    composite_cursor(capture, &frame, cursor) ? capture->cursor_composite : NULL;
+            }
+            seaside_legacy_capture_present(capture->owner->legacy, capture->output, buffer,
+                                           with_cursor, &event->when, capture->content_revision);
+        }
     } else if (capture->output->enabled) {
         wlr_output_schedule_frame(capture->output);
     }
@@ -294,10 +330,49 @@ static struct capture_output *find_output(const struct seaside_output_capture *c
     return NULL;
 }
 
+static bool legacy_supports(void *data, struct wlr_output *output) {
+    struct capture_output *target = find_output(data, output);
+    return target && output->enabled && target->constraints_ready;
+}
+
+static void legacy_active(void *data, struct wlr_output *output, bool start) {
+    struct capture_output *target = find_output(data, output);
+    if (!target) {
+        return;
+    }
+    const bool was_active = active(target);
+    if (start) {
+        target->legacy_frames++;
+        wlr_output_schedule_frame(output);
+    } else {
+        target->legacy_frames--;
+    }
+    update_render_lock(target, was_active);
+}
+
+void seaside_output_capture_cursor_changed(struct seaside_output_capture *capture) {
+    if (!capture) {
+        return;
+    }
+    struct capture_output *target;
+    wl_list_for_each(target, &capture->outputs, link) {
+        bool wants_cursor = seaside_legacy_capture_wants_cursor(capture->legacy, target->output);
+        const struct capture_session *session;
+        wl_list_for_each(session, &target->sessions, link) {
+            wants_cursor |= session->with_cursor && session->session->frame &&
+                            session->session->frame->capturing;
+        }
+        if (wants_cursor && target->output->enabled) {
+            wlr_output_schedule_frame(target->output);
+        }
+    }
+}
+
 static void detach_output(struct capture_output *capture) {
     /* Finishing the source invalidates descriptors and stops sessions while
      * the output and its render lock are still valid. */
     wlr_ext_image_capture_source_v1_finish(&capture->source);
+    seaside_legacy_capture_output_lost(capture->owner->legacy, capture->output);
     release_pending(capture);
     release_composite(capture);
     wl_list_remove(&capture->output_destroy.link);
@@ -407,6 +482,8 @@ static void detach_display(struct seaside_output_capture *capture) {
     wl_list_for_each_safe(output, next, &capture->outputs, link) {
         detach_output(output);
     }
+    seaside_legacy_capture_destroy(capture->legacy);
+    capture->legacy = NULL;
     wl_list_remove(&capture->display_destroy.link);
     if (capture->copy_manager) {
         wl_list_remove(&capture->new_session.link);
@@ -438,7 +515,8 @@ static bool capture_global_visible(const struct wl_client *client, const struct 
     if (strcmp(interface, "ext_image_copy_capture_manager_v1") != 0 &&
         strcmp(interface, "ext_output_image_capture_source_manager_v1") != 0 &&
         strcmp(interface, "ext_foreign_toplevel_image_capture_source_manager_v1") != 0 &&
-        strcmp(interface, "ext_foreign_toplevel_list_v1") != 0) {
+        strcmp(interface, "ext_foreign_toplevel_list_v1") != 0 &&
+        strcmp(interface, "zwlr_screencopy_manager_v1") != 0) {
         return true;
     }
     uid_t uid;
@@ -485,6 +563,12 @@ struct seaside_output_capture *seaside_output_capture_create(struct wl_display *
         return NULL;
     }
     wl_signal_add(&capture->copy_manager->events.new_session, &capture->new_session);
+    capture->legacy =
+        seaside_legacy_capture_create(display, legacy_supports, legacy_active, capture);
+    if (!capture->legacy) {
+        seaside_output_capture_destroy(capture);
+        return NULL;
+    }
     return capture;
 }
 

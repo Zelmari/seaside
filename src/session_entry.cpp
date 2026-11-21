@@ -352,6 +352,7 @@ class Session {
         auto &session = *static_cast<Session *>(data);
         if (!session.stopping_ && !session.ipc_exiting_) {
             seaside_tty_drm_move(session.drm_, absolute, x, y);
+            seaside_output_capture_cursor_changed(session.capture_.get());
             if (seaside_tty_drm_cursor_position(session.drm_, &x, &y)) {
                 session.desktop_.motion(x, y);
             }
@@ -391,6 +392,7 @@ class Session {
     static void pointer_locked(void *data, bool locked) noexcept {
         auto &session = *static_cast<Session *>(data);
         seaside_tty_drm_set_cursor_visible(session.drm_, !locked);
+        seaside_output_capture_cursor_changed(session.capture_.get());
     }
 
     static void pointer_cancelled(void *data) noexcept {

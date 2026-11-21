@@ -25,6 +25,8 @@ bool seaside_output_capture_position(struct seaside_output_capture *capture,
                                      struct wlr_output *output, int x, int y);
 void seaside_output_capture_remove_output(struct seaside_output_capture *capture,
                                           struct wlr_output *output);
+/* A hardware cursor update may leave the underlying scene undamaged. */
+void seaside_output_capture_cursor_changed(struct seaside_output_capture *capture);
 
 /* Require one live client with the peer credentials and the relevant bound
  * resources on this display. This is a portal readiness check. */
