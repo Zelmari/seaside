@@ -37,8 +37,12 @@ class LiveConfigTest : public testing::Test {
     }
 
     void start(LiveConfig::Prepare prepare = {}, LiveConfig::Apply apply = {}) {
+        start_from(load_startup_config(store, paths), std::move(prepare), std::move(apply));
+    }
+
+    void start_from(LoadedConfig loaded, LiveConfig::Prepare prepare = {},
+                    LiveConfig::Apply apply = {}) {
         ASSERT_TRUE(loop);
-        auto loaded = load_startup_config(store, paths);
         auto result = LiveConfig::create(
             loop.get(), store, paths, std::move(loaded), std::move(prepare), std::move(apply),
             [&](Change change, const LiveConfig::Prepared &) { events.push_back(change); });
@@ -203,5 +207,58 @@ TEST_F(LiveConfigTest, PrepareRejectionAndSnapshotFailureLeavePriorSnapshot) {
     EXPECT_EQ(transaction().active().window.gaps_outer, 46);
     EXPECT_FALSE(transaction().diagnostic());
     EXPECT_EQ(snapshot(), default_template());
+}
+
+TEST_F(LiveConfigTest, SaveBetweenInitialLoadAndWatchRegistrationIsApplied) {
+    auto startup = load_startup_config(store, paths);
+    EXPECT_EQ(startup.config.window.gaps_outer, 10);
+    ASSERT_NO_FATAL_FAILURE(replace("[window]\ngaps_outer=38\n"));
+    ASSERT_NO_FATAL_FAILURE(start_from(std::move(startup)));
+    ASSERT_TRUE(pump_until([&] {
+        return transaction().active().window.gaps_outer == 38 && transaction().recovery_persisted();
+    }));
+    EXPECT_EQ(snapshot(), "[window]\ngaps_outer=38\n");
+}
+
+TEST_F(LiveConfigTest, ConfigSymlinkFollowsInPlaceWritesAndTargetReplacement) {
+    std::filesystem::create_directories(paths.user.parent_path());
+    const auto linked_config = directory.path() / "dotfile.toml";
+    ASSERT_TRUE(std::ofstream(linked_config) << "[window]\ngaps_outer=19\n");
+    std::filesystem::create_symlink(linked_config, paths.user);
+    ASSERT_NO_FATAL_FAILURE(start());
+    EXPECT_EQ(transaction().active().window.gaps_outer, 19);
+
+    ASSERT_TRUE(std::ofstream(linked_config) << "[window]\ngaps_outer=37\n");
+    ASSERT_TRUE(pump_until([&] { return transaction().active().window.gaps_outer == 37; }));
+    const auto replacement = directory.path() / "editor.tmp";
+    ASSERT_TRUE(std::ofstream(replacement) << "[window]\ngaps_outer=39\n");
+    std::filesystem::rename(replacement, linked_config);
+    ASSERT_TRUE(pump_until([&] { return transaction().active().window.gaps_outer == 39; }));
+    EXPECT_TRUE(std::filesystem::is_symlink(paths.user));
+}
+
+TEST_F(LiveConfigTest, RescansCurrentPathAfterAnInotifyOverflow) {
+    int queue_limit = 0;
+    if (!(std::ifstream("/proc/sys/fs/inotify/max_queued_events") >> queue_limit) ||
+        queue_limit < 1 || queue_limit > 100'000) {
+        GTEST_SKIP() << "The system inotify queue limit is unavailable or impractical to fill";
+    }
+    ASSERT_NO_FATAL_FAILURE(start());
+    ASSERT_TRUE(pump_until([&] { return transaction().recovery_persisted(); }));
+    EXPECT_FALSE(pump_until([&] { return transaction().diagnostic().has_value(); }, 250ms));
+
+    auto first = paths.user.parent_path() / "flood-a";
+    auto second = paths.user.parent_path() / "flood-b";
+    ASSERT_TRUE(std::ofstream(first) << "noise");
+    // Each rename contributes two records with an independent cookie. With
+    // dispatch paused, the subsequent save notification is replaced by overflow.
+    for (int i = 0; i <= queue_limit / 2; ++i) {
+        std::filesystem::rename(first, second);
+        std::swap(first, second);
+    }
+    ASSERT_NO_FATAL_FAILURE(replace("[window]\ngaps_outer=53\n"));
+    ASSERT_TRUE(pump_until([&] { return transaction().active().window.gaps_outer == 53; }));
+    ASSERT_NO_FATAL_FAILURE(replace("[window]\ngaps_outer=57\n"));
+    ASSERT_TRUE(pump_until([&] { return transaction().active().window.gaps_outer == 57; }));
 }
 } // namespace
