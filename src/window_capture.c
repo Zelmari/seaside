@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "window_capture.h"
+#include "wlroots_bridge.h"
 
 #include <drm.h>
 #include <drm_fourcc.h>
@@ -42,9 +43,11 @@ struct seaside_window_source {
     struct wlr_ext_image_capture_source_v1 source;
     struct wlr_swapchain *swapchain;
     struct wlr_drm_syncobj_timeline *timeline;
+    struct wlr_drm_syncobj_timeline_waiter waiter;
     uint64_t render_point;
     struct wlr_buffer *rendered_buffer;
     struct timespec rendered_at;
+    bool waiting_for_render;
     struct wl_event_source *timer;
     struct wl_list observers;
     struct wl_list painted_link, painted_sessions;
@@ -326,13 +329,18 @@ static void callback_surface(struct wlr_surface *surface, int x, int y, void *da
     wlr_surface_send_frame_done(surface, data);
 }
 
+struct capture_sync {
+    bool explicit_sync, wants_replacement;
+};
+
 static void check_sync_surface(struct wlr_surface *surface, int x, int y, void *data) {
     (void)x;
     (void)y;
-    bool *explicit_sync = data;
+    struct capture_sync *tracking = data;
     const struct wlr_linux_drm_syncobj_surface_v1_state *sync =
         wlr_linux_drm_syncobj_v1_get_surface_state(surface);
-    *explicit_sync |= sync && sync->acquire_timeline;
+    tracking->explicit_sync |= sync && sync->acquire_timeline;
+    tracking->wants_replacement |= seaside_wlr_surface_waits_for_sync_replacement(surface);
 }
 
 static void publish_frame(struct seaside_window_source *target, struct wlr_buffer *buffer,
@@ -345,10 +353,16 @@ static void publish_frame(struct seaside_window_source *target, struct wlr_buffe
     pixman_region32_fini(&damage);
 }
 
-static bool emit_frame(struct seaside_window_source *target, struct timespec when) {
+static void capture_render_ready(struct wlr_drm_syncobj_timeline_waiter *waiter) {
+    struct seaside_window_source *target = wl_container_of(waiter, target, waiter);
+    wlr_drm_syncobj_timeline_waiter_finish(waiter);
+    target->waiting_for_render = false;
+    schedule(target);
+}
+
+static bool emit_frame(struct seaside_window_source *target, struct timespec when,
+                       bool explicit_sync) {
     struct wlr_renderer *renderer = target->owner->renderer;
-    bool explicit_sync = false;
-    wlr_xdg_surface_for_each_surface(target->toplevel->base, check_sync_surface, &explicit_sync);
     if (explicit_sync && !target->timeline) {
         target->timeline = wlr_drm_syncobj_timeline_create(wlr_renderer_get_drm_fd(renderer));
         if (!target->timeline) {
@@ -378,7 +392,12 @@ static bool emit_frame(struct seaside_window_source *target, struct timespec whe
         if (rendered && explicit_sync) {
             target->rendered_buffer = buffer;
             target->rendered_at = when;
-            schedule(target);
+            target->waiting_for_render = wlr_drm_syncobj_timeline_waiter_init(
+                &target->waiter, target->timeline, target->render_point, 0,
+                wl_display_get_event_loop(target->owner->display), capture_render_ready);
+            if (!target->waiting_for_render) {
+                schedule(target);
+            }
             return true;
         }
         if (rendered) {
@@ -400,6 +419,9 @@ static int capture_tick(void *data) {
     struct seaside_window_source *target = data;
     target->scheduled = false;
     if (target->rendered_buffer) {
+        if (target->waiting_for_render) {
+            return 0;
+        }
         bool ready = false;
         if (!wlr_drm_syncobj_timeline_check(target->timeline, target->render_point,
                                             DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT, &ready)) {
@@ -419,16 +441,25 @@ static int capture_tick(void *data) {
     struct timespec now;
     const bool requested = target->pending;
     if (clock_gettime(CLOCK_MONOTONIC, &now) != 0 ||
-        (target->refresh && !refresh_observers(target)) || !update_constraints(target) ||
-        (target->pending && target->damaged && !emit_frame(target, now))) {
+        (target->refresh && !refresh_observers(target)) || !update_constraints(target)) {
         // Keep the toplevel selectable if rendering can recover later. The
         // old source and its sessions cannot safely continue with bad buffers.
         invalidate_source(target);
         return 0;
     }
     if (target->pending && target->damaged) {
-        target->pending = false;
-        target->damaged = false;
+        struct capture_sync sync = {0};
+        if (target->owner->renderer->features.timeline) {
+            wlr_xdg_surface_for_each_surface(target->toplevel->base, check_sync_surface, &sync);
+        }
+        if (!sync.wants_replacement) {
+            if (!emit_frame(target, now, sync.explicit_sync)) {
+                invalidate_source(target);
+                return 0;
+            }
+            target->pending = false;
+            target->damaged = false;
+        }
     }
     // An occluded view can still be on the active workspace. Give the
     // requested capture its own pacing even if the output skipped that view.
@@ -459,6 +490,10 @@ static void stop(struct wlr_ext_image_capture_source_v1 *source) {
         wl_event_source_timer_update(target->timer, 0);
         target->scheduled = false;
         target->pending = false;
+        if (target->waiting_for_render) {
+            wlr_drm_syncobj_timeline_waiter_finish(&target->waiter);
+            target->waiting_for_render = false;
+        }
         wlr_buffer_unlock(target->rendered_buffer);
         target->rendered_buffer = NULL;
         wlr_drm_syncobj_timeline_unref(target->timeline);
