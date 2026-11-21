@@ -12,18 +12,19 @@ struct seaside_output_capture;
 extern "C" {
 #endif
 
-/* Install output image-source and image-copy globals for an enabled output.
- * All calls belong to the display event-loop thread. */
-struct seaside_output_capture *seaside_output_capture_create(struct wl_display *display,
-                                                             struct wlr_output *output);
+/* Install display-wide output image-source and image-copy globals. All calls
+ * belong to the display event-loop thread. */
+struct seaside_output_capture *seaside_output_capture_create(struct wl_display *display);
 void seaside_output_capture_destroy(struct seaside_output_capture *capture);
 
-/* The globals survive destruction of an output during a VT switch. Attach the
- * newly enabled output before accepting new capture sessions. */
-bool seaside_output_capture_set_output(struct seaside_output_capture *capture,
-                                       struct wlr_output *output);
-bool seaside_output_capture_position(struct seaside_output_capture *capture, int x, int y);
-void seaside_output_capture_clear_output(struct seaside_output_capture *capture);
+/* Removing an output stops only its capture sessions. The global bindings
+ * survive VT switches and output hotplug. */
+bool seaside_output_capture_add_output(struct seaside_output_capture *capture,
+                                       struct wlr_output *output, int x, int y);
+bool seaside_output_capture_position(struct seaside_output_capture *capture,
+                                     struct wlr_output *output, int x, int y);
+void seaside_output_capture_remove_output(struct seaside_output_capture *capture,
+                                          struct wlr_output *output);
 
 /* Require one live client with the peer credentials and the relevant bound
  * resources on this display. This is a portal readiness check. */

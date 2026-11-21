@@ -123,7 +123,7 @@ bool read_unsigned(sd_bus_message *message, std::optional<std::uint32_t> &result
     return true;
 }
 
-bool read_screencast(sd_bus_message *message) noexcept {
+bool read_screencast(sd_bus_message *message, PortalProbe::Sources sources) noexcept {
     std::optional<std::uint32_t> version, source_types, cursor_modes;
     const bool valid = sd_bus_message_has_signature(message, "a{sv}") > 0 &&
                        read_properties(message, [&](std::string_view name) {
@@ -139,8 +139,10 @@ bool read_screencast(sd_bus_message *message) noexcept {
                            return sd_bus_message_skip(message, "v") > 0;
                        });
     constexpr std::uint32_t monitor = 1;
+    constexpr std::uint32_t window = 2;
     constexpr std::uint32_t hidden_and_embedded = 1 | 2;
-    return valid && version.value_or(0) >= 4 && (source_types.value_or(0) & monitor) != 0 &&
+    const auto required = sources == PortalProbe::Sources::monitor ? monitor : monitor | window;
+    return valid && version.value_or(0) >= 4 && (source_types.value_or(0) & required) == required &&
            (cursor_modes.value_or(0) & hidden_and_embedded) == hidden_and_embedded;
 }
 
@@ -177,9 +179,10 @@ struct PortalProbe::Impl final : std::enable_shared_from_this<Impl> {
     };
 
     Impl(SessionBus &transport, uid_t uid, BindingCheck bound, Completion complete,
-         Clock::time_point limit, Completion fault) noexcept
+         Clock::time_point limit, Completion fault, Sources sources) noexcept
         : bus(transport), expected_uid(uid), binding(std::move(bound)),
-          completion(std::move(complete)), runtime_fault(std::move(fault)), deadline(limit) {}
+          completion(std::move(complete)), runtime_fault(std::move(fault)), deadline(limit),
+          required_sources(sources) {}
 
     SessionBus &bus;
     const uid_t expected_uid;
@@ -187,6 +190,7 @@ struct PortalProbe::Impl final : std::enable_shared_from_this<Impl> {
     Completion completion;
     Completion runtime_fault;
     const Clock::time_point deadline;
+    const Sources required_sources;
     Clock::time_point binding_deadline{};
     Step step = Step::frontend_cast;
     std::optional<SessionBus::CallId> pending;
@@ -669,7 +673,7 @@ struct PortalProbe::Impl final : std::enable_shared_from_this<Impl> {
         case Step::frontend_cast:
         case Step::backend_cast: {
             const auto *sender = sd_bus_message_get_sender(message);
-            if (!is_unique_name(sender) || !read_screencast(message)) {
+            if (!is_unique_name(sender) || !read_screencast(message, required_sources)) {
                 break;
             }
             if (step == Step::frontend_cast) {
@@ -784,7 +788,8 @@ PortalProbe::PortalProbe(std::shared_ptr<Impl> impl) noexcept : impl_(std::move(
 
 std::expected<std::unique_ptr<PortalProbe>, ServiceReport>
 PortalProbe::start(SessionBus &bus, uid_t expected_uid, BindingCheck bound, Completion completion,
-                   std::chrono::milliseconds timeout, Completion runtime_fault) noexcept {
+                   std::chrono::milliseconds timeout, Completion runtime_fault,
+                   Sources sources) noexcept {
     if (!bound || !completion || expected_uid == static_cast<uid_t>(-1) || timeout <= 0ms ||
         timeout > 60s) {
         return std::unexpected(ServiceReport{ServiceFailure::internal_error, -EINVAL});
@@ -792,7 +797,7 @@ PortalProbe::start(SessionBus &bus, uid_t expected_uid, BindingCheck bound, Comp
     try {
         auto impl =
             std::make_shared<Impl>(bus, expected_uid, std::move(bound), std::move(completion),
-                                   Clock::now() + timeout, std::move(runtime_fault));
+                                   Clock::now() + timeout, std::move(runtime_fault), sources);
         auto probe = std::unique_ptr<PortalProbe>(new PortalProbe(impl));
         const auto result = impl->request(Step::frontend_cast);
         if (result.failure != ServiceFailure::none) {

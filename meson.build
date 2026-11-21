@@ -86,6 +86,11 @@ foreign_toplevel_code = custom_target(
   output: 'ext-foreign-toplevel-list-v1-protocol.c',
   command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'],
 )
+foreign_toplevel_client = custom_target(
+  'foreign-toplevel-client-header', input: foreign_toplevel_xml,
+  output: 'ext-foreign-toplevel-list-v1-client-protocol.h',
+  command: [wayland_scanner, 'client-header', '@INPUT@', '@OUTPUT@'],
+)
 capture_foundation = static_library(
   'seaside-capture-foundation',
   ['src/output_capture.c', capture_source_server, capture_source_code, foreign_toplevel_code],
@@ -120,18 +125,6 @@ xdg_output_code = custom_target(
   output: 'xdg-output-unstable-v1-protocol.c',
   command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'],
 )
-capture_test = executable(
-  'seaside-output-capture-test',
-  ['tests/integration/output_capture.c', capture_source_client, capture_copy_client, capture_copy_code,
-   xdg_output_client, xdg_output_code],
-  include_directories: include_directories('src'),
-  dependencies: [wlroots, wayland_server, wayland_client, pixman, libdrm, threads],
-  link_with: capture_foundation, install: false,
-)
-test('part3-output-capture', capture_test, suite: ['integration', 'part3'], timeout: 25,
-  env: {'SEASIDE_TEST_PART': '3', 'SEASIDE_REQUIREMENTS': '3.1,7,12.2b'},
-)
-
 cpp = meson.get_compiler('cpp')
 if get_option('cpp_std') != 'c++23'
   error('Reconfigure the legacy build with -Dcpp_std=c++23; the core now requires C++23.')
@@ -153,11 +146,27 @@ work_foundation = static_library(
 core = static_library(
   'seaside-core',
   ['src/server.cpp', 'src/server_c.cpp', 'src/wlroots_bridge.c',
-   'src/scene.cpp', 'src/scene_bridge.c', 'src/render_assets.cpp'],
+   'src/scene.cpp', 'src/scene_bridge.c', 'src/window_capture.c', 'src/render_assets.cpp'],
   include_directories: include_directories('src'),
   dependencies: [wlroots, wayland_server, pixman, threads, libdrm, libpng, turbojpeg, libwebp, pangocairo],
   link_with: work_foundation,
   install: false,
+)
+
+capture_test = executable(
+  'seaside-output-capture-test',
+  ['tests/integration/output_capture.c', capture_source_client, capture_copy_client, capture_copy_code,
+   xdg_output_client, xdg_output_code, xdg_shell_client_header, xdg_shell_private_code,
+   foreign_toplevel_client],
+  include_directories: include_directories('src'),
+  dependencies: [wlroots, wayland_server, wayland_client, pixman, libdrm, threads],
+  link_with: [capture_foundation, core], install: false,
+)
+test('part3-output-capture', capture_test, suite: ['integration', 'part3'], timeout: 25,
+  env: {'SEASIDE_TEST_PART': '3', 'SEASIDE_REQUIREMENTS': '3.1,7,12.2b'},
+)
+test('part7-selected-capture', capture_test, args: ['part7'], suite: ['integration', 'part7'],
+  timeout: 25, env: {'SEASIDE_TEST_PART': '7', 'SEASIDE_REQUIREMENTS': '7.2,11,12.2b'},
 )
 
 tty_foundation = static_library(

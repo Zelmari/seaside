@@ -196,6 +196,10 @@ class Session {
 
     bool configure(seaside::LoadedConfig config, const seaside::ConfigStore &store,
                    seaside::Wallpaper wallpaper) {
+        capture_.reset(seaside_output_capture_create(server_.display()));
+        if (!capture_ || !scene_.enable_window_capture(server_.allocator(), server_.renderer())) {
+            return false;
+        }
         if (!seaside_tty_drm_enable_pending(drm_, server_.allocator(), server_.renderer())) {
             return false;
         }
@@ -587,9 +591,13 @@ class Session {
     }
 
     void reposition_capture() noexcept {
-        if (capture_output_) {
-            const auto bounds = desktop_.output_bounds(capture_output_);
-            if (!seaside_output_capture_position(capture_.get(), bounds.x, bounds.y)) {
+        for (const auto &[connector, output] : outputs_.outputs()) {
+            if (!output.enabled) {
+                continue;
+            }
+            const auto bounds = desktop_.output_bounds(output.handle);
+            if (!seaside_output_capture_position(capture_.get(), output.handle, bounds.x,
+                                                 bounds.y)) {
                 fail("output-capture-position");
             }
         }
@@ -685,7 +693,8 @@ class Session {
         auto portal = seaside::PortalProbe::start(
             *bus_, getuid(),
             [this](pid_t pid, uid_t uid) {
-                return seaside_output_capture_client_ready(capture_.get(), pid, uid);
+                return seaside_output_capture_client_ready(capture_.get(), pid, uid) &&
+                       scene_.window_capture_client_ready(pid, uid);
             },
             [this](StartupService service, ServiceReport detail) { report(service, detail); },
             timeout,
@@ -771,32 +780,12 @@ class Session {
         }
     }
 
-    bool attach_capture(wlr_output *output) noexcept {
-        if (capture_) {
-            if (!seaside_output_capture_set_output(capture_.get(), output)) {
-                return false;
-            }
-        } else {
-            capture_.reset(seaside_output_capture_create(server_.display(), output));
-            if (!capture_) {
-                return false;
-            }
-        }
-        const auto bounds = desktop_.output_bounds(output);
-        if (!seaside_output_capture_position(capture_.get(), bounds.x, bounds.y)) {
-            seaside_output_capture_clear_output(capture_.get());
-            return false;
-        }
-        capture_output_ = output;
-        return true;
-    }
-
     bool attach_desktop_output(wlr_output *output, std::string_view connector,
                                std::string_view identity, seaside::WindowRect bounds) noexcept {
         if (!desktop_.add_output(output, connector, identity, bounds)) {
             return false;
         }
-        if (!capture_output_ && !attach_capture(output)) {
+        if (!seaside_output_capture_add_output(capture_.get(), output, bounds.x, bounds.y)) {
             desktop_.remove_output(output);
             return false;
         }
@@ -818,17 +807,8 @@ class Session {
     static void output_removed(void *data, wlr_output *output, const char *connector) noexcept {
         auto &session = *static_cast<Session *>(data);
         session.outputs_.enabled(connector, false);
-        if (session.capture_output_ == output) {
-            seaside_output_capture_clear_output(session.capture_.get());
-            session.capture_output_ = nullptr;
-        }
+        seaside_output_capture_remove_output(session.capture_.get(), output);
         session.desktop_.remove_output(output);
-        if (!session.capture_output_) {
-            if (auto *fallback = session.desktop_.focused_output_handle();
-                fallback && !session.attach_capture(fallback)) {
-                session.fail("output-capture-reattachment");
-            }
-        }
     }
 
     static void output_observed(void *data, wlr_output *output, const char *connector,
@@ -930,7 +910,6 @@ class Session {
     std::unique_ptr<seaside::IpcServer> ipc_;
     IpcJson last_error_ = nullptr;
     seaside_tty_input *input_ = nullptr;
-    wlr_output *capture_output_ = nullptr;
     std::unique_ptr<wl_event_source, decltype(&wl_event_source_remove)> timer_{
         nullptr, wl_event_source_remove};
     std::unique_ptr<seaside_output_capture, decltype(&seaside_output_capture_destroy)> capture_{

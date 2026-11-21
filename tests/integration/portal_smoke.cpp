@@ -74,8 +74,8 @@ int main(int argc, char **argv) {
         return EXIT_FAILURE;
     }
     const std::unique_ptr<seaside_output_capture, decltype(&seaside_output_capture_destroy)>
-        capture(seaside_output_capture_create(display, head), seaside_output_capture_destroy);
-    if (!capture) {
+        capture(seaside_output_capture_create(display), seaside_output_capture_destroy);
+    if (!capture || !seaside_output_capture_add_output(capture.get(), head, 0, 0)) {
         return EXIT_FAILURE;
     }
     auto *loop = wl_display_get_event_loop(display);
@@ -107,7 +107,7 @@ int main(int argc, char **argv) {
             failed |= result.failure != seaside::ServiceFailure::none;
             ++reports;
         },
-        7s);
+        7s, {}, seaside::PortalProbe::Sources::monitor);
     if (probe && dispatch_until(display, 8s, [&] { return failed || reports == 2; }) && !failed) {
         std::puts("portal smoke PASS frontend and capture backend");
         return EXIT_SUCCESS;

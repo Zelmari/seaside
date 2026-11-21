@@ -15,6 +15,7 @@ class SessionBus;
 
 class PortalProbe final {
   public:
+    enum class Sources { monitor, monitor_and_window };
     using BindingCheck = std::function<bool(pid_t, uid_t)>;
     using Completion = std::function<void(StartupService, ServiceReport)>;
 
@@ -26,7 +27,8 @@ class PortalProbe final {
     // checked owner once. Reporting a loss leaves the session running.
     static std::expected<std::unique_ptr<PortalProbe>, ServiceReport>
     start(SessionBus &bus, uid_t expected_uid, BindingCheck bound, Completion completion,
-          std::chrono::milliseconds timeout, Completion runtime_fault = {}) noexcept;
+          std::chrono::milliseconds timeout, Completion runtime_fault = {},
+          Sources sources = Sources::monitor_and_window) noexcept;
     ~PortalProbe() noexcept;
     PortalProbe(const PortalProbe &) = delete;
     PortalProbe &operator=(const PortalProbe &) = delete;

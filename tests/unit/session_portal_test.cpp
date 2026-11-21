@@ -47,7 +47,8 @@ class PortalProbeTest : public testing::Test {
     std::vector<Report> reports;
     std::vector<Report> runtime_reports;
     std::uint32_t version = 4;
-    std::uint32_t sources = 1;
+    std::uint32_t frontend_sources = 3;
+    std::uint32_t backend_sources = 3;
     std::uint32_t cursors = 3;
     std::uint32_t screenshot_version = 1;
     bool binding_matches = true;
@@ -123,7 +124,9 @@ class PortalProbeTest : public testing::Test {
         if (std::string_view(interface).ends_with(".Screenshot")) {
             value = self.screenshot_version;
         } else if (std::string_view(property) == "AvailableSourceTypes") {
-            value = self.sources;
+            value = std::string_view(interface) == "org.freedesktop.portal.ScreenCast"
+                        ? self.frontend_sources
+                        : self.backend_sources;
         } else if (std::string_view(property) == "AvailableCursorModes") {
             value = self.cursors;
         }
@@ -310,6 +313,26 @@ TEST_F(PortalProbeTest, FrontendWithoutScreenshotInterfaceVersionIsIncompatible)
     ASSERT_TRUE(pump_until([&] { return !reports.empty(); }));
     EXPECT_EQ(reports,
               (std::vector{Report{StartupService::portal_frontend, ServiceFailure::incompatible}}));
+    EXPECT_EQ(creates, 0U);
+}
+
+TEST_F(PortalProbeTest, RejectsFrontendWithoutWindowSources) {
+    frontend_sources = 1;
+    ASSERT_TRUE(setup_services());
+    start();
+    ASSERT_TRUE(pump_until([&] { return !reports.empty(); }));
+    EXPECT_EQ(reports,
+              (std::vector{Report{StartupService::portal_frontend, ServiceFailure::incompatible}}));
+    EXPECT_EQ(creates, 0U);
+}
+
+TEST_F(PortalProbeTest, RejectsBackendWithoutWindowSources) {
+    backend_sources = 1;
+    ASSERT_TRUE(setup_services());
+    start();
+    ASSERT_TRUE(pump_until([&] { return !reports.empty(); }));
+    EXPECT_EQ(reports,
+              (std::vector{Report{StartupService::capture_backend, ServiceFailure::incompatible}}));
     EXPECT_EQ(creates, 0U);
 }
 

@@ -1,10 +1,13 @@
 #define _GNU_SOURCE
 
 #include "output_capture.h"
+#include "scene_bridge.h"
 
+#include "ext-foreign-toplevel-list-v1-client-protocol.h"
 #include "ext-image-capture-source-v1-client-protocol.h"
 #include "ext-image-copy-capture-v1-client-protocol.h"
 #include "xdg-output-unstable-v1-client-protocol.h"
+#include "xdg-shell-client-protocol.h"
 
 #include <errno.h>
 #include <poll.h>
@@ -22,11 +25,20 @@
 #include <wlr/render/pixman.h>
 #include <wlr/render/swapchain.h>
 #include <wlr/types/wlr_buffer.h>
+#include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_output.h>
+#include <wlr/types/wlr_subcompositor.h>
 
 enum { WIDTH = 48, HEIGHT = 42, CURSOR_SIZE = 4 };
 static const uint32_t BACKGROUND_RGB = 0x00ff00;
 static const uint32_t CURSOR_RGB = 0xff0000;
+static const uint32_t SECOND_RGB = 0x0000ff;
+
+struct listed_window {
+    struct ext_foreign_toplevel_handle_v1 *handle;
+    char title[32], identifier[64];
+    bool done, closed;
+};
 
 struct fixture {
     struct wl_display *server;
@@ -41,15 +53,24 @@ struct fixture {
     struct wl_registry *registry;
     struct wl_shm *shm;
     struct wl_output *client_output;
+    struct wl_output *other_output;
+    struct wl_compositor *compositor;
+    struct wl_subcompositor *subcompositor;
+    struct xdg_wm_base *shell;
+    struct ext_foreign_toplevel_list_v1 *list;
+    struct ext_foreign_toplevel_image_capture_source_manager_v1 *window_manager;
     struct zxdg_output_manager_v1 *layout_manager;
     struct zxdg_output_v1 *layout_output;
     struct ext_output_image_capture_source_manager_v1 *output_manager;
     struct ext_image_copy_capture_manager_v1 *copy_manager;
     struct ext_image_capture_source_v1 *source;
     uint32_t output_name;
+    uint32_t other_name;
     int32_t layout_x, layout_y, layout_width, layout_height;
     bool layout_named, layout_done;
     bool render_failed;
+    bool blue_output;
+    struct listed_window windows[3];
 };
 
 struct capture_client {
@@ -57,6 +78,7 @@ struct capture_client {
     struct ext_image_copy_capture_frame_v1 *frame;
     struct wl_buffer *buffer;
     uint32_t *pixels;
+    size_t mapped;
     uint32_t width, height, format;
     bool constrained, stopped, ready, failed, full_damage, timestamp;
 };
@@ -64,7 +86,7 @@ struct capture_client {
 #define CHECK(condition)                                                                           \
     do {                                                                                           \
         if (!(condition)) {                                                                        \
-            fprintf(stderr, "output capture check failed at %d: %s\n", __LINE__, #condition);      \
+            fprintf(stderr, "capture check failed at %d: %s\n", __LINE__, #condition);             \
             goto done;                                                                             \
         }                                                                                          \
     } while (0)
@@ -119,6 +141,71 @@ static bool sync_client(struct fixture *fixture) {
     return true;
 }
 
+static void window_closed(void *data, struct ext_foreign_toplevel_handle_v1 *handle) {
+    (void)handle;
+    ((struct listed_window *)data)->closed = true;
+}
+
+static void window_done(void *data, struct ext_foreign_toplevel_handle_v1 *handle) {
+    (void)handle;
+    ((struct listed_window *)data)->done = true;
+}
+
+static void window_title(void *data, struct ext_foreign_toplevel_handle_v1 *handle,
+                         const char *title) {
+    (void)handle;
+    struct listed_window *window = data;
+    snprintf(window->title, sizeof(window->title), "%s", title);
+}
+
+static void window_identifier(void *data, struct ext_foreign_toplevel_handle_v1 *handle,
+                              const char *identifier) {
+    (void)handle;
+    struct listed_window *window = data;
+    snprintf(window->identifier, sizeof(window->identifier), "%s", identifier);
+}
+
+static void window_app_id(void *data, struct ext_foreign_toplevel_handle_v1 *handle,
+                          const char *app_id) {
+    (void)data;
+    (void)handle;
+    (void)app_id;
+}
+
+static const struct ext_foreign_toplevel_handle_v1_listener window_listener = {
+    .closed = window_closed,
+    .done = window_done,
+    .title = window_title,
+    .identifier = window_identifier,
+    .app_id = window_app_id,
+};
+
+static void foreign_toplevel(void *data, struct ext_foreign_toplevel_list_v1 *list,
+                             struct ext_foreign_toplevel_handle_v1 *handle) {
+    (void)list;
+    struct fixture *fixture = data;
+    for (size_t i = 0; i < sizeof(fixture->windows) / sizeof(fixture->windows[0]); ++i) {
+        struct listed_window *window = &fixture->windows[i];
+        if (!window->handle) {
+            window->handle = handle;
+            ext_foreign_toplevel_handle_v1_add_listener(handle, &window_listener, window);
+            return;
+        }
+    }
+    ext_foreign_toplevel_handle_v1_destroy(handle);
+    fixture->render_failed = true;
+}
+
+static void foreign_finished(void *data, struct ext_foreign_toplevel_list_v1 *list) {
+    (void)data;
+    (void)list;
+}
+
+static const struct ext_foreign_toplevel_list_v1_listener list_listener = {
+    .toplevel = foreign_toplevel,
+    .finished = foreign_finished,
+};
+
 static void registry_add(void *data, struct wl_registry *registry, uint32_t name,
                          const char *interface, uint32_t version) {
     (void)version;
@@ -126,8 +213,13 @@ static void registry_add(void *data, struct wl_registry *registry, uint32_t name
     if (strcmp(interface, wl_shm_interface.name) == 0) {
         fixture->shm = wl_registry_bind(registry, name, &wl_shm_interface, 1);
     } else if (strcmp(interface, wl_output_interface.name) == 0) {
-        fixture->client_output = wl_registry_bind(registry, name, &wl_output_interface, 4);
-        fixture->output_name = name;
+        if (!fixture->client_output) {
+            fixture->client_output = wl_registry_bind(registry, name, &wl_output_interface, 4);
+            fixture->output_name = name;
+        } else {
+            fixture->other_output = wl_registry_bind(registry, name, &wl_output_interface, 4);
+            fixture->other_name = name;
+        }
     } else if (strcmp(interface, zxdg_output_manager_v1_interface.name) == 0) {
         fixture->layout_manager =
             wl_registry_bind(registry, name, &zxdg_output_manager_v1_interface, 2);
@@ -137,6 +229,20 @@ static void registry_add(void *data, struct wl_registry *registry, uint32_t name
     } else if (strcmp(interface, ext_image_copy_capture_manager_v1_interface.name) == 0) {
         fixture->copy_manager =
             wl_registry_bind(registry, name, &ext_image_copy_capture_manager_v1_interface, 1);
+    } else if (strcmp(interface, wl_compositor_interface.name) == 0) {
+        fixture->compositor = wl_registry_bind(registry, name, &wl_compositor_interface, 4);
+    } else if (strcmp(interface, wl_subcompositor_interface.name) == 0) {
+        fixture->subcompositor = wl_registry_bind(registry, name, &wl_subcompositor_interface, 1);
+    } else if (strcmp(interface, xdg_wm_base_interface.name) == 0) {
+        fixture->shell = wl_registry_bind(registry, name, &xdg_wm_base_interface, 1);
+    } else if (strcmp(interface, ext_foreign_toplevel_list_v1_interface.name) == 0) {
+        fixture->list =
+            wl_registry_bind(registry, name, &ext_foreign_toplevel_list_v1_interface, 1);
+        ext_foreign_toplevel_list_v1_add_listener(fixture->list, &list_listener, fixture);
+    } else if (strcmp(interface,
+                      ext_foreign_toplevel_image_capture_source_manager_v1_interface.name) == 0) {
+        fixture->window_manager = wl_registry_bind(
+            registry, name, &ext_foreign_toplevel_image_capture_source_manager_v1_interface, 1);
     }
 }
 
@@ -150,6 +256,9 @@ static void registry_remove(void *data, struct wl_registry *registry, uint32_t n
         }
         wl_output_release(fixture->client_output);
         fixture->client_output = NULL;
+    } else if (fixture->other_output && fixture->other_name == name) {
+        wl_output_release(fixture->other_output);
+        fixture->other_output = NULL;
     }
 }
 
@@ -230,7 +339,9 @@ static void render_output(struct wl_listener *listener, void *data) {
     } else {
         wlr_render_pass_add_rect(pass, &(struct wlr_render_rect_options){
                                            .box = {.width = WIDTH, .height = HEIGHT},
-                                           .color = {.g = 1, .a = 1},
+                                           .color = fixture->blue_output
+                                                        ? (struct wlr_render_color){.b = 1, .a = 1}
+                                                        : (struct wlr_render_color){.g = 1, .a = 1},
                                        });
         fixture->render_failed =
             !wlr_render_pass_submit(pass) || !wlr_output_commit_state(output, &state);
@@ -341,11 +452,14 @@ static bool start_session(struct fixture *fixture, struct capture_client *client
 }
 
 static bool create_buffer(struct fixture *fixture, struct capture_client *client) {
-    if (client->width != WIDTH || client->height != HEIGHT ||
+    if (client->width == 0 || client->height == 0 || client->width > 128 || client->height > 128 ||
         (client->format != WL_SHM_FORMAT_XRGB8888 && client->format != WL_SHM_FORMAT_ARGB8888)) {
         return false;
     }
-    const int size = WIDTH * HEIGHT * sizeof(uint32_t);
+    const int32_t width = (int32_t)client->width;
+    const int32_t height = (int32_t)client->height;
+    const int32_t stride = width * (int32_t)sizeof(uint32_t);
+    const int32_t size = stride * height;
     int fd = memfd_create("seaside-capture-fixture", MFD_CLOEXEC);
     if (fd < 0) {
         return false;
@@ -360,13 +474,13 @@ static bool create_buffer(struct fixture *fixture, struct capture_client *client
         return false;
     }
     client->pixels = mapping;
+    client->mapped = size;
     struct wl_shm_pool *pool = wl_shm_create_pool(fixture->shm, fd, size);
     close(fd);
     if (!pool) {
         return false;
     }
-    client->buffer =
-        wl_shm_pool_create_buffer(pool, 0, WIDTH, HEIGHT, WIDTH * sizeof(uint32_t), client->format);
+    client->buffer = wl_shm_pool_create_buffer(pool, 0, width, height, stride, client->format);
     wl_shm_pool_destroy(pool);
     return client->buffer != NULL;
 }
@@ -382,7 +496,8 @@ static void on_damage(void *data, struct ext_image_copy_capture_frame_v1 *frame,
                       int32_t y, int32_t width, int32_t height) {
     (void)frame;
     struct capture_client *client = data;
-    client->full_damage |= x == 0 && y == 0 && width == WIDTH && height == HEIGHT;
+    client->full_damage |=
+        x == 0 && y == 0 && width == (int32_t)client->width && height == (int32_t)client->height;
 }
 
 static void on_time(void *data, struct ext_image_copy_capture_frame_v1 *frame, uint32_t sec_hi,
@@ -426,7 +541,8 @@ static bool request_capture(struct capture_client *client) {
     }
     ext_image_copy_capture_frame_v1_add_listener(client->frame, &frame_listener, client);
     ext_image_copy_capture_frame_v1_attach_buffer(client->frame, client->buffer);
-    ext_image_copy_capture_frame_v1_damage_buffer(client->frame, 0, 0, WIDTH, HEIGHT);
+    ext_image_copy_capture_frame_v1_damage_buffer(client->frame, 0, 0, (int32_t)client->width,
+                                                  (int32_t)client->height);
     ext_image_copy_capture_frame_v1_capture(client->frame);
     return true;
 }
@@ -451,6 +567,17 @@ static bool check_pixels(const struct capture_client *client, bool cursors, int 
     return true;
 }
 
+static void release_buffer(struct capture_client *client) {
+    if (client->buffer) {
+        wl_buffer_destroy(client->buffer);
+        client->buffer = NULL;
+    }
+    if (client->pixels) {
+        munmap(client->pixels, client->mapped);
+        client->pixels = NULL;
+    }
+}
+
 static void finish_session(struct capture_client *client) {
     if (client->frame) {
         ext_image_copy_capture_frame_v1_destroy(client->frame);
@@ -458,12 +585,7 @@ static void finish_session(struct capture_client *client) {
     if (client->session) {
         ext_image_copy_capture_session_v1_destroy(client->session);
     }
-    if (client->buffer) {
-        wl_buffer_destroy(client->buffer);
-    }
-    if (client->pixels) {
-        munmap(client->pixels, WIDTH * HEIGHT * sizeof(uint32_t));
-    }
+    release_buffer(client);
     *client = (struct capture_client){0};
 }
 
@@ -476,7 +598,315 @@ static bool capture_pair(struct fixture *fixture, struct capture_client *hidden,
            fixture->output->software_cursor_locks == 0 && fixture->output->attach_render_locks == 1;
 }
 
-int main(void) {
+static bool plain_frame(const struct capture_client *client, uint32_t rgb) {
+    if (!client->ready || client->failed || !client->timestamp || !client->full_damage) {
+        return false;
+    }
+    for (size_t i = 0; i < (size_t)client->width * client->height; ++i) {
+        if ((client->pixels[i] & 0xffffff) != rgb) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool check_two_outputs(struct fixture *fixture) {
+    bool passed = false;
+    struct fixture second = {.server = fixture->server,
+                             .backend = fixture->backend,
+                             .allocator = fixture->allocator,
+                             .renderer = fixture->renderer,
+                             .blue_output = true};
+    struct capture_client first_frames = {0}, second_frames = {0};
+    struct ext_image_capture_source_v1 *first_source = NULL;
+    CHECK(add_output(&second));
+    CHECK(seaside_output_capture_add_output(fixture->capture, second.output, WIDTH, -3));
+    CHECK(sync_client(fixture) && sync_client(fixture) && fixture->other_output);
+    first_source = fixture->source;
+    CHECK(start_session(fixture, &first_frames, 0));
+    fixture->source = ext_output_image_capture_source_manager_v1_create_source(
+        fixture->output_manager, fixture->other_output);
+    CHECK(fixture->source && start_session(fixture, &second_frames, 0));
+    CHECK(pump_until(fixture, &first_frames.constrained) && create_buffer(fixture, &first_frames));
+    CHECK(pump_until(fixture, &second_frames.constrained) &&
+          create_buffer(fixture, &second_frames));
+    CHECK(request_capture(&first_frames) && request_capture(&second_frames));
+    CHECK(pump_until(fixture, &first_frames.ready) && plain_frame(&first_frames, BACKGROUND_RGB));
+    CHECK(pump_until(fixture, &second_frames.ready) && plain_frame(&second_frames, SECOND_RGB));
+    remove_output(&second);
+    CHECK(pump_until(fixture, &second_frames.stopped) && !first_frames.stopped);
+    CHECK(request_capture(&first_frames) && pump_until(fixture, &first_frames.ready) &&
+          plain_frame(&first_frames, BACKGROUND_RGB));
+    passed = !second.render_failed;
+
+done:
+    finish_session(&first_frames);
+    finish_session(&second_frames);
+    if (first_source) {
+        if (fixture->source) {
+            ext_image_capture_source_v1_destroy(fixture->source);
+        }
+        fixture->source = first_source;
+    }
+    remove_output(&second);
+    return passed;
+}
+
+struct painted_window {
+    struct wl_surface *surface;
+    struct xdg_surface *xdg;
+    struct xdg_toplevel *toplevel;
+    bool configured;
+};
+
+static void xdg_configure(void *data, struct xdg_surface *surface, uint32_t serial) {
+    ((struct painted_window *)data)->configured = true;
+    xdg_surface_ack_configure(surface, serial);
+}
+
+static const struct xdg_surface_listener xdg_listener = {.configure = xdg_configure};
+
+static void top_configure(void *data, struct xdg_toplevel *toplevel, int32_t width, int32_t height,
+                          struct wl_array *states) {
+    (void)data;
+    (void)toplevel;
+    (void)width;
+    (void)height;
+    (void)states;
+}
+
+static const struct xdg_toplevel_listener top_listener = {.configure = top_configure};
+
+static bool paint(struct fixture *fixture, struct wl_surface *surface, uint32_t width,
+                  uint32_t height, uint32_t rgb) {
+    struct capture_client paint = {
+        .width = width, .height = height, .format = WL_SHM_FORMAT_XRGB8888};
+    if (!create_buffer(fixture, &paint)) {
+        release_buffer(&paint);
+        return false;
+    }
+    for (size_t i = 0; i < (size_t)width * height; ++i) {
+        paint.pixels[i] = rgb;
+    }
+    wl_surface_attach(surface, paint.buffer, 0, 0);
+    wl_surface_damage_buffer(surface, 0, 0, (int32_t)width, (int32_t)height);
+    wl_surface_commit(surface);
+    release_buffer(&paint);
+    return true;
+}
+
+static bool map_painted_window(struct fixture *fixture, struct painted_window *window,
+                               const char *name, uint32_t rgb) {
+    window->surface = wl_compositor_create_surface(fixture->compositor);
+    if (!window->surface) {
+        return false;
+    }
+    window->xdg = xdg_wm_base_get_xdg_surface(fixture->shell, window->surface);
+    if (!window->xdg) {
+        return false;
+    }
+    window->toplevel = xdg_surface_get_toplevel(window->xdg);
+    if (!window->toplevel) {
+        return false;
+    }
+    xdg_surface_add_listener(window->xdg, &xdg_listener, window);
+    xdg_toplevel_add_listener(window->toplevel, &top_listener, window);
+    xdg_toplevel_set_title(window->toplevel, name);
+    xdg_toplevel_set_app_id(window->toplevel, "seaside-capture-fixture");
+    wl_surface_commit(window->surface);
+    return pump_until(fixture, &window->configured) && paint(fixture, window->surface, 20, 14, rgb);
+}
+
+static void close_painted_window(struct painted_window *window) {
+    if (window->toplevel) {
+        xdg_toplevel_destroy(window->toplevel);
+    }
+    if (window->xdg) {
+        xdg_surface_destroy(window->xdg);
+    }
+    if (window->surface) {
+        wl_surface_destroy(window->surface);
+    }
+    *window = (struct painted_window){0};
+}
+
+struct window_placement {
+    struct seaside_scene_bridge *scene;
+    uint64_t next_id;
+};
+
+static void place_window(struct seaside_scene_bridge *scene, uint64_t id, int x, int y,
+                         bool visible) {
+    const struct seaside_scene_window_placement placement = {
+        .geometry = {x, y, 20, 14},
+        .output = {0, 0, WIDTH, HEIGHT},
+        .clip = {0, 0, WIDTH, HEIGHT},
+        .stacking = id,
+        .visible = visible,
+    };
+    seaside_scene_place_window(scene, id, &placement);
+}
+
+static uint64_t window_event(void *data, const struct seaside_scene_window_event *event) {
+    struct window_placement *placement = data;
+    if (event->kind == SEASIDE_WINDOW_CREATED) {
+        return ++placement->next_id;
+    }
+    if (event->kind == SEASIDE_WINDOW_MAPPED) {
+        place_window(placement->scene, event->id, 2, 3, true);
+    }
+    return 0;
+}
+
+static bool pump_for(struct fixture *fixture, long milliseconds) {
+    struct timespec start, now;
+    if (clock_gettime(CLOCK_MONOTONIC, &start) != 0) {
+        return false;
+    }
+    do {
+        if (!transfer_messages(fixture) || clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
+            return false;
+        }
+    } while ((now.tv_sec - start.tv_sec) * 1000 + (now.tv_nsec - start.tv_nsec) / 1000000 <
+             milliseconds);
+    return true;
+}
+
+static bool check_selected_window(struct fixture *fixture) {
+    bool passed = false;
+    struct painted_window selected = {0}, occluding = {0};
+    struct seaside_scene_bridge *scene = seaside_scene_create(fixture->server);
+    struct window_placement placement = {.scene = scene};
+    struct capture_client window = {0}, stale = {0};
+    struct wl_surface *child = NULL;
+    struct wl_subsurface *subsurface = NULL;
+    struct ext_image_capture_source_v1 *selected_source = NULL, *stale_source = NULL;
+    struct wl_callback *idle_callback = NULL;
+    bool idle_frame = false, hidden_frame = false;
+    CHECK(scene && wlr_compositor_create(fixture->server, 6, fixture->renderer));
+    CHECK(wlr_subcompositor_create(fixture->server));
+    CHECK(seaside_scene_enable_window_capture(scene, fixture->allocator, fixture->renderer));
+    wl_list_remove(&fixture->output_frame.link);
+    wl_list_init(&fixture->output_frame.link);
+    CHECK(seaside_scene_add_output(scene, fixture->output));
+    CHECK(seaside_scene_place_output(scene, fixture->output, 0, 0));
+    seaside_scene_set_window_handler(scene, window_event, &placement);
+    CHECK(!seaside_scene_window_capture_client_ready(scene, getpid(), getuid()));
+    CHECK(sync_client(fixture) && sync_client(fixture));
+    CHECK(fixture->compositor && fixture->subcompositor && fixture->shell &&
+          fixture->window_manager && fixture->list);
+    CHECK(seaside_scene_window_capture_client_ready(scene, getpid(), getuid()));
+    CHECK(!seaside_scene_window_capture_client_ready(scene, getpid(), getuid() + 1));
+    CHECK(!seaside_scene_window_capture_client_ready(scene, getpid() + 1, getuid()));
+
+    CHECK(map_painted_window(fixture, &selected, "selected", CURSOR_RGB));
+    CHECK(map_painted_window(fixture, &occluding, "overlap", SECOND_RGB));
+    CHECK(pump_until(fixture, &fixture->windows[0].done) &&
+          pump_until(fixture, &fixture->windows[1].done));
+    CHECK(placement.next_id == 2 && strcmp(fixture->windows[0].title, "selected") == 0 &&
+          strcmp(fixture->windows[1].title, "overlap") == 0 &&
+          strcmp(fixture->windows[0].identifier, fixture->windows[1].identifier) != 0);
+
+    selected_source = ext_foreign_toplevel_image_capture_source_manager_v1_create_source(
+        fixture->window_manager, fixture->windows[0].handle);
+    CHECK(selected_source);
+    ext_image_capture_source_v1_destroy(fixture->source);
+    fixture->source = selected_source;
+    CHECK(start_session(fixture, &window, 0));
+    CHECK(pump_until(fixture, &window.constrained) && window.width == 20 && window.height == 14 &&
+          create_buffer(fixture, &window));
+    CHECK(request_capture(&window) && pump_until(fixture, &window.ready) &&
+          plain_frame(&window, CURSOR_RGB));
+
+    // Moving and then hiding the selected scene view must not change its source.
+    place_window(scene, 1, 25, 9, true);
+    place_window(scene, 1, 25, 9, false);
+    CHECK(request_capture(&window));
+    CHECK(paint(fixture, occluding.surface, 20, 14, BACKGROUND_RGB));
+    CHECK(pump_for(fixture, 45) && !window.ready);
+    struct wl_callback *callback = wl_surface_frame(selected.surface);
+    CHECK(callback);
+    wl_callback_add_listener(callback, &sync_listener, &hidden_frame);
+    wl_surface_commit(selected.surface);
+    CHECK(pump_until(fixture, &hidden_frame));
+    CHECK(paint(fixture, selected.surface, 20, 14, SECOND_RGB));
+    CHECK(pump_until(fixture, &window.ready) && plain_frame(&window, SECOND_RGB));
+
+    window.constrained = false;
+    CHECK(paint(fixture, selected.surface, 27, 15, BACKGROUND_RGB));
+    CHECK(pump_until(fixture, &window.constrained) && window.width == 27 && window.height == 15);
+    release_buffer(&window);
+    CHECK(create_buffer(fixture, &window) && request_capture(&window) &&
+          pump_until(fixture, &window.ready) && plain_frame(&window, BACKGROUND_RGB));
+    CHECK(!fixture->windows[0].closed && !fixture->windows[2].handle);
+
+    child = wl_compositor_create_surface(fixture->compositor);
+    CHECK(child);
+    subsurface = wl_subcompositor_get_subsurface(fixture->subcompositor, child, selected.surface);
+    CHECK(subsurface);
+    wl_subsurface_set_position(subsurface, 3, 4);
+    CHECK(request_capture(&window) && paint(fixture, child, 6, 5, CURSOR_RGB));
+    wl_surface_commit(selected.surface);
+    CHECK(pump_until(fixture, &window.ready) && !window.failed && window.full_damage &&
+          (window.pixels[4 * window.width + 3] & 0xffffff) == CURSOR_RGB &&
+          (window.pixels[0] & 0xffffff) == BACKGROUND_RGB);
+    wl_subsurface_destroy(subsurface);
+    subsurface = NULL;
+    wl_surface_destroy(child);
+    child = NULL;
+
+    finish_session(&window);
+    CHECK(sync_client(fixture));
+    idle_callback = wl_surface_frame(selected.surface);
+    CHECK(idle_callback);
+    wl_callback_add_listener(idle_callback, &sync_listener, &idle_frame);
+    wl_surface_commit(selected.surface);
+    CHECK(pump_for(fixture, 55) && !idle_frame);
+    wl_callback_destroy(idle_callback);
+    idle_callback = NULL;
+
+    CHECK(start_session(fixture, &window, 0) && pump_until(fixture, &window.constrained) &&
+          create_buffer(fixture, &window));
+    CHECK(request_capture(&window) && pump_until(fixture, &window.ready));
+    CHECK(request_capture(&window));
+    close_painted_window(&selected);
+    CHECK(pump_until(fixture, &window.stopped) && window.failed && fixture->windows[0].closed &&
+          !fixture->windows[1].closed);
+    stale_source = ext_foreign_toplevel_image_capture_source_manager_v1_create_source(
+        fixture->window_manager, fixture->windows[0].handle);
+    CHECK(stale_source);
+    fixture->source = stale_source;
+    CHECK(start_session(fixture, &stale, 0) && pump_until(fixture, &stale.stopped) &&
+          !stale.constrained);
+    passed = true;
+
+done:
+    if (idle_callback && !idle_frame) {
+        wl_callback_destroy(idle_callback);
+    }
+    if (subsurface) {
+        wl_subsurface_destroy(subsurface);
+    }
+    if (child) {
+        wl_surface_destroy(child);
+    }
+    finish_session(&window);
+    finish_session(&stale);
+    if (stale_source) {
+        ext_image_capture_source_v1_destroy(stale_source);
+    }
+    if (selected_source) {
+        ext_image_capture_source_v1_destroy(selected_source);
+        fixture->source = NULL;
+    }
+    close_painted_window(&selected);
+    close_painted_window(&occluding);
+    seaside_scene_destroy(scene);
+    return passed;
+}
+
+int main(int argc, char **argv) {
+    const bool part7 = argc == 2 && strcmp(argv[1], "part7") == 0;
     int result = 1;
     struct fixture fixture = {0};
     struct capture_client hidden = {0}, embedded = {0}, resumed = {0};
@@ -492,8 +922,9 @@ int main(void) {
     CHECK(wlr_renderer_init_wl_shm(fixture.renderer, fixture.server));
     CHECK(wlr_backend_start(fixture.backend));
     CHECK(add_output(&fixture));
-    fixture.capture = seaside_output_capture_create(fixture.server, fixture.output);
-    CHECK(fixture.capture);
+    fixture.capture = seaside_output_capture_create(fixture.server);
+    CHECK(fixture.capture &&
+          seaside_output_capture_add_output(fixture.capture, fixture.output, 0, 0));
     CHECK(!seaside_output_capture_client_ready(fixture.capture, getpid(), getuid()));
 
     int socket_fds[2];
@@ -527,6 +958,7 @@ int main(void) {
     CHECK(capture_pair(&fixture, &hidden, &embedded, 12, 21));
     CHECK(wlr_output_cursor_move(fixture.cursor, 25, 30));
     CHECK(capture_pair(&fixture, &hidden, &embedded, 25, 30));
+    CHECK(!part7 || check_two_outputs(&fixture));
 
     remove_output(&fixture);
     CHECK(pump_until(&fixture, &hidden.stopped) && pump_until(&fixture, &embedded.stopped));
@@ -537,7 +969,7 @@ int main(void) {
     fixture.source = NULL;
 
     CHECK(add_output(&fixture)); // A recovered output uses the existing client manager bindings.
-    CHECK(seaside_output_capture_set_output(fixture.capture, fixture.output));
+    CHECK(seaside_output_capture_add_output(fixture.capture, fixture.output, 0, 0));
     CHECK(sync_client(&fixture) && sync_client(&fixture));
     CHECK(verify_layout(&fixture));
     CHECK(seaside_output_capture_client_ready(fixture.capture, getpid(), getuid()));
@@ -553,8 +985,13 @@ int main(void) {
     CHECK(fixture.output->software_cursor_locks == 0);
     finish_session(&resumed);
     CHECK(sync_client(&fixture) && fixture.output->attach_render_locks == 0);
+    CHECK(!part7 || check_selected_window(&fixture));
     puts("output capture PASS hidden=2 embedded=3 moved=yes reattached=yes layout=yes "
          "cursor-locks=0");
+    if (part7) {
+        puts("selected window capture PASS isolated-pixels=no-overlap hidden-updates=yes "
+             "resized=yes subsurface=yes idle-callbacks=0 loss=stopped two-outputs=yes");
+    }
     result = 0;
 
 done:
@@ -578,6 +1015,29 @@ done:
     }
     if (fixture.client_output) {
         wl_output_release(fixture.client_output);
+    }
+    if (fixture.other_output) {
+        wl_output_release(fixture.other_output);
+    }
+    for (size_t i = 0; i < sizeof(fixture.windows) / sizeof(fixture.windows[0]); ++i) {
+        if (fixture.windows[i].handle) {
+            ext_foreign_toplevel_handle_v1_destroy(fixture.windows[i].handle);
+        }
+    }
+    if (fixture.window_manager) {
+        ext_foreign_toplevel_image_capture_source_manager_v1_destroy(fixture.window_manager);
+    }
+    if (fixture.list) {
+        ext_foreign_toplevel_list_v1_destroy(fixture.list);
+    }
+    if (fixture.shell) {
+        xdg_wm_base_destroy(fixture.shell);
+    }
+    if (fixture.subcompositor) {
+        wl_subcompositor_destroy(fixture.subcompositor);
+    }
+    if (fixture.compositor) {
+        wl_compositor_destroy(fixture.compositor);
     }
     if (fixture.shm) {
         wl_shm_destroy(fixture.shm);

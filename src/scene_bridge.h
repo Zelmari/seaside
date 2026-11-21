@@ -7,9 +7,11 @@
 #include <sys/types.h>
 
 struct wl_display;
+struct wlr_allocator;
 struct wlr_buffer;
 struct wlr_drag_icon;
 struct wlr_output;
+struct wlr_renderer;
 struct wlr_surface;
 struct seaside_scene_bridge;
 
@@ -115,6 +117,12 @@ void seaside_scene_set_appearance_handler(struct seaside_scene_bridge *scene,
 
 void seaside_scene_set_window_handler(struct seaside_scene_bridge *scene,
                                       seaside_scene_window_fn handler, void *data);
+/* Install the selected-window protocols before dispatching client maps. */
+bool seaside_scene_enable_window_capture(struct seaside_scene_bridge *scene,
+                                         struct wlr_allocator *allocator,
+                                         struct wlr_renderer *renderer);
+bool seaside_scene_window_capture_client_ready(const struct seaside_scene_bridge *scene, pid_t pid,
+                                               uid_t uid);
 void seaside_scene_place_window(struct seaside_scene_bridge *scene, uint64_t id,
                                 const struct seaside_scene_window_placement *placement);
 struct wlr_surface *seaside_scene_window_surface(struct seaside_scene_bridge *scene, uint64_t id);

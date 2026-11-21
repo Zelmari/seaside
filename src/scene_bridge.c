@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "scene_bridge.h"
+#include "window_capture.h"
 
 #include <drm_fourcc.h>
 #include <limits.h>
@@ -21,6 +22,7 @@ struct seaside_scene_bridge {
     struct wlr_buffer *wallpaper;
     struct wlr_xdg_shell *shell;
     struct wlr_xdg_activation_v1 *activation;
+    struct seaside_window_capture *capture;
     struct wl_list views;
     struct wl_list popups;
     struct wl_list outputs;
@@ -43,6 +45,7 @@ struct seaside_scene_bridge {
 struct scene_view {
     struct seaside_scene_bridge *owner;
     struct wlr_xdg_toplevel *toplevel;
+    struct seaside_window_source *capture;
     struct wlr_scene_tree *tree;
     struct wlr_scene_tree *xdg_tree;
     struct wlr_scene_rect *fullscreen_background;
@@ -286,11 +289,19 @@ static void view_map(struct wl_listener *listener, void *data) {
         wlr_scene_node_set_enabled(&view->tree->node, true);
         consider_focus(view);
     }
+    if (view->owner->capture && !view->capture) {
+        view->capture = seaside_window_capture_map(
+            view->owner->capture, view->toplevel,
+            view->id ? view->placement.visible && has_viewport(view->placement.clip)
+                     : !wl_list_empty(&view->owner->outputs));
+    }
 }
 
 static void view_unmap(struct wl_listener *listener, void *data) {
     (void)data;
     struct scene_view *view = wl_container_of(listener, view, unmap);
+    seaside_window_capture_unmap(view->capture);
+    view->capture = NULL;
     if (view->mapped) {
         view->mapped = false;
         view->owner->snapshot.mapped_toplevels--;
@@ -366,6 +377,7 @@ static void view_set_parent(struct wl_listener *listener, void *data) {
 }
 
 static void destroy_view(struct scene_view *view) {
+    seaside_window_capture_unmap(view->capture);
     if (view->owner->focused_view == view) {
         end_focus(view->owner, false);
     }
@@ -707,6 +719,8 @@ static void detach(struct seaside_scene_bridge *scene) {
     wl_list_for_each_safe(view, next_view, &scene->views, link) {
         destroy_view(view);
     }
+    seaside_window_capture_destroy(scene->capture);
+    scene->capture = NULL;
     while (!wl_list_empty(&scene->outputs)) {
         struct scene_output *output = wl_container_of(scene->outputs.next, output, link);
         wlr_scene_output_destroy(output->viewport);
@@ -928,6 +942,21 @@ void seaside_scene_set_window_handler(struct seaside_scene_bridge *scene,
     }
 }
 
+bool seaside_scene_enable_window_capture(struct seaside_scene_bridge *scene,
+                                         struct wlr_allocator *allocator,
+                                         struct wlr_renderer *renderer) {
+    if (!scene || !scene->attached || scene->capture) {
+        return false;
+    }
+    scene->capture = seaside_window_capture_create(scene->display, allocator, renderer);
+    return scene->capture != NULL;
+}
+
+bool seaside_scene_window_capture_client_ready(const struct seaside_scene_bridge *scene, pid_t pid,
+                                               uid_t uid) {
+    return scene && seaside_window_capture_client_ready(scene->capture, pid, uid);
+}
+
 static bool below(const struct scene_view *left, const struct scene_view *right) {
     if (left->placement.stacking != right->placement.stacking) {
         return left->placement.stacking < right->placement.stacking;
@@ -1012,6 +1041,8 @@ void seaside_scene_place_window(struct seaside_scene_bridge *scene, uint64_t id,
     clip_view_popups(view);
     project_borders(view);
     wlr_scene_node_set_enabled(&view->tree->node, view->mapped && placement->visible);
+    seaside_window_capture_presented(view->capture,
+                                     placement->visible && has_viewport(placement->clip));
     if (placement->visible && (!previous.visible || placement->stacking != previous.stacking)) {
         restack_view(view);
     }
