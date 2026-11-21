@@ -364,23 +364,35 @@ def run_audio(session, state):
         return output(["pactl", *args], env=session.env)
 
     default_key = "default.configured.audio.sink"
+    history_key = "node.restore-default-targets"
 
-    def metadata(*args):
-        return output(["pw-metadata", "-n", "default", *args], env=session.env)
+    def metadata(name, *args):
+        return output(["pw-metadata", "-n", name, *args], env=session.env)
 
-    def configured_sink():
-        prefix = f"update: id:0 key:'{default_key}' value:'"
-        for row in metadata("0", default_key).splitlines():
+    def read_metadata(name, key):
+        prefix = f"update: id:0 key:'{key}' value:'"
+        for row in metadata(name, "0", key).splitlines():
             if row.startswith(prefix):
                 value, marker, kind = row[len(prefix):].rpartition("' type:'")
-                require(bool(marker) and kind.endswith("'"), "Could not parse default sink metadata")
+                require(bool(marker) and kind.endswith("'"), f"Could not parse audio metadata {key}")
                 return value, kind[:-1]
         return None
 
-    previous = configured_sink()
+    previous = read_metadata("default", default_key)
+    history = read_metadata("sm-settings", history_key)
+    require(history and history[0] in ("true", "false"), "WirePlumber history setting is unavailable")
+
+    def set_history(value):
+        # Without --save this applies only to the running session manager.
+        output(["wpctl", "settings", history_key, value], env=session.env)
+        wait_for(lambda: read_metadata("sm-settings", history_key) == (value, history[1]),
+                 5, "WirePlumber history setting " + value)
+
     modules = []
     sink_name = f"seaside_part7_{session.process.pid}"
     try:
+        if history[0] == "true":
+            set_history("false")
         for suffix in ("_a", "_b"):
             modules.append(pulse("load-module", "module-null-sink", "sink_name=" + sink_name + suffix))
         first = sink_name + "_a"
@@ -454,13 +466,18 @@ def run_audio(session, state):
     finally:
         try:
             if previous is None:
-                metadata("-d", "0", default_key)
+                metadata("default", "-d", "0", default_key)
             else:
-                metadata("0", default_key, *previous)
-            wait_for(lambda: configured_sink() == previous, 5, "restored configured audio sink")
+                metadata("default", "0", default_key, *previous)
+            wait_for(lambda: read_metadata("default", default_key) == previous,
+                     5, "restored configured audio sink")
         finally:
-            for module in reversed(modules):
-                pulse("unload-module", module)
+            try:
+                for module in reversed(modules):
+                    pulse("unload-module", module)
+            finally:
+                if history[0] == "true":
+                    set_history("true")
 
 
 def run_portal_loss(session, results, state):
