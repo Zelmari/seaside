@@ -93,9 +93,11 @@ class IpcFixture : public ::testing::Test {
             const auto sent = send(fd, bytes.data(), bytes.size(), MSG_NOSIGNAL);
             if (sent > 0) {
                 bytes.remove_prefix(static_cast<std::size_t>(sent));
-            } else {
+            } else if (sent < 0) {
                 ASSERT_EQ(errno, EAGAIN);
                 ASSERT_EQ(wl_event_loop_dispatch(loop, 1), 0);
+            } else {
+                FAIL() << "Test socket made no send progress";
             }
         }
         ASSERT_TRUE(bytes.empty());
@@ -106,7 +108,7 @@ class IpcFixture : public ::testing::Test {
         for (int rounds = 0; rounds < 400; ++rounds) {
             if (auto newline = wire.find('\n'); newline != std::string::npos) {
                 auto response =
-                    IpcJson::parse(wire.begin(), wire.begin() + newline, nullptr, false);
+                    IpcJson::parse(std::string_view(wire).substr(0, newline), nullptr, false);
                 wire.erase(0, newline + 1);
                 return response;
             }
