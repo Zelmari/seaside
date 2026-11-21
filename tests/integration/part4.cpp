@@ -1,6 +1,8 @@
 #include "desktop.hpp"
+#include "live_config.hpp"
 #include "part3_bridge.h"
 #include "server.hpp"
+#include "test_directory.hpp"
 #include "wlroots_bridge.h"
 #include "xdg-activation-v1-client-protocol.h"
 #include "xdg-shell-client-protocol.h"
@@ -11,6 +13,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <linux/input-event-codes.h>
 #include <memory>
 #include <poll.h>
@@ -852,6 +856,60 @@ bool run_attention(const Fixture &fixture) {
     return true;
 }
 
+bool run_binding_reload(const Fixture &fixture) {
+    auto &desktop = fixture.desktop;
+    const auto &windows = desktop.windows();
+    auto output = fixture.output();
+    REQUIRE(output);
+    REQUIRE(desktop.add_output(part3_output_handle(output.get()), "reload", {}, output_bounds));
+    Connection connection(fixture.display);
+    Client first, second;
+    WindowId a{}, b{};
+    REQUIRE(map_tiled(fixture, connection, first, a, 148, 78, 0, red));
+    REQUIRE(map_tiled(fixture, connection, second, b, 69, 78, 0, blue));
+    REQUIRE(wait_tiled(connection, first, 69, 78));
+    REQUIRE(connection.attach_configured(first));
+    const auto left = windows.view(a).geometry;
+    const auto right = windows.view(b).geometry;
+
+    const seaside::test::Directory directory;
+    const seaside::ConfigPaths paths{directory.path() / "config.toml",
+                                     directory.path() / "state/last-good.toml"};
+    const seaside::ConfigStore store;
+    const std::string initial = "[window]\ngaps_outer=4\ngaps_inner=6\n";
+    REQUIRE(store.publish(paths.user, initial, seaside::PublishMode::create_user_file));
+    seaside::LiveConfig *controller = nullptr;
+    auto reload = seaside::LiveConfig::create(
+        wl_display_get_event_loop(fixture.display), store, paths,
+        seaside::load_startup_config(store, paths), {}, {},
+        [&](seaside::LiveConfig::Change change, const auto &) {
+            if (change == seaside::LiveConfig::Change::committed) {
+                // The production session projects the committed binding map here.
+                desktop.apply_config(controller->transaction().active());
+            }
+        });
+    REQUIRE(reload);
+    controller = reload->get();
+
+    REQUIRE(begin_drag(fixture, b, BTN_LEFT, right.x + 6, 45));
+    desktop.motion(20, 45);
+    REQUIRE(!windows.view(b).tile_layout && windows.view(a).geometry.width == 148);
+    const auto replacement = directory.path() / "editor.tmp";
+    REQUIRE(static_cast<bool>(std::ofstream(replacement) << initial << "[keybinds]\n"));
+    std::filesystem::rename(replacement, paths.user);
+    REQUIRE(connection.wait(second,
+                            [&] { return (*reload)->transaction().active().keybinds.empty(); }));
+    REQUIRE(windows.view(a).geometry == left && windows.view(b).geometry == right);
+    REQUIRE(wait_tiled(connection, second, right.width, right.height));
+
+    desktop.button(0, BTN_LEFT, false, super, 20, 45);
+    desktop.motion(27, 45);
+    REQUIRE(windows.view(a).geometry == left && windows.view(b).geometry == right);
+    REQUIRE(!desktop.button(b, BTN_LEFT, true, super, right.x + 6, 45));
+    REQUIRE(!desktop.failed());
+    return true;
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -864,6 +922,11 @@ int main(int argc, char **argv) {
     if (argc == 2 && scenario == "attention") {
         config.window.tiling = false;
         return run_fixture(config, run_attention) ? EXIT_SUCCESS : EXIT_FAILURE;
+    }
+    if (argc == 2 && scenario == "binding-reload") {
+        config.window.gaps_outer = 4;
+        config.window.gaps_inner = 6;
+        return run_fixture(config, run_binding_reload) ? EXIT_SUCCESS : EXIT_FAILURE;
     }
     if (argc == 2 && scenario == "dwindle") {
         config.window.gaps_outer = 4;

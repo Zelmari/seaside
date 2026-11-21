@@ -6,9 +6,11 @@ from pathlib import Path
 import re
 import shlex
 import socket
+import struct
 import subprocess
 import tempfile
 import time
+import zlib
 
 
 event = standard["event"]
@@ -102,37 +104,57 @@ def with_autostart(config, marker):
 
 
 class Session:
-    def __init__(self, repo, directory, result_dir, name):
+    def __init__(self, repo, directory, result_dir, name, **environment):
         self.repo = repo
         self.log = result_dir / f"part6-{name}.log"
         self.environment = dict(os.environ, XDG_CONFIG_HOME=str(directory / "config"),
                                 XDG_STATE_HOME=str(directory / "state"), WLR_RENDERER="pixman")
         for key in ("PIPEWIRE_REMOTE", "WAYLAND_DISPLAY", "SEASIDE_SOCKET"):
             self.environment.pop(key, None)
+        self.environment.update(environment)
         self.socket_dir = Path(self.environment["XDG_RUNTIME_DIR"]) / "seaside"
         self.existing_sockets = set(self.socket_dir.glob("wayland-*.sock"))
         self.process = standard["start_seaside"](repo, self.environment, self.log)
 
     def __enter__(self):
         try:
-            wait_for(lambda: re.search(r"^seaside READY cursor-plane=([1-9][0-9]*)$",
-                                       self.log.read_text(errors="replace"), re.MULTILINE),
-                     25, "Part 6 startup and hardware cursor", self.process)
-            sockets = set(self.socket_dir.glob("wayland-*.sock")) - self.existing_sockets
-            require(len(sockets) == 1, f"Expected one new Seaside socket, found {sockets}")
-            self.path = sockets.pop()
-            require(self.path.stat().st_mode & 0o777 == 0o600 and
-                    self.socket_dir.stat().st_mode & 0o777 == 0o700,
-                    "The session socket or directory has incorrect permissions")
-            # The outer trial is not a compositor child. Test discovery via
-            # WAYLAND_DISPLAY and test inherited SEASIDE_SOCKET separately.
-            self.environment["WAYLAND_DISPLAY"] = self.path.stem
-            ready = self.ctl("status")["result"]
-            require(ready["ready"] and ready["phase"] == "ready", "IPC readiness disagrees with TTY")
+            self.wait_for_socket()
+            if "PIPEWIRE_REMOTE" not in self.environment:
+                wait_for(lambda: re.search(r"^seaside READY cursor-plane=([1-9][0-9]*)$",
+                                           self.log.read_text(errors="replace"), re.MULTILINE),
+                         25, "Part 6 startup and hardware cursor", self.process)
+                ready = self.ctl("status")["result"]
+                require(ready["ready"] and ready["phase"] == "ready",
+                        "IPC readiness disagrees with TTY")
             return self
         except Exception:
             self.__exit__(None, None, None)
             raise
+
+    def wait_for_socket(self):
+        sockets = wait_for(
+            lambda: set(self.socket_dir.glob("wayland-*.sock")) - self.existing_sockets,
+            8, "the session IPC socket", self.process)
+        require(len(sockets) == 1, f"Expected one new Seaside socket, found {sockets}")
+        self.path = sockets.pop()
+        require(self.path.stat().st_mode & 0o777 == 0o600 and
+                self.socket_dir.stat().st_mode & 0o777 == 0o700,
+                "The session socket or directory has incorrect permissions")
+        self.environment["WAYLAND_DISPLAY"] = self.path.stem
+
+    def request(self, method, params=None):
+        request = {"v": 1, "id": 1, "method": method, "params": params or {}}
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+            connection.settimeout(5)
+            connection.connect(str(self.path))
+            connection.sendall((json.dumps(request) + "\n").encode())
+            with connection.makefile("rb") as stream:
+                line = stream.readline(1024 * 1024 + 1)
+        require(line.endswith(b"\n") and len(line) <= 1024 * 1024, "Invalid IPC reply framing")
+        response = json.loads(line)
+        require(response["v"] == 1 and response["id"] == 1 and type(response["seq"]) is int,
+                f"Invalid raw IPC response {response}")
+        return response
 
     def __exit__(self, *_):
         try:
@@ -180,6 +202,14 @@ class Session:
 
     def strip(self, bounds):
         return subprocess.check_output(["grim", "-g", bounds, "-"], env=self.environment, timeout=5)
+
+    def pixel(self, x, y):
+        raw = subprocess.check_output(["grim", "-s", "1", "-t", "ppm", "-g",
+                                       f"{x},{y} 1x1", "-"], env=self.environment, timeout=5)
+        magic, width, height, depth, color = raw.split(maxsplit=4)
+        require((magic, width, height, depth) == (b"P6", b"1", b"1", b"255") and len(color) == 3,
+                "Expected one RGB pixel in the capture")
+        return tuple(color)
 
     def exit(self):
         result = self.ctl("exit")["result"]
@@ -338,6 +368,17 @@ def run_live(repo, directory, result_dir, state):
             state["pending_restart"] = accepted["requested_workspace_mode"]
             require(first_autostart.read_text().splitlines() == [str(session.path)] and
                     not second_autostart.exists(), "Reload reran autostart commands")
+            target = remapped["data"]["window_id"]
+            close = session.request("action.window_close", {"window_id": target})
+            require(close["ok"] and close["result"] == {"accepted": True, "changed": False},
+                    "Close should acknowledge the request while the client handles it")
+            events.expect("window.unmapped", lambda data: data["window_id"] == target)
+            events.expect("window.destroyed", lambda data: data["window_id"] == target)
+            stale = session.request("action.window_toggle_tiling", {"window_id": target})
+            require(not stale["ok"] and stale["error"]["code"] == "not_found" and
+                    all(window["id"] != target for window in session.windows()),
+                    "A destroyed window ID remained usable")
+            state["stale_window_result"] = stale["error"]["code"]
             session.exit()
 
     replace(config, unsupported_config)
@@ -366,6 +407,121 @@ def run_live(repo, directory, result_dir, state):
         session.exit()
 
 
+def solid_png(path, rgb):
+    def chunk(kind, data):
+        return (struct.pack(">I", len(data)) + kind + data +
+                struct.pack(">I", zlib.crc32(kind + data)))
+
+    header = struct.pack(">IIBBBBB", 2, 2, 8, 2, 0, 0, 0)
+    rows = (b"\0" + bytes(rgb) * 2) * 2
+    path.write_bytes(standard["PNG_HEADER"] + chunk(b"IHDR", header) +
+                     chunk(b"IDAT", zlib.compress(rows)) + chunk(b"IEND", b""))
+
+
+def run_appearance(repo, directory, result_dir, state):
+    config = directory / "config/seaside/config.toml"
+    snapshot = directory / "state/seaside/last-good-config.toml"
+    config.parent.mkdir(parents=True)
+    wallpaper = directory / "color.png"
+    damaged = directory / "damaged.png"
+    color = (20, 104, 217)
+    solid_png(wallpaper, color)
+    damaged.write_bytes(standard["PNG_HEADER"])
+    replace(config, baseline_config)
+
+    with Session(repo, directory, result_dir, "appearance") as session:
+        mode = session.focused_output()["mode"]
+        x = mode["width"] * 4 // 5
+        y = mode["height"] * 3 // 4
+        require(session.pixel(x, y) == (0, 0, 0), "Expected the default black wallpaper")
+        with Events(session) as events:
+            wallpaper_config = f"[wallpaper]\npath = {json.dumps(str(wallpaper))}\n"
+            replace(config, baseline_config + wallpaper_config)
+            events.expect("config.recovered")
+            session.wait(lambda: session.pixel(x, y) == color, "live wallpaper pixels")
+            session.wait(lambda: session.config()["recovery_persisted"], "wallpaper snapshot")
+            reference = snapshot.read_text()
+
+            replace(config, baseline_config + f"[wallpaper]\npath = {json.dumps(str(damaged))}\n")
+            events.expect("config.error")
+            require(session.config()["error"]["field"] == "wallpaper.path" and
+                    session.pixel(x, y) == color and snapshot.read_text() == reference,
+                    "Rejected wallpaper edit changed the wallpaper or recovery snapshot")
+
+            scaled = reference + "\n[monitors]\nscale = 1.25\n"
+            replace(config, scaled)
+            events.expect("config.recovered")
+            session.wait(lambda: session.focused_output()["scale"] == 1.25, "real fractional scale")
+            output = session.focused_output()
+            require(output["hardware_cursor"] and output["mode"] == mode,
+                    "Scale changed the mode or lost the hardware cursor")
+            dimensions = subprocess.check_output(["grim", "-s", "1", "-"], env=session.environment,
+                                                 timeout=5)[16:24]
+            require(struct.unpack(">II", dimensions) ==
+                    (int(mode["width"] / 1.25), int(mode["height"] / 1.25)),
+                    "Composed logical output bounds disagree with the configured scale")
+
+            replace(config, reference)
+            events.expect("config.recovered")
+            session.wait(lambda: session.focused_output()["scale"] == 1, "restored scale")
+            session.key("open")
+            session.wait(lambda: len(session.windows()) == 1, "first tile")
+            session.key("open")
+            session.wait(lambda: len(session.windows()) == 2, "second tile")
+            session.wait(lambda: session.pixel(x, y) != color, "Dwindle tile covering the wallpaper")
+            tile_color = session.pixel(x, y)
+            require(tile_color != (0, 0, 0), "Dwindle tile was not presenting client pixels")
+
+            scrolling = ("[window]\nlayout = 'scrolling'\n[scrolling]\n"
+                         "default_column_width = 0.30\n" + wallpaper_config)
+            replace(config, scrolling)
+            events.expect("config.recovered")
+            session.wait(lambda: session.pixel(x, y) == color, "scrolling layout revealing wallpaper")
+            session.wait(lambda: session.config()["recovery_persisted"], "scrolling snapshot")
+            replace(config, scrolling.replace("0.30", "'invalid'"))
+            events.expect("config.error")
+            require(session.pixel(x, y) == color and snapshot.read_text() == scrolling,
+                    "Rejected layout edit changed presentation or the recovery snapshot")
+            replace(config, reference)
+            events.expect("config.recovered")
+            session.wait(lambda: session.pixel(x, y) == tile_color, "restored Dwindle client pixels")
+            require(len(session.windows()) == 2, "Live layout replaced client windows")
+            state["appearance"] = {"wallpaper_rgb": color, "scale": 1.25,
+                                   "scrolling_exposed_wallpaper": True, "rejected_edits_retained": True}
+            session.exit()
+
+
+def run_preflight(repo, directory, result_dir, state):
+    config = directory / "config/seaside/config.toml"
+    config.parent.mkdir(parents=True)
+    marker = directory / "autostart.txt"
+    replace(config, with_autostart(baseline_config, marker))
+    # Give the production PipeWire client a reachable test socket with no
+    # replies. The session remains in preflight without touching user services.
+    silent_path = directory / "silent-pipewire"
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as silent:
+        silent.bind(str(silent_path))
+        silent.listen(1)
+        silent.settimeout(4)
+        with Session(repo, directory, result_dir, "preflight", PIPEWIRE_REMOTE=silent_path.name,
+                     PIPEWIRE_RUNTIME_DIR=str(directory)) as session:
+            connection, _ = silent.accept()
+            with connection, Events(session):
+                status = session.ctl("status")["result"]
+                require(status["phase"] == "starting" and not status["ready"],
+                        "A silent PipeWire peer advanced the readiness gate")
+                mutation = session.request("action.workspace_select", {"workspace_id": 41})
+                require(not mutation["ok"] and mutation["error"]["code"] == "not_ready",
+                        "IPC accepted a mutation during preflight")
+                workspaces = session.ctl("workspaces")["result"]["workspaces"]
+                require(all(workspace["id"] != 41 for workspace in workspaces),
+                        "A rejected preflight action changed workspace state")
+                session.exit()
+                require(not marker.exists(), "Exiting during preflight ran an autostart command")
+                state["preflight_ipc"] = {"queries": True, "subscription": True,
+                                          "mutation_error": "not_ready", "clean_exit": True}
+
+
 def trial():
     tty = os.ttyname(0)
     current = active()
@@ -388,6 +544,8 @@ def trial():
                 temporary = Path(name)
                 standard["tty_trial"](repo, temporary, result_dir, state)
                 run_live(repo, temporary / "live", result_dir, state)
+                run_appearance(repo, temporary / "appearance", result_dir, state)
+                run_preflight(repo, temporary / "preflight", result_dir, state)
         state["ok"] = True
     except (OSError, RuntimeError, ValueError, KeyError, StopIteration, subprocess.SubprocessError,
             KeyboardInterrupt) as error:

@@ -399,12 +399,25 @@ test('part6-scene-appearance', appearance_tests, suite: ['integration', 'part6']
   env: {'SEASIDE_GTEST': '1', 'SEASIDE_TEST_PART': '6', 'SEASIDE_REQUIREMENTS': '2,8.1,12.2b'},
 )
 
+part6_output_tests = executable(
+  'seaside-part6-output-tests',
+  ['tests/integration/part6_outputs.cpp', 'tests/integration/part3_bridge.c',
+   'src/output_config.cpp', 'src/session_control.cpp'],
+  include_directories: include_directories('src', 'tests/unit', 'tests/integration'),
+  dependencies: [gtest, wlroots, wayland_server, pixman, libdrm, nlohmann_json],
+  link_with: [desktop_foundation, core, tty_foundation, config_foundation, ipc_foundation],
+  install: false,
+)
+test('part6-output-transaction', part6_output_tests, suite: ['integration', 'part6'], timeout: 20,
+  env: {'SEASIDE_GTEST': '1', 'SEASIDE_TEST_PART': '6', 'SEASIDE_REQUIREMENTS': '5.2,5.3,8.1,10.6,12.2b'},
+)
+
 part4_fixture = executable(
   'seaside-part4-fixture',
   ['tests/integration/part4.cpp', 'tests/integration/part3_bridge.c',
    xdg_shell_client_header, xdg_shell_private_code, activation_client_header, activation_private_code],
-  include_directories: include_directories('src', 'tests/integration'),
-  dependencies: [wlroots, wayland_server, wayland_client, pixman, libdrm, xkbcommon, threads],
+  include_directories: include_directories('src', 'tests/integration', 'tests/unit'),
+  dependencies: [wlroots, wayland_server, wayland_client, pixman, libdrm, xkbcommon, threads, gtest],
   link_with: [desktop_foundation, core, tty_foundation, config_foundation], install: false,
 )
 test('part4-headless-desktop', part4_fixture, suite: ['integration', 'part4'], timeout: 30,
@@ -418,6 +431,11 @@ test('part5-headless-scrolling', part4_fixture, args: ['scrolling'], suite: ['in
 )
 test('part6-headless-attention', part4_fixture, args: ['attention'], suite: ['integration', 'part6'],
   timeout: 30, env: {'SEASIDE_TEST_PART': '6', 'SEASIDE_REQUIREMENTS': '6.1,8.1,10.4,12.2b'},
+)
+
+test('part6-binding-reload-during-drag', part4_fixture, args: ['binding-reload'],
+  suite: ['integration', 'part6'], timeout: 20,
+  env: {'SEASIDE_TEST_PART': '6', 'SEASIDE_REQUIREMENTS': '4.5,8.1,8.3,12.2b'},
 )
 
 portal_smoke = executable(

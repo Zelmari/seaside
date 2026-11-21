@@ -7,7 +7,7 @@ from pathlib import Path
 from part5_vm import revision_bundle, run
 
 
-CAPTURES = {"part6-live.log", "part6-restart.log", "part6-clean.png", "part6-error.png",
+CAPTURES = {"part6-live.log", "part6-restart.log", "part6-appearance.log", "part6-preflight.log", "part6-clean.png", "part6-error.png",
             "part6-recovered.png", "part6-startup-error.png"}
 KEYS = {"open": ("1c", "9c"), "remapped": ("3c", "bc")}
 
