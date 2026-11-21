@@ -2,6 +2,7 @@
 #include "window_capture.h"
 
 #include <drm_fourcc.h>
+#include <glib.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -17,6 +18,7 @@
 #include <wlr/types/wlr_ext_image_copy_capture_v1.h>
 #include <wlr/types/wlr_subcompositor.h>
 #include <wlr/types/wlr_xdg_shell.h>
+#include <wlr/util/transform.h>
 
 struct seaside_window_capture {
     struct wl_display *display;
@@ -248,18 +250,40 @@ static void draw_surface(struct wlr_surface *surface, int x, int y, void *data) 
     // Compare before narrowing positions from client-provided geometry.
     const int64_t left = (int64_t)x - render->geometry.x;
     const int64_t top = (int64_t)y - render->geometry.y;
-    if (!texture || width <= 0 || height <= 0 || left >= render->geometry.width ||
-        top >= render->geometry.height || left + width <= 0 || top + height <= 0) {
+    const int64_t right = left + width, bottom = top + height;
+    const int64_t x1 = left > 0 ? left : 0;
+    const int64_t y1 = top > 0 ? top : 0;
+    const int64_t x2 = right < render->geometry.width ? right : render->geometry.width;
+    const int64_t y2 = bottom < render->geometry.height ? bottom : render->geometry.height;
+    if (!texture || x2 <= x1 || y2 <= y1) {
         return;
     }
+    const struct wlr_box destination = {(int)x1, (int)y1, (int)(x2 - x1), (int)(y2 - y1)};
     struct wlr_fbox source;
     wlr_surface_get_buffer_source_box(surface, &source);
-    wlr_render_pass_add_texture(render->pass, &(struct wlr_render_texture_options){
-                                                  .texture = texture,
-                                                  .src_box = source,
-                                                  .dst_box = {(int)left, (int)top, width, height},
-                                                  .transform = surface->current.transform,
-                                              });
+    const enum wl_output_transform transform = surface->current.transform;
+    if (x1 != left || y1 != top || x2 != right || y2 != bottom) {
+        // Crop in transformed surface space, then map that rectangle back to
+        // the renderer's buffer coordinates. Destination sizes stay bounded
+        // even with a large client viewport crossing a capture edge.
+        int buffer_width = surface->current.buffer_width;
+        int buffer_height = surface->current.buffer_height;
+        wlr_fbox_transform(&source, &source, transform, buffer_width, buffer_height);
+        wlr_output_transform_coords(transform, &buffer_width, &buffer_height);
+        source.x += (double)(x1 - left) * source.width / width;
+        source.y += (double)(y1 - top) * source.height / height;
+        source.width *= (double)destination.width / width;
+        source.height *= (double)destination.height / height;
+        wlr_fbox_transform(&source, &source, wlr_output_transform_invert(transform), buffer_width,
+                           buffer_height);
+    }
+    wlr_render_pass_add_texture(render->pass,
+                                &(struct wlr_render_texture_options){
+                                    .texture = texture,
+                                    .src_box = source,
+                                    .dst_box = destination,
+                                    .transform = wlr_output_transform_invert(transform),
+                                });
 }
 
 static void callback_surface(struct wlr_surface *surface, int x, int y, void *data) {
@@ -435,26 +459,68 @@ void seaside_window_capture_destroy(struct seaside_window_capture *capture) {
     }
 }
 
+enum { FOREIGN_METADATA_MAX = 512 };
+
+struct foreign_metadata {
+    char title[FOREIGN_METADATA_MAX + 1];
+    char app_id[FOREIGN_METADATA_MAX + 1];
+};
+
+static void sanitize_metadata(char *out, const char *input) {
+    size_t used = 0;
+    // xdpw's chooser uses one source per line. Keep client metadata printable
+    // and valid UTF-8, with enough space for the compositor-owned identifier.
+    for (const char *cursor = input; cursor && *cursor && used < FOREIGN_METADATA_MAX;) {
+        gunichar value = g_utf8_get_char_validated(cursor, -1);
+        if (value == (gunichar)-1 || value == (gunichar)-2) {
+            value = 0xfffd;
+            ++cursor;
+        } else {
+            cursor = g_utf8_next_char(cursor);
+        }
+        const GUnicodeType type = g_unichar_type(value);
+        if (!g_unichar_isprint(value) || type == G_UNICODE_LINE_SEPARATOR ||
+            type == G_UNICODE_PARAGRAPH_SEPARATOR || type == G_UNICODE_FORMAT) {
+            value = ' ';
+        }
+        char encoded[6];
+        const size_t size = (size_t)g_unichar_to_utf8(value, encoded);
+        if (size > FOREIGN_METADATA_MAX - used) {
+            break;
+        }
+        memcpy(out + used, encoded, size);
+        used += size;
+    }
+    out[used] = '\0';
+}
+
 static struct wlr_ext_foreign_toplevel_handle_v1_state
-foreign_state(const struct wlr_xdg_toplevel *toplevel) {
+foreign_state(const struct wlr_xdg_toplevel *toplevel, struct foreign_metadata *metadata) {
+    sanitize_metadata(metadata->title, toplevel->title);
+    sanitize_metadata(metadata->app_id, toplevel->app_id);
     return (struct wlr_ext_foreign_toplevel_handle_v1_state){
-        .title = toplevel->title ? toplevel->title : "",
-        .app_id = toplevel->app_id ? toplevel->app_id : "",
+        .title = metadata->title,
+        .app_id = metadata->app_id,
     };
+}
+
+static void update_metadata(struct seaside_window_source *target) {
+    struct foreign_metadata metadata;
+    struct wlr_ext_foreign_toplevel_handle_v1_state state =
+        foreign_state(target->toplevel, &metadata);
+    wlr_ext_foreign_toplevel_handle_v1_update_state(target->handle, &state);
 }
 
 static void title_changed(struct wl_listener *listener, void *data) {
     (void)data;
     struct seaside_window_source *target = wl_container_of(listener, target, title);
-    struct wlr_ext_foreign_toplevel_handle_v1_state state = foreign_state(target->toplevel);
-    wlr_ext_foreign_toplevel_handle_v1_update_state(target->handle, &state);
+    update_metadata(target);
 }
 
 static void app_id_changed(struct wl_listener *listener, void *data) {
     (void)data;
     struct seaside_window_source *target = wl_container_of(listener, target, app_id);
-    struct wlr_ext_foreign_toplevel_handle_v1_state state = foreign_state(target->toplevel);
-    wlr_ext_foreign_toplevel_handle_v1_update_state(target->handle, &state);
+    update_metadata(target);
 }
 
 struct seaside_window_source *seaside_window_capture_map(struct seaside_window_capture *capture,
@@ -469,7 +535,8 @@ struct seaside_window_source *seaside_window_capture_map(struct seaside_window_c
     target->presented = presented;
     target->timer =
         wl_event_loop_add_timer(wl_display_get_event_loop(capture->display), capture_tick, target);
-    struct wlr_ext_foreign_toplevel_handle_v1_state state = foreign_state(toplevel);
+    struct foreign_metadata metadata;
+    struct wlr_ext_foreign_toplevel_handle_v1_state state = foreign_state(toplevel, &metadata);
     target->handle =
         target->timer ? wlr_ext_foreign_toplevel_handle_v1_create(capture->list, &state) : NULL;
     if (!target->handle) {

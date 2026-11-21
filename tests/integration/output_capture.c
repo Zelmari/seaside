@@ -36,7 +36,7 @@ static const uint32_t SECOND_RGB = 0x0000ff;
 
 struct listed_window {
     struct ext_foreign_toplevel_handle_v1 *handle;
-    char title[32], identifier[64];
+    char title[600], app_id[600], identifier[64];
     bool done, closed;
 };
 
@@ -167,9 +167,9 @@ static void window_identifier(void *data, struct ext_foreign_toplevel_handle_v1 
 
 static void window_app_id(void *data, struct ext_foreign_toplevel_handle_v1 *handle,
                           const char *app_id) {
-    (void)data;
     (void)handle;
-    (void)app_id;
+    struct listed_window *window = data;
+    snprintf(window->app_id, sizeof(window->app_id), "%s", app_id);
 }
 
 static const struct ext_foreign_toplevel_handle_v1_listener window_listener = {
@@ -677,22 +677,34 @@ static void top_configure(void *data, struct xdg_toplevel *toplevel, int32_t wid
 
 static const struct xdg_toplevel_listener top_listener = {.configure = top_configure};
 
-static bool paint(struct fixture *fixture, struct wl_surface *surface, uint32_t width,
-                  uint32_t height, uint32_t rgb) {
+static bool paint_pattern(struct fixture *fixture, struct wl_surface *surface, uint32_t width,
+                          uint32_t height, uint32_t rgb, bool quadrants) {
     struct capture_client paint = {
         .width = width, .height = height, .format = WL_SHM_FORMAT_XRGB8888};
     if (!create_buffer(fixture, &paint)) {
         release_buffer(&paint);
         return false;
     }
-    for (size_t i = 0; i < (size_t)width * height; ++i) {
-        paint.pixels[i] = rgb;
+    for (size_t y = 0; y < height; ++y) {
+        for (size_t x = 0; x < width; ++x) {
+            uint32_t value = rgb;
+            if (quadrants) {
+                value = x < width / 2 ? (y < height / 2 ? CURSOR_RGB : SECOND_RGB)
+                                      : (y < height / 2 ? BACKGROUND_RGB : 0xffff00);
+            }
+            paint.pixels[y * width + x] = value;
+        }
     }
     wl_surface_attach(surface, paint.buffer, 0, 0);
     wl_surface_damage_buffer(surface, 0, 0, (int32_t)width, (int32_t)height);
     wl_surface_commit(surface);
     release_buffer(&paint);
     return true;
+}
+
+static bool paint(struct fixture *fixture, struct wl_surface *surface, uint32_t width,
+                  uint32_t height, uint32_t rgb) {
+    return paint_pattern(fixture, surface, width, height, rgb, false);
 }
 
 static bool map_painted_window(struct fixture *fixture, struct painted_window *window,
@@ -806,6 +818,23 @@ static bool check_selected_window(struct fixture *fixture) {
     CHECK(placement.next_id == 2 && strcmp(fixture->windows[0].title, "selected") == 0 &&
           strcmp(fixture->windows[1].title, "overlap") == 0 &&
           strcmp(fixture->windows[0].identifier, fixture->windows[1].identifier) != 0);
+    char identifier[sizeof(fixture->windows[0].identifier)];
+    memcpy(identifier, fixture->windows[0].identifier, sizeof(identifier));
+    fixture->windows[0].done = false;
+    xdg_toplevel_set_title(selected.toplevel, "two\nlines\x1b\xe2\x80\xa8 \xce\xbb");
+    xdg_toplevel_set_app_id(selected.toplevel, "app\t\xe2\x80\xaeid");
+    CHECK(pump_until(fixture, &fixture->windows[0].done) && sync_client(fixture));
+    CHECK(strcmp(fixture->windows[0].title, "two lines   \xce\xbb") == 0);
+    CHECK(strcmp(fixture->windows[0].app_id, "app  id") == 0);
+    char long_title[900];
+    memset(long_title, 'x', sizeof(long_title) - 1);
+    memcpy(long_title + 511, "\xe2\x82\xac", 3);
+    long_title[sizeof(long_title) - 1] = '\0';
+    fixture->windows[0].done = false;
+    xdg_toplevel_set_title(selected.toplevel, long_title);
+    CHECK(pump_until(fixture, &fixture->windows[0].done));
+    CHECK(strlen(fixture->windows[0].title) == 511 &&
+          strcmp(fixture->windows[0].identifier, identifier) == 0);
 
     selected_source = ext_foreign_toplevel_image_capture_source_manager_v1_create_source(
         fixture->window_manager, fixture->windows[0].handle);
@@ -850,6 +879,17 @@ static bool check_selected_window(struct fixture *fixture) {
     CHECK(pump_until(fixture, &window.ready) && !window.failed && window.full_damage &&
           (window.pixels[4 * window.width + 3] & 0xffffff) == CURSOR_RGB &&
           (window.pixels[0] & 0xffffff) == BACKGROUND_RGB);
+    // The raw 4×6 texture becomes a 6×4 surface. Its right and bottom edges
+    // lie beyond the explicitly declared window, so only logical 2×3 remains.
+    xdg_surface_set_window_geometry(selected.xdg, 0, 0, 27, 15);
+    wl_subsurface_set_position(subsurface, 25, 12);
+    wl_surface_set_buffer_transform(child, WL_OUTPUT_TRANSFORM_90);
+    CHECK(request_capture(&window) && paint_pattern(fixture, child, 4, 6, 0, true));
+    wl_surface_commit(selected.surface);
+    CHECK(pump_until(fixture, &window.ready) && !window.failed && window.full_damage &&
+          (window.pixels[12 * window.width + 25] & 0xffffff) == SECOND_RGB &&
+          (window.pixels[14 * window.width + 25] & 0xffffff) == 0xffff00 &&
+          (window.pixels[12 * window.width + 24] & 0xffffff) == BACKGROUND_RGB);
     wl_subsurface_destroy(subsurface);
     subsurface = NULL;
     wl_surface_destroy(child);

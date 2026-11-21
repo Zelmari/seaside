@@ -35,6 +35,7 @@ libpng = dependency('libpng')
 turbojpeg = dependency('libturbojpeg', version: '>=3.0.0')
 libwebp = dependency('libwebp')
 pangocairo = dependency('pangocairo', include_type: 'system')
+glib = dependency('glib-2.0', include_type: 'system')
 find_program('dbus-daemon')
 find_program('pipewire')
 wayland_scanner = find_program('wayland-scanner')
@@ -148,7 +149,7 @@ core = static_library(
   ['src/server.cpp', 'src/server_c.cpp', 'src/wlroots_bridge.c',
    'src/scene.cpp', 'src/scene_bridge.c', 'src/window_capture.c', 'src/render_assets.cpp'],
   include_directories: include_directories('src'),
-  dependencies: [wlroots, wayland_server, pixman, threads, libdrm, libpng, turbojpeg, libwebp, pangocairo],
+  dependencies: [wlroots, wayland_server, pixman, threads, libdrm, libpng, turbojpeg, libwebp, pangocairo, glib],
   link_with: work_foundation,
   install: false,
 )
