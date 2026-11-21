@@ -294,6 +294,25 @@ def wait_color(path, child, color, size=None):
                     8, f"portal frame with {color} pixels", child)
 
 
+def first_live_frame(path, child, repaint, color=None):
+    next_paint = 0.
+
+    def read_frame():
+        nonlocal next_paint
+        for row in frame_rows(path):
+            if color is None or all(pixel == color for pixel in row[2:]):
+                return row
+        if child.poll() is not None:
+            raise RuntimeError(f"Portal receiver exited {child.returncode}: {path.read_text(errors='replace')}")
+        now = time.monotonic()
+        if now >= next_paint and "PipeWire stream state streaming" in path.read_text(errors="replace"):
+            repaint()
+            next_paint = now + 1.
+        return None
+
+    return wait_for(read_frame, 8, "the first live PipeWire frame")
+
+
 @contextmanager
 def start_stream(session, results, state, log, source, lifetime, choice, first_frame):
     for attempt in range(1, 4):
@@ -329,17 +348,23 @@ def run_monitor(session, results, state):
     state["grim_dimensions"] = monitor_size
     monitor_log = results / "part7-monitor.log"
 
-    def first_frame(reader):
-        rows = wait_for(lambda: frame_rows(monitor_log) or reader.poll() is not None, 8,
-                        "a PipeWire monitor frame", session.process)
-        require(isinstance(rows, list), f"The monitor receiver exited: {monitor_log.read_text()}")
-        return rows
+    title = "Part7 Monitor Pattern"
+    with process(session, results / "part7-monitor-pattern.log", "seaside-part7-native-client", title,
+                 "664422", stdin=True) as pattern:
+        wait_for(lambda: session.window(title), 8, "the monitor's live pattern window", pattern)
+        colors = ("227744", "662255")
+        next_color = 0
 
-    with start_stream(session, results, state, monitor_log, "monitor", "frame", "Monitor",
-                      first_frame) as (reader, rows):
-        require(reader.wait(timeout=8) == 0, f"Monitor stream failed: {monitor_log.read_text()}")
-        require(rows and rows[0][:2] == monitor_size, "Portal monitor dimensions differ from grim")
-        state["monitor_frames"] = rows
+        def repaint():
+            nonlocal next_color
+            command(pattern, colors[next_color])
+            next_color = 1 - next_color
+
+        with start_stream(session, results, state, monitor_log, "monitor", "frame", "Monitor",
+                          lambda reader: first_live_frame(monitor_log, reader, repaint)) as (reader, first):
+            require(reader.wait(timeout=8) == 0, f"Monitor stream failed: {monitor_log.read_text()}")
+            require(first[:2] == monitor_size, "Portal monitor dimensions differ from grim")
+            state["monitor_frames"] = frame_rows(monitor_log)
 
 
 def run_video(session, results, state):
@@ -354,7 +379,8 @@ def run_video(session, results, state):
             require(reader.wait(timeout=12) == 0 and "cancelled" in cancel_log.read_text(),
                     f"Chooser did not cancel: {cancel_log.read_text()}")
         with start_stream(session, results, state, cast_log, "window", "closed", NATIVE_TITLE,
-                          lambda reader: wait_color(cast_log, reader, "b04e29")) as (reader, first):
+                          lambda reader: first_live_frame(cast_log, reader, lambda: command(native, "b04e29"),
+                                                          "b04e29")) as (reader, first):
             require(first[:2] != tuple(state.get("grim_dimensions", ())), "The window stream has monitor dimensions")
             with process(session, results / "part7-overlap.log", "seaside-part7-native-client",
                          "Part7 Overlap", "fa2277", stdin=True) as overlap:
@@ -389,7 +415,8 @@ def run_x11(session, results, state):
         first_pid = wait_for(lambda: re.search(r"xwayland-satellite started pid=([0-9]+)", session.log_text()),
                              5, "the owned satellite child", session.process)[1]
         with start_stream(session, results, state, cast_log, "window", "closed", X11_TITLE,
-                          lambda reader: wait_color(cast_log, reader, "2496d0")) as (reader, first):
+                          lambda reader: first_live_frame(cast_log, reader, lambda: command(client, "color 2496d0"),
+                                                          "2496d0")) as (reader, first):
             session.ctl("workspace", "2")
             before = session.ctl("focus")
             command(client, "color c24122")
