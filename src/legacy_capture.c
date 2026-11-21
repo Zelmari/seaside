@@ -129,7 +129,7 @@ static const struct zwlr_screencopy_frame_v1_interface frame_impl = {
 };
 
 static int scaled_coordinate(int64_t coordinate, float scale, int limit) {
-    const double scaled = coordinate * (double)scale + 0.5;
+    const double scaled = (double)coordinate * scale + 0.5;
     return scaled <= 0.0 ? 0 : scaled >= limit ? limit : (int)scaled;
 }
 
@@ -235,7 +235,7 @@ static void bind_manager(struct wl_client *client, void *data, uint32_t version,
         return;
     }
     state->resource =
-        wl_resource_create(client, &zwlr_screencopy_manager_v1_interface, version, id);
+        wl_resource_create(client, &zwlr_screencopy_manager_v1_interface, (int)version, id);
     if (!state->resource) {
         free(state);
         wl_client_post_no_memory(client);

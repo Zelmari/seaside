@@ -6,6 +6,7 @@
 #include "ext-foreign-toplevel-list-v1-client-protocol.h"
 #include "ext-image-capture-source-v1-client-protocol.h"
 #include "ext-image-copy-capture-v1-client-protocol.h"
+#include "wlr-screencopy-unstable-v1-client-protocol.h"
 #include "xdg-output-unstable-v1-client-protocol.h"
 #include "xdg-shell-client-protocol.h"
 
@@ -63,6 +64,7 @@ struct fixture {
     struct zxdg_output_v1 *layout_output;
     struct ext_output_image_capture_source_manager_v1 *output_manager;
     struct ext_image_copy_capture_manager_v1 *copy_manager;
+    struct zwlr_screencopy_manager_v1 *legacy_manager;
     struct ext_image_capture_source_v1 *source;
     uint32_t output_name;
     uint32_t other_name;
@@ -70,6 +72,7 @@ struct fixture {
     bool layout_named, layout_done;
     bool render_failed;
     bool blue_output;
+    bool empty_output_damage;
     struct listed_window windows[3];
 };
 
@@ -229,6 +232,9 @@ static void registry_add(void *data, struct wl_registry *registry, uint32_t name
     } else if (strcmp(interface, ext_image_copy_capture_manager_v1_interface.name) == 0) {
         fixture->copy_manager =
             wl_registry_bind(registry, name, &ext_image_copy_capture_manager_v1_interface, 1);
+    } else if (strcmp(interface, zwlr_screencopy_manager_v1_interface.name) == 0) {
+        fixture->legacy_manager =
+            wl_registry_bind(registry, name, &zwlr_screencopy_manager_v1_interface, 3);
     } else if (strcmp(interface, wl_compositor_interface.name) == 0) {
         fixture->compositor = wl_registry_bind(registry, name, &wl_compositor_interface, 4);
     } else if (strcmp(interface, wl_subcompositor_interface.name) == 0) {
@@ -333,6 +339,12 @@ static void render_output(struct wl_listener *listener, void *data) {
     struct wlr_output *output = data;
     struct wlr_output_state state;
     wlr_output_state_init(&state);
+    if (fixture->empty_output_damage) {
+        pixman_region32_t damage;
+        pixman_region32_init(&damage);
+        wlr_output_state_set_damage(&state, &damage);
+        pixman_region32_fini(&damage);
+    }
     struct wlr_render_pass *pass = wlr_output_begin_render_pass(output, &state, NULL);
     if (!pass) {
         fixture->render_failed = true;
@@ -784,6 +796,131 @@ static bool pump_for(struct fixture *fixture, long milliseconds) {
     return true;
 }
 
+static void legacy_buffer(void *data, struct zwlr_screencopy_frame_v1 *frame, uint32_t format,
+                          uint32_t width, uint32_t height, uint32_t stride) {
+    (void)frame;
+    struct capture_client *client = data;
+    client->format = format;
+    client->width = width;
+    client->height = height;
+    client->failed |= format != WL_SHM_FORMAT_XRGB8888 || stride != width * sizeof(uint32_t);
+}
+
+static void legacy_flags(void *data, struct zwlr_screencopy_frame_v1 *frame, uint32_t flags) {
+    (void)frame;
+    struct capture_client *client = data;
+    client->failed |= flags != 0;
+}
+
+static void legacy_ready(void *data, struct zwlr_screencopy_frame_v1 *frame, uint32_t sec_hi,
+                         uint32_t sec_lo, uint32_t nsec) {
+    (void)frame;
+    struct capture_client *client = data;
+    client->timestamp = (sec_hi || sec_lo || nsec) && nsec < 1000000000U;
+    client->ready = true;
+}
+
+static void legacy_failed(void *data, struct zwlr_screencopy_frame_v1 *frame) {
+    (void)frame;
+    struct capture_client *client = data;
+    client->failed = true;
+    client->ready = true;
+}
+
+static void legacy_damage(void *data, struct zwlr_screencopy_frame_v1 *frame, uint32_t x,
+                          uint32_t y, uint32_t width, uint32_t height) {
+    (void)frame;
+    struct capture_client *client = data;
+    client->full_damage = x == 0 && y == 0 && width == client->width && height == client->height;
+}
+
+static void legacy_dmabuf(void *data, struct zwlr_screencopy_frame_v1 *frame, uint32_t format,
+                          uint32_t width, uint32_t height) {
+    (void)frame;
+    (void)format;
+    (void)width;
+    (void)height;
+    struct capture_client *client = data;
+    client->failed = true;
+}
+
+static void legacy_buffers_done(void *data, struct zwlr_screencopy_frame_v1 *frame) {
+    (void)frame;
+    struct capture_client *client = data;
+    client->constrained = true;
+}
+
+static const struct zwlr_screencopy_frame_v1_listener legacy_listener = {
+    .buffer = legacy_buffer,
+    .flags = legacy_flags,
+    .ready = legacy_ready,
+    .failed = legacy_failed,
+    .damage = legacy_damage,
+    .linux_dmabuf = legacy_dmabuf,
+    .buffer_done = legacy_buffers_done,
+};
+
+static struct zwlr_screencopy_frame_v1 *legacy_region(struct fixture *fixture,
+                                                      struct capture_client *client) {
+    client->constrained = client->ready = client->failed = client->full_damage = false;
+    struct zwlr_screencopy_frame_v1 *frame = zwlr_screencopy_manager_v1_capture_output_region(
+        fixture->legacy_manager, 1, fixture->client_output, 23, 28, 8, 8);
+    if (frame) {
+        zwlr_screencopy_frame_v1_add_listener(frame, &legacy_listener, client);
+    }
+    return frame;
+}
+
+static bool check_legacy_capture(struct fixture *fixture) {
+    bool passed = false;
+    struct capture_client buffer = {0};
+    struct zwlr_screencopy_frame_v1 *frame = NULL;
+    CHECK(fixture->legacy_manager && wlr_output_cursor_move(fixture->cursor, 25, 30));
+    fixture->empty_output_damage = true;
+    frame = legacy_region(fixture, &buffer);
+    CHECK(frame && pump_until(fixture, &buffer.constrained));
+    CHECK(!buffer.failed && buffer.width == 8 && buffer.height == 8 &&
+          create_buffer(fixture, &buffer));
+    zwlr_screencopy_frame_v1_copy_with_damage(frame, buffer.buffer);
+    CHECK(pump_until(fixture, &buffer.ready) && !buffer.failed && buffer.full_damage &&
+          buffer.timestamp);
+    CHECK((buffer.pixels[9] & 0xffffff) == CURSOR_RGB &&
+          (buffer.pixels[0] & 0xffffff) == BACKGROUND_RGB &&
+          (buffer.pixels[63] & 0xffffff) == BACKGROUND_RGB);
+    zwlr_screencopy_frame_v1_destroy(frame);
+
+    frame = legacy_region(fixture, &buffer);
+    CHECK(frame && pump_until(fixture, &buffer.constrained));
+    zwlr_screencopy_frame_v1_copy_with_damage(frame, buffer.buffer);
+    CHECK(pump_for(fixture, 50) && !buffer.ready && fixture->output->attach_render_locks == 1);
+    CHECK(wlr_output_cursor_move(fixture->cursor, 29, 33));
+    seaside_output_capture_cursor_changed(fixture->capture);
+    CHECK(pump_until(fixture, &buffer.ready) && !buffer.failed && buffer.full_damage &&
+          (buffer.pixels[9] & 0xffffff) == BACKGROUND_RGB &&
+          (buffer.pixels[37] & 0xffffff) == CURSOR_RGB);
+    CHECK(fixture->output->attach_render_locks == 0 &&
+          fixture->output->hardware_cursor == fixture->cursor &&
+          fixture->output->software_cursor_locks == 0);
+    zwlr_screencopy_frame_v1_destroy(frame);
+
+    frame = legacy_region(fixture, &buffer);
+    CHECK(frame && pump_until(fixture, &buffer.constrained));
+    zwlr_screencopy_frame_v1_copy_with_damage(frame, buffer.buffer);
+    CHECK(sync_client(fixture) && fixture->output->attach_render_locks == 1);
+    zwlr_screencopy_frame_v1_destroy(frame);
+    frame = NULL;
+    CHECK(sync_client(fixture) && fixture->output->attach_render_locks == 0 && !buffer.ready);
+    passed = true;
+
+done:
+    fixture->empty_output_damage = false;
+    if (frame) {
+        zwlr_screencopy_frame_v1_destroy(frame);
+    }
+    release_buffer(&buffer);
+    return passed;
+}
+
 static bool check_selected_window(struct fixture *fixture) {
     bool passed = false;
     struct painted_window selected = {0}, occluding = {0};
@@ -1025,6 +1162,7 @@ int main(int argc, char **argv) {
     CHECK(fixture.output->software_cursor_locks == 0);
     finish_session(&resumed);
     CHECK(sync_client(&fixture) && fixture.output->attach_render_locks == 0);
+    CHECK(!part7 || check_legacy_capture(&fixture));
     CHECK(!part7 || check_selected_window(&fixture));
     puts("output capture PASS hidden=2 embedded=3 moved=yes reattached=yes layout=yes "
          "cursor-locks=0");
@@ -1043,6 +1181,9 @@ done:
     }
     if (fixture.copy_manager) {
         ext_image_copy_capture_manager_v1_destroy(fixture.copy_manager);
+    }
+    if (fixture.legacy_manager) {
+        zwlr_screencopy_manager_v1_destroy(fixture.legacy_manager);
     }
     if (fixture.output_manager) {
         ext_output_image_capture_source_manager_v1_destroy(fixture.output_manager);

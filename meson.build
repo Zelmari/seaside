@@ -99,6 +99,11 @@ legacy_capture_server = custom_target(
   output: 'wlr-screencopy-unstable-v1-server-protocol.h',
   command: [wayland_scanner, 'server-header', '@INPUT@', '@OUTPUT@'],
 )
+legacy_capture_client = custom_target(
+  'legacy-capture-client-header', input: legacy_capture_xml,
+  output: 'wlr-screencopy-unstable-v1-client-protocol.h',
+  command: [wayland_scanner, 'client-header', '@INPUT@', '@OUTPUT@'],
+)
 legacy_capture_code = custom_target(
   'legacy-capture-private-code', input: legacy_capture_xml,
   output: 'wlr-screencopy-unstable-v1-protocol.c',
@@ -171,7 +176,7 @@ capture_test = executable(
   'seaside-output-capture-test',
   ['tests/integration/output_capture.c', capture_source_client, capture_copy_client, capture_copy_code,
    xdg_output_client, xdg_output_code, xdg_shell_client_header, xdg_shell_private_code,
-   foreign_toplevel_client],
+   foreign_toplevel_client, legacy_capture_client],
   include_directories: include_directories('src'),
   dependencies: [wlroots, wayland_server, wayland_client, pixman, libdrm, threads],
   link_with: [capture_foundation, core], install: false,
