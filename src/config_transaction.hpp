@@ -25,6 +25,10 @@ struct ConfigCandidate {
     Config config;
     std::string text;
 };
+struct PreparedConfigCandidate {
+    ConfigCandidate candidate;
+    std::shared_ptr<const void> prepared;
+};
 
 LoadedConfig load_startup_config(const ConfigStore &store, const ConfigPaths &paths);
 std::expected<ConfigCandidate, Diagnostic> load_config_candidate(const ConfigStore &store,
@@ -37,8 +41,8 @@ struct ConfigEffects {
     bool night_light_changed = false;
 };
 
-// Logical state only. Preparation must check readiness without mutating active
-// graphical state. Actual output/image preparation belongs to later modules.
+// Logical state only. The caller prepares or applies graphical changes on the
+// owner thread and retains the prior effective state if that operation fails.
 class ConfigTransaction {
   public:
     using Prepare = std::function<std::expected<void, Diagnostic>(const Config &, const Config &)>;
@@ -78,6 +82,10 @@ class ConfigTransaction {
 class AsyncConfigIo {
   public:
     using LoadCompletion = std::function<void(std::expected<ConfigCandidate, Diagnostic>)>;
+    using Prepare =
+        std::function<std::expected<std::shared_ptr<const void>, Diagnostic>(const Config &)>;
+    using PreparedCompletion =
+        std::function<void(std::expected<PreparedConfigCandidate, Diagnostic>)>;
     using SaveCompletion = std::function<void(std::optional<StorageError>)>;
     AsyncConfigIo(WorkQueue &queue, ConfigStore store);
     ~AsyncConfigIo();
@@ -85,6 +93,10 @@ class AsyncConfigIo {
     AsyncConfigIo &operator=(const AsyncConfigIo &) = delete;
     std::expected<void, WorkError> load(std::filesystem::path path, std::uint64_t generation,
                                         LoadCompletion completion);
+    std::expected<void, WorkError> load_prepared(std::filesystem::path path,
+                                                 std::uint64_t generation,
+                                                 std::size_t reservation_bytes, Prepare prepare,
+                                                 PreparedCompletion completion);
     std::expected<void, WorkError> persist(std::filesystem::path path, std::string text,
                                            std::uint64_t generation, SaveCompletion completion);
 

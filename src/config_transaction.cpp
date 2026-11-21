@@ -89,6 +89,10 @@ std::expected<ConfigEffects, Diagnostic> ConfigTransaction::commit(ConfigCandida
         return std::unexpected(transaction_error("stale or non-owner configuration commit"));
     if (!prepare)
         return std::unexpected(transaction_error("configuration preparation is required"));
+    // Allocate before applying graphical changes. Successful preparation can
+    // leave output state committed, so the logical publication must be no-throw.
+    auto new_active = candidate.config;
+    new_active.workspaces.mode = active_.workspaces.mode;
     auto ready = [&]() -> std::expected<void, Diagnostic> {
         try {
             return prepare(active_, candidate.config);
@@ -102,9 +106,6 @@ std::expected<ConfigEffects, Diagnostic> ConfigTransaction::commit(ConfigCandida
         diagnostic_ = ready.error();
         return std::unexpected(ready.error());
     }
-    // Copy before mutation: allocation failure cannot partially replace active state.
-    auto new_active = candidate.config;
-    new_active.workspaces.mode = active_.workspaces.mode;
     const bool reset = candidate.config.window.tiling != requested_.window.tiling ||
                        candidate.config.window.layout != requested_.window.layout;
     const bool change_night =
@@ -145,6 +146,22 @@ AsyncConfigIo::~AsyncConfigIo() {
 std::expected<void, WorkError> AsyncConfigIo::load(std::filesystem::path path,
                                                    std::uint64_t generation,
                                                    LoadCompletion completion) {
+    if (!completion)
+        return std::unexpected(WorkError::invalid_job);
+    return load_prepared(std::move(path), generation, 64 * 1024 * 1024, {},
+                         [completion = std::move(completion)](auto result) {
+                             if (result)
+                                 completion(std::move(result->candidate));
+                             else
+                                 completion(std::unexpected(std::move(result.error())));
+                         });
+}
+
+std::expected<void, WorkError> AsyncConfigIo::load_prepared(std::filesystem::path path,
+                                                            std::uint64_t generation,
+                                                            std::size_t reservation_bytes,
+                                                            Prepare prepare,
+                                                            PreparedCompletion completion) {
     if (owner_ != std::this_thread::get_id())
         return std::unexpected(WorkError::wrong_thread);
     if (!completion)
@@ -157,14 +174,24 @@ std::expected<void, WorkError> AsyncConfigIo::load(std::filesystem::path path,
     // Attempt generations filter parses; accepted generations govern writes.
     // An invalid new attempt must not cancel a prior valid snapshot job.
     auto submitted = queue_.submit(
-        0, lifetime_, 64 * 1024 * 1024,
-        [store = std::move(store), path = std::move(path),
-         generation](std::stop_token stop) -> WorkResult {
+        0, lifetime_, reservation_bytes,
+        [store = std::move(store), path = std::move(path), generation, reservation_bytes,
+         prepare = std::move(prepare)](std::stop_token stop) -> WorkResult {
             if (stop.stop_requested())
                 return {{}, 0, WorkError::cancelled};
-            auto result = std::make_shared<std::expected<ConfigCandidate, Diagnostic>>(
-                load_config_candidate(store, path, generation));
-            return {std::move(result), 64 * 1024 * 1024, WorkError::none};
+            using Result = std::expected<PreparedConfigCandidate, Diagnostic>;
+            auto loaded = load_config_candidate(store, path, generation);
+            if (!loaded)
+                return {std::make_shared<Result>(std::unexpected(std::move(loaded.error()))),
+                        reservation_bytes, WorkError::none};
+            auto prepared = prepare ? prepare(loaded->config)
+                                    : std::expected<std::shared_ptr<const void>, Diagnostic>{};
+            if (!prepared)
+                return {std::make_shared<Result>(std::unexpected(std::move(prepared.error()))),
+                        reservation_bytes, WorkError::none};
+            return {std::make_shared<Result>(
+                        PreparedConfigCandidate{std::move(*loaded), std::move(*prepared)}),
+                    reservation_bytes, WorkError::none};
         },
         [attempts = std::move(attempts), generation,
          completion = std::move(completion)](WorkResult result) {
@@ -173,9 +200,8 @@ std::expected<void, WorkError> AsyncConfigIo::load(std::filesystem::path path,
             if (result.error != WorkError::none || !result.value)
                 completion(std::unexpected(transaction_error("configuration worker failed")));
             else
-                completion(
-                    *std::static_pointer_cast<const std::expected<ConfigCandidate, Diagnostic>>(
-                        result.value));
+                completion(*std::static_pointer_cast<
+                           const std::expected<PreparedConfigCandidate, Diagnostic>>(result.value));
         });
     if (submitted)
         generation_->store(generation);
