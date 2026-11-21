@@ -142,8 +142,10 @@ std::expected<void, Diagnostic> OutputConfig::apply(const Config &config, bool p
             next.adaptive_sync = *capable;
         }
         const bool rotated = settings.rotation == 90 || settings.rotation == 270;
-        const auto width = static_cast<int>((rotated ? next.height : next.width) / next.scale);
-        const auto height = static_cast<int>((rotated ? next.width : next.height) / next.scale);
+        const auto width =
+            static_cast<int>(static_cast<float>(rotated ? next.height : next.width) / next.scale);
+        const auto height =
+            static_cast<int>(static_cast<float>(rotated ? next.width : next.height) / next.scale);
         changes.push_back({&output, connector, settings, output.status.settings, next, capable,
                            should_enable, width, height});
     }
