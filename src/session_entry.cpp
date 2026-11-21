@@ -234,14 +234,18 @@ class Session {
         desktop_.apply_initial_config(config.config);
         seaside_tty_input_set_sensitivity(input_, config.config.input.mouse.sensitivity);
         attaching_startup_ = false;
-        for (const auto &[connector, output] : outputs_.outputs()) {
-            if (output.enabled) {
-                const auto &state = output.status;
-                if (!attach_desktop_output(output.handle, connector, output.identity,
-                                           {state.settings.x, state.settings.y, state.logical_width,
-                                            state.logical_height})) {
-                    return false;
-                }
+        const auto attach = [this](const seaside::OutputConfig::Output &output) {
+            const auto &state = output.status;
+            return attach_desktop_output(output, {state.settings.x, state.settings.y,
+                                                  state.logical_width, state.logical_height});
+        };
+        const auto *primary = outputs_.primary();
+        if (primary && !attach(*primary)) {
+            return false;
+        }
+        for (const auto &[id, output] : outputs_.outputs()) {
+            if (output.enabled && &output != primary && !attach(output)) {
+                return false;
             }
         }
         outputs_.set_primary();
@@ -281,6 +285,7 @@ class Session {
             return false;
         }
         config_ = std::move(*live);
+        apply_render_policy();
         auto ipc = seaside::IpcServer::create(
             loop_, socket_,
             [this](std::string_view method, const IpcJson &params) {
@@ -462,6 +467,7 @@ class Session {
                                      ? !before
                                      : action.night_light == seaside::NightLightAction::on;
             config_->set_runtime_night_light(enabled);
+            apply_render_policy();
             return before != enabled;
         }
         default:
@@ -557,9 +563,18 @@ class Session {
         config_error_visible_ = true;
     }
 
+    void apply_render_policy() {
+        const auto &transaction = config_->transaction();
+        const auto &config = transaction.active();
+        scene_.set_render_policy(config.render.direct_scanout, config.render.allow_tearing,
+                                 transaction.runtime_night_light(),
+                                 config.night_light.temperature_kelvin);
+    }
+
     void config_changed(LiveConfig::Change change) {
         const auto &transaction = config_->transaction();
         if (change == LiveConfig::Change::committed) {
+            apply_render_policy();
             desktop_.apply_config(transaction.active());
             if (std::exchange(config_error_visible_, false)) {
                 scene_.set_config_error(std::nullopt);
@@ -599,7 +614,7 @@ class Session {
     }
 
     void reposition_capture() noexcept {
-        for (const auto &[connector, output] : outputs_.outputs()) {
+        for (const auto &[id, output] : outputs_.outputs()) {
             if (!output.enabled) {
                 continue;
             }
@@ -792,35 +807,39 @@ class Session {
         }
     }
 
-    bool attach_desktop_output(wlr_output *output, std::string_view connector,
-                               std::string_view identity, seaside::WindowRect bounds) noexcept {
-        if (!desktop_.add_output(output, connector, identity, bounds)) {
+    bool attach_desktop_output(const seaside::OutputConfig::Output &output,
+                               seaside::WindowRect bounds) noexcept {
+        if (!desktop_.add_output(output.handle, output.connector, output.identity, bounds,
+                                 output.id)) {
             return false;
         }
-        if (!seaside_output_capture_add_output(capture_.get(), output, bounds.x, bounds.y)) {
-            desktop_.remove_output(output);
+        if (!seaside_output_capture_add_output(capture_.get(), output.handle, bounds.x, bounds.y)) {
+            desktop_.remove_output(output.handle);
             return false;
         }
         return true;
     }
 
-    static bool output_added(void *data, wlr_output *output, const char *connector,
-                             const char *identity, int x, int y, int width, int height) noexcept {
+    static bool output_added(void *data, wlr_output *output, const char *, const char *, int x,
+                             int y, int width, int height) noexcept {
         auto &session = *static_cast<Session *>(data);
-        session.outputs_.enabled(connector, true);
+        const auto *record = session.outputs_.enabled(output, true);
+        if (!record) {
+            return false;
+        }
         if (session.attaching_startup_) {
             return true;
         }
         session.output_config_pending_ = true;
-        return session.attach_desktop_output(output, connector, identity ? identity : "",
-                                             {x, y, width, height});
+        return session.attach_desktop_output(*record, {x, y, width, height});
     }
 
-    static void output_removed(void *data, wlr_output *output, const char *connector) noexcept {
+    static void output_removed(void *data, wlr_output *output, const char *) noexcept {
         auto &session = *static_cast<Session *>(data);
-        session.outputs_.enabled(connector, false);
+        session.outputs_.enabled(output, false);
         seaside_output_capture_remove_output(session.capture_.get(), output);
-        session.desktop_.remove_output(output);
+        session.desktop_.remove_output(output, session.outputs_.ranked_fallback());
+        session.output_config_pending_ = !session.attaching_startup_;
     }
 
     static void output_observed(void *data, wlr_output *output, const char *connector,
@@ -877,7 +896,7 @@ class Session {
             session.fail("output-cursor-capture-setup");
             return 0;
         }
-        if (display.output_pending) {
+        if (display.active && (display.output_pending || session.output_config_pending_)) {
             session.apply_detected_outputs();
             seaside_tty_input_refresh_pointer(session.input_);
         }
@@ -999,6 +1018,7 @@ run_session(seaside::LoadedConfig config, seaside::Wallpaper wallpaper, seaside:
     if (!(*server)->start(pending_backend.release(), pending_renderer.release())) {
         return std::unexpected("backend-start");
     }
+    (*scene)->set_linux_dmabuf((*server)->dmabuf());
     if (!session.configure(std::move(config), store, std::move(wallpaper), runtime)) {
         return std::unexpected("configuration-or-ipc");
     }

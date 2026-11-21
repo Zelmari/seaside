@@ -214,6 +214,20 @@ void Scene::remove_output(wlr_output *output) noexcept {
     seaside_scene_remove_output(bridge_, output);
 }
 
+void Scene::set_linux_dmabuf(wlr_linux_dmabuf_v1 *dmabuf) noexcept {
+    seaside_scene_set_linux_dmabuf(bridge_, dmabuf);
+}
+
+void Scene::set_render_policy(bool direct_scanout, bool allow_tearing, bool night_light,
+                              int temperature_kelvin) noexcept {
+    seaside_scene_set_render_policy(bridge_, direct_scanout, allow_tearing, night_light,
+                                    temperature_kelvin);
+}
+
+seaside_scene_render_status Scene::render_status(wlr_output *output) const noexcept {
+    return seaside_scene_get_render_status(bridge_, output);
+}
+
 std::expected<SceneImage, SceneError> Scene::prepare_wallpaper(Wallpaper wallpaper) noexcept {
     if (!wallpaper) {
         return SceneImage{};

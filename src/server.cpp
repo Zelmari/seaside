@@ -47,7 +47,7 @@ std::expected<void, ServerError> Server::start(wlr_backend *backend,
     if (!allocator_) {
         return std::unexpected(ServerError::allocator_creation);
     }
-    if (!seaside_wlr_renderer_init_display(renderer, display_.get())) {
+    if (!seaside_wlr_renderer_init_display(renderer, display_.get(), backend, &dmabuf_)) {
         return std::unexpected(ServerError::renderer_initialization);
     }
     compositor_ = seaside_wlr_compositor_create(display_.get(), renderer);
@@ -178,6 +178,7 @@ void Server::finish() noexcept {
     // remain blocked until loop destruction has released the seat as well.
     restore_shutdown_signal_mask();
     compositor_ = nullptr;
+    dmabuf_ = nullptr;
     socket_name_ = nullptr;
     named_socket_.clear();
 }

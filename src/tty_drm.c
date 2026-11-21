@@ -621,18 +621,8 @@ void seaside_tty_drm_destroy(struct seaside_tty_drm *drm) {
 }
 
 static struct wlr_output_mode *initial_mode(struct wlr_output *output) {
-    struct wlr_output_mode *selected = wlr_output_preferred_mode(output);
-    if (!selected) {
-        return NULL;
-    }
-    struct wlr_output_mode *mode;
-    wl_list_for_each(mode, &output->modes, link) {
-        if (mode->width == selected->width && mode->height == selected->height &&
-            mode->refresh > selected->refresh) {
-            selected = mode;
-        }
-    }
-    return selected;
+    struct seaside_drm_output_settings settings = {0};
+    return seaside_tty_drm_select_mode(output, &settings) ? settings.mode : NULL;
 }
 
 static bool set_output_enabled(struct wlr_output *output, bool enabled,
@@ -675,6 +665,20 @@ static struct mode_rank maximum_mode_rank(const struct wlr_output *output) {
         }
     }
     return rank;
+}
+
+struct seaside_drm_output_description seaside_tty_drm_describe_output(struct wlr_output *output) {
+    const struct wlr_output_mode *preferred = wlr_output_preferred_mode(output);
+    const struct mode_rank rank = maximum_mode_rank(output);
+    return (struct seaside_drm_output_description){
+        .make = output->make,
+        .model = output->model,
+        .preferred_width = preferred ? preferred->width : 0,
+        .preferred_height = preferred ? preferred->height : 0,
+        .max_refresh_millihz = rank.refresh,
+        .max_pixels = rank.pixels,
+        .adaptive_sync_supported = output->adaptive_sync_supported,
+    };
 }
 
 static bool ranks_first(const struct tty_output *view, const struct tty_output *current) {
@@ -999,8 +1003,16 @@ bool seaside_tty_drm_check_settings(struct wlr_output *output,
 bool seaside_tty_drm_apply_settings(struct seaside_tty_drm *drm, struct wlr_output *output,
                                     const struct seaside_drm_output_settings *settings) {
     struct tty_output *view = find_output(drm, output);
+    const bool geometry_changed =
+        output->current_mode != settings->mode || output->scale != settings->scale ||
+        output->transform != (enum wl_output_transform)(settings->rotation / 90);
     if (!available(view) || !configure_output(output, settings, false)) {
         return false;
+    }
+    if (geometry_changed) {
+        view->cursor_presented = false;
+        view->movement_verified = false;
+        view->cursor_plane_id = 0;
     }
     view->x = settings->x;
     view->y = settings->y;

@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "window_capture.h"
 
+#include <drm.h>
 #include <drm_fourcc.h>
 #include <glib.h>
 #include <stdlib.h>
@@ -10,6 +11,7 @@
 #include <wayland-server-core.h>
 #include <wlr/interfaces/wlr_ext_image_capture_source_v1.h>
 #include <wlr/render/allocator.h>
+#include <wlr/render/drm_syncobj.h>
 #include <wlr/render/pass.h>
 #include <wlr/render/swapchain.h>
 #include <wlr/render/wlr_renderer.h>
@@ -17,6 +19,7 @@
 #include <wlr/types/wlr_buffer.h>
 #include <wlr/types/wlr_ext_foreign_toplevel_list_v1.h>
 #include <wlr/types/wlr_ext_image_copy_capture_v1.h>
+#include <wlr/types/wlr_linux_drm_syncobj_v1.h>
 #include <wlr/types/wlr_subcompositor.h>
 #include <wlr/types/wlr_xdg_shell.h>
 #include <wlr/util/transform.h>
@@ -38,6 +41,10 @@ struct seaside_window_source {
     struct wlr_ext_foreign_toplevel_handle_v1 *handle;
     struct wlr_ext_image_capture_source_v1 source;
     struct wlr_swapchain *swapchain;
+    struct wlr_drm_syncobj_timeline *timeline;
+    uint64_t render_point;
+    struct wlr_buffer *rendered_buffer;
+    struct timespec rendered_at;
     struct wl_event_source *timer;
     struct wl_list observers;
     struct wl_list painted_link, painted_sessions;
@@ -253,6 +260,8 @@ static bool update_constraints(struct seaside_window_source *target) {
 struct render_window {
     struct wlr_render_pass *pass;
     struct wlr_box geometry;
+    struct seaside_window_source *target;
+    bool failed;
 };
 
 static void draw_surface(struct wlr_surface *surface, int x, int y, void *data) {
@@ -290,12 +299,24 @@ static void draw_surface(struct wlr_surface *surface, int x, int y, void *data) 
         wlr_fbox_transform(&source, &source, wlr_output_transform_invert(transform), buffer_width,
                            buffer_height);
     }
+    struct wlr_linux_drm_syncobj_surface_v1_state *sync =
+        wlr_linux_drm_syncobj_v1_get_surface_state(surface);
+    if (sync && sync->acquire_timeline &&
+        !wlr_linux_drm_syncobj_v1_state_add_release_point(
+            sync, render->target->timeline, render->target->render_point,
+            wl_display_get_event_loop(render->target->owner->display))) {
+        // Never read a client buffer unless its release tracks this pass.
+        render->failed = true;
+        return;
+    }
     wlr_render_pass_add_texture(render->pass,
                                 &(struct wlr_render_texture_options){
                                     .texture = texture,
                                     .src_box = source,
                                     .dst_box = destination,
                                     .transform = wlr_output_transform_invert(transform),
+                                    .wait_timeline = sync ? sync->acquire_timeline : NULL,
+                                    .wait_point = sync ? sync->acquire_point : 0,
                                 });
 }
 
@@ -305,33 +326,64 @@ static void callback_surface(struct wlr_surface *surface, int x, int y, void *da
     wlr_surface_send_frame_done(surface, data);
 }
 
+static void check_sync_surface(struct wlr_surface *surface, int x, int y, void *data) {
+    (void)x;
+    (void)y;
+    bool *explicit_sync = data;
+    const struct wlr_linux_drm_syncobj_surface_v1_state *sync =
+        wlr_linux_drm_syncobj_v1_get_surface_state(surface);
+    *explicit_sync |= sync && sync->acquire_timeline;
+}
+
+static void publish_frame(struct seaside_window_source *target, struct wlr_buffer *buffer,
+                          struct timespec when) {
+    pixman_region32_t damage;
+    pixman_region32_init_rect(&damage, 0, 0, buffer->width, buffer->height);
+    struct window_frame frame = {.base = {.damage = &damage}, .buffer = buffer, .when = when};
+    wl_signal_emit_mutable(&target->source.events.frame, &frame.base);
+    wlr_buffer_unlock(frame.with_cursor);
+    pixman_region32_fini(&damage);
+}
+
 static bool emit_frame(struct seaside_window_source *target, struct timespec when) {
+    struct wlr_renderer *renderer = target->owner->renderer;
+    bool explicit_sync = false;
+    wlr_xdg_surface_for_each_surface(target->toplevel->base, check_sync_surface, &explicit_sync);
+    if (explicit_sync && !target->timeline) {
+        target->timeline = wlr_drm_syncobj_timeline_create(wlr_renderer_get_drm_fd(renderer));
+        if (!target->timeline) {
+            return false;
+        }
+    }
     struct wlr_buffer *buffer = wlr_swapchain_acquire(target->swapchain);
     if (!buffer) {
         return false;
     }
-    struct wlr_render_pass *pass =
-        wlr_renderer_begin_buffer_pass(target->owner->renderer, buffer, NULL);
+    const struct wlr_buffer_pass_options options = {
+        .signal_timeline = explicit_sync ? target->timeline : NULL,
+        .signal_point = explicit_sync ? ++target->render_point : 0,
+    };
+    struct wlr_render_pass *pass = wlr_renderer_begin_buffer_pass(renderer, buffer, &options);
     bool rendered = false;
     if (pass) {
         const struct wlr_box geometry = target->toplevel->base->geometry;
-        pixman_region32_t full_damage;
-        pixman_region32_init_rect(&full_damage, 0, 0, buffer->width, buffer->height);
         wlr_render_pass_add_rect(pass, &(struct wlr_render_rect_options){
                                            .box = {0, 0, buffer->width, buffer->height},
                                            .color = {0, 0, 0, 1},
                                            .blend_mode = WLR_RENDER_BLEND_MODE_NONE,
                                        });
-        struct render_window render = {.pass = pass, .geometry = geometry};
+        struct render_window render = {.pass = pass, .geometry = geometry, .target = target};
         wlr_xdg_surface_for_each_surface(target->toplevel->base, draw_surface, &render);
-        rendered = wlr_render_pass_submit(pass);
-        if (rendered) {
-            struct window_frame frame = {
-                .base = {.damage = &full_damage}, .buffer = buffer, .when = when};
-            wl_signal_emit_mutable(&target->source.events.frame, &frame.base);
-            wlr_buffer_unlock(frame.with_cursor);
+        rendered = wlr_render_pass_submit(pass) && !render.failed;
+        if (rendered && explicit_sync) {
+            target->rendered_buffer = buffer;
+            target->rendered_at = when;
+            schedule(target);
+            return true;
         }
-        pixman_region32_fini(&full_damage);
+        if (rendered) {
+            publish_frame(target, buffer, when);
+        }
     }
     wlr_buffer_unlock(buffer);
     return rendered;
@@ -347,6 +399,23 @@ static void invalidate_source(struct seaside_window_source *target) {
 static int capture_tick(void *data) {
     struct seaside_window_source *target = data;
     target->scheduled = false;
+    if (target->rendered_buffer) {
+        bool ready = false;
+        if (!wlr_drm_syncobj_timeline_check(target->timeline, target->render_point,
+                                            DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT, &ready)) {
+            invalidate_source(target);
+            return 0;
+        }
+        if (!ready) {
+            schedule(target);
+            return 0;
+        }
+        // Export/copy only after the GPU finishes writing the capture buffer.
+        struct wlr_buffer *buffer = target->rendered_buffer;
+        target->rendered_buffer = NULL;
+        publish_frame(target, buffer, target->rendered_at);
+        wlr_buffer_unlock(buffer);
+    }
     struct timespec now;
     const bool requested = target->pending;
     if (clock_gettime(CLOCK_MONOTONIC, &now) != 0 ||
@@ -390,6 +459,11 @@ static void stop(struct wlr_ext_image_capture_source_v1 *source) {
         wl_event_source_timer_update(target->timer, 0);
         target->scheduled = false;
         target->pending = false;
+        wlr_buffer_unlock(target->rendered_buffer);
+        target->rendered_buffer = NULL;
+        wlr_drm_syncobj_timeline_unref(target->timeline);
+        target->timeline = NULL;
+        target->render_point = 0;
         struct observed_surface *observer, *next;
         wl_list_for_each_safe(observer, next, &target->observers, link) {
             remove_observer(observer);

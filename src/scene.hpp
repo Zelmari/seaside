@@ -29,6 +29,10 @@ class Scene final {
     std::expected<void, SceneError> add_output(wlr_output *output) noexcept;
     bool place_output(wlr_output *output, int x, int y) noexcept;
     void remove_output(wlr_output *output) noexcept;
+    void set_linux_dmabuf(wlr_linux_dmabuf_v1 *dmabuf) noexcept;
+    void set_render_policy(bool direct_scanout, bool allow_tearing, bool night_light,
+                           int temperature_kelvin) noexcept;
+    seaside_scene_render_status render_status(wlr_output *output) const noexcept;
     static std::expected<SceneImage, SceneError> prepare_wallpaper(Wallpaper wallpaper) noexcept;
     void set_wallpaper(SceneImage image) noexcept;
     void set_config_error(const std::optional<Diagnostic> &error) noexcept;

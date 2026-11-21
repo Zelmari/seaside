@@ -35,7 +35,8 @@ extern "C" {
 wl_display *__real_wl_display_create();
 void __real_wl_display_destroy(wl_display *);
 wlr_allocator *__real_seaside_wlr_allocator_create(wlr_backend *, wlr_renderer *);
-bool __real_seaside_wlr_renderer_init_display(wlr_renderer *, wl_display *);
+bool __real_seaside_wlr_renderer_init_display(wlr_renderer *, wl_display *, wlr_backend *,
+                                              wlr_linux_dmabuf_v1 **);
 wlr_compositor *__real_seaside_wlr_compositor_create(wl_display *, wlr_renderer *);
 bool __real_seaside_wlr_backend_start(wlr_backend *);
 void __real_seaside_wlr_backend_destroy(wlr_backend *);
@@ -53,9 +54,10 @@ wlr_allocator *__wrap_seaside_wlr_allocator_create(wlr_backend *backend, wlr_ren
     return failure == Failure::allocator ? nullptr
                                          : __real_seaside_wlr_allocator_create(backend, renderer);
 }
-bool __wrap_seaside_wlr_renderer_init_display(wlr_renderer *renderer, wl_display *display) {
+bool __wrap_seaside_wlr_renderer_init_display(wlr_renderer *renderer, wl_display *display,
+                                              wlr_backend *backend, wlr_linux_dmabuf_v1 **dmabuf) {
     return failure != Failure::renderer &&
-           __real_seaside_wlr_renderer_init_display(renderer, display);
+           __real_seaside_wlr_renderer_init_display(renderer, display, backend, dmabuf);
 }
 wlr_compositor *__wrap_seaside_wlr_compositor_create(wl_display *display, wlr_renderer *renderer) {
     return failure == Failure::compositor ? nullptr

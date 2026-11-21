@@ -1,4 +1,6 @@
+#include "fractional-scale-v1-client-protocol.h"
 #include "part3_bridge.h"
+#include "presentation-time-client-protocol.h"
 #include "scene.hpp"
 #include "server.hpp"
 #include "wlroots_bridge.h"
@@ -73,10 +75,17 @@ struct Client {
     wl_compositor *compositor = nullptr;
     wl_shm *shm = nullptr;
     xdg_wm_base *shell = nullptr;
+    wp_fractional_scale_manager_v1 *fractional_scale = nullptr;
+    wp_presentation *presentation = nullptr;
     xdg_surface *xdg = nullptr;
     unsigned configures = 0;
     unsigned frames = 0;
     unsigned activations = 0;
+    unsigned preferred_scale = 0;
+    unsigned presented = 0;
+    std::optional<std::uint32_t> presentation_clock;
+    bool test_display_protocols = false;
+    bool feedback_discarded = false;
     bool expect_focus = false;
     bool invalid_configure = false;
 };
@@ -85,6 +94,33 @@ void shell_ping(void *, xdg_wm_base *shell, std::uint32_t serial) {
     xdg_wm_base_pong(shell, serial);
 }
 const xdg_wm_base_listener shell_listener{.ping = shell_ping};
+
+void presentation_clock(void *data, wp_presentation *, std::uint32_t id) {
+    static_cast<Client *>(data)->presentation_clock = id;
+}
+const wp_presentation_listener presentation_listener{.clock_id = presentation_clock};
+
+void preferred_scale(void *data, wp_fractional_scale_v1 *, std::uint32_t scale) {
+    static_cast<Client *>(data)->preferred_scale = scale;
+}
+const wp_fractional_scale_v1_listener scale_listener{.preferred_scale = preferred_scale};
+
+void sync_output(void *, struct wp_presentation_feedback *, wl_output *) {}
+
+void frame_presented(void *data, struct wp_presentation_feedback *feedback, std::uint32_t,
+                     std::uint32_t, std::uint32_t nanoseconds, std::uint32_t, std::uint32_t,
+                     std::uint32_t, std::uint32_t) {
+    auto &client = *static_cast<Client *>(data);
+    client.presented += nanoseconds < 1'000'000'000;
+    wp_presentation_feedback_destroy(feedback);
+}
+
+void frame_discarded(void *data, struct wp_presentation_feedback *feedback) {
+    static_cast<Client *>(data)->feedback_discarded = true;
+    wp_presentation_feedback_destroy(feedback);
+}
+const wp_presentation_feedback_listener feedback_listener{
+    .sync_output = sync_output, .presented = frame_presented, .discarded = frame_discarded};
 
 void registry_global(void *data, wl_registry *registry, std::uint32_t name, const char *interface,
                      std::uint32_t version) {
@@ -98,6 +134,15 @@ void registry_global(void *data, wl_registry *registry, std::uint32_t name, cons
         client.shell =
             static_cast<xdg_wm_base *>(wl_registry_bind(registry, name, &xdg_wm_base_interface, 6));
         xdg_wm_base_add_listener(client.shell, &shell_listener, nullptr);
+    } else if (client.test_display_protocols &&
+               std::strcmp(interface, wp_presentation_interface.name) == 0) {
+        client.presentation = static_cast<wp_presentation *>(
+            wl_registry_bind(registry, name, &wp_presentation_interface, 1));
+        wp_presentation_add_listener(client.presentation, &presentation_listener, &client);
+    } else if (client.test_display_protocols &&
+               std::strcmp(interface, wp_fractional_scale_manager_v1_interface.name) == 0) {
+        client.fractional_scale = static_cast<wp_fractional_scale_manager_v1 *>(
+            wl_registry_bind(registry, name, &wp_fractional_scale_manager_v1_interface, 1));
     }
 }
 void registry_remove(void *, wl_registry *, std::uint32_t) {}
@@ -196,11 +241,14 @@ template <class Predicate> bool wait_for(Client &client, Predicate ready) {
     return true;
 }
 
-bool exercise_client(const char *socket, bool abrupt, bool hold, int completion_fd) {
+bool exercise_client(const char *socket, bool abrupt, bool hold, int completion_fd,
+                     bool test_display_protocols) {
     if (unsetenv("WAYLAND_SOCKET") < 0) {
         return false;
     }
-    Client client{.expect_focus = !abrupt || hold};
+    Client client;
+    client.test_display_protocols = test_display_protocols;
+    client.expect_focus = !abrupt || hold;
     client.display = wl_display_connect(socket);
     if (!client.display) {
         return false;
@@ -208,11 +256,19 @@ bool exercise_client(const char *socket, bool abrupt, bool hold, int completion_
     auto *registry = wl_display_get_registry(client.display);
     wl_registry_add_listener(registry, &registry_listener, &client);
     if (wl_display_roundtrip(client.display) < 0 || !client.compositor || !client.shm ||
-        !client.shell) {
+        !client.shell ||
+        (test_display_protocols && (!client.fractional_scale || !client.presentation))) {
         wl_display_disconnect(client.display);
         return false;
     }
     auto *surface = wl_compositor_create_surface(client.compositor);
+    auto *scale =
+        test_display_protocols
+            ? wp_fractional_scale_manager_v1_get_fractional_scale(client.fractional_scale, surface)
+            : nullptr;
+    if (scale) {
+        wp_fractional_scale_v1_add_listener(scale, &scale_listener, &client);
+    }
     client.xdg = xdg_wm_base_get_xdg_surface(client.shell, surface);
     xdg_surface_add_listener(client.xdg, &surface_listener, &client);
     auto *toplevel = xdg_surface_get_toplevel(client.xdg);
@@ -247,11 +303,17 @@ bool exercise_client(const char *socket, bool abrupt, bool hold, int completion_
         const unsigned activations_before_map = client.activations;
         auto *frame = wl_surface_frame(surface);
         wl_callback_add_listener(frame, &frame_listener, &client);
+        if (test_display_protocols) {
+            auto *feedback = wp_presentation_feedback(client.presentation, surface);
+            wp_presentation_feedback_add_listener(feedback, &feedback_listener, &client);
+        }
         wl_surface_attach(surface, buffer, 0, 0);
         wl_surface_damage_buffer(surface, 0, 0, client_width, client_height);
         wl_surface_commit(surface);
         passed = wait_for(client, [&] {
             return client.frames >= i + 1 &&
+                   (!test_display_protocols || client.presented >= i + 1 ||
+                    client.feedback_discarded) &&
                    (!client.expect_focus || client.activations > activations_before_map);
         });
         if (abrupt) {
@@ -272,6 +334,16 @@ bool exercise_client(const char *socket, bool abrupt, bool hold, int completion_
     }
     passed =
         passed && !client.invalid_configure && (client.activations != 0) == client.expect_focus;
+    if (test_display_protocols) {
+        passed = passed && client.presentation_clock == CLOCK_MONOTONIC &&
+                 client.preferred_scale == 150 && client.presented == rounds &&
+                 !client.feedback_discarded;
+        std::printf("part8 client presentation events=%u preferred scale=%u discarded=%d\n",
+                    client.presented, client.preferred_scale, client.feedback_discarded);
+        wp_fractional_scale_v1_destroy(scale);
+        wp_fractional_scale_manager_v1_destroy(client.fractional_scale);
+        wp_presentation_destroy(client.presentation);
+    }
     if (hold) {
         const unsigned char result = passed;
         ssize_t count;
@@ -376,7 +448,8 @@ int child_done(int fd, std::uint32_t, void *data) {
     return 0;
 }
 
-bool run_round(bool abrupt, int stop_signal, bool hold = false) {
+bool run_round(bool abrupt, int stop_signal, bool hold = false,
+               bool test_display_protocols = false) {
     RuntimeDirectory directory;
     FocusObservation focus;
     const std::filesystem::path runtime(directory.path());
@@ -409,7 +482,8 @@ bool run_round(bool abrupt, int stop_signal, bool hold = false) {
         part3_output_create(server->display(), backend, server->allocator(), renderer),
         part3_output_destroy);
     auto socket = server->listen();
-    if (!output || !socket || !scene->add_output(part3_output_handle(output.get())) ||
+    if (!output || (test_display_protocols && !part3_output_set_scale(output.get(), 1.25f)) ||
+        !socket || !scene->add_output(part3_output_handle(output.get())) ||
         scene->add_output(part3_output_handle(output.get())) || server->listen() ||
         !server->install_shutdown_signals()) {
         return false;
@@ -439,9 +513,10 @@ bool run_round(bool abrupt, int stop_signal, bool hold = false) {
         char descriptor[32];
         std::snprintf(descriptor, sizeof(descriptor), "%d", pipe[1]);
         execl("/proc/self/exe", "seaside-part3-fixture", "--client", socket->data(), descriptor,
-              hold     ? "hold"
-              : abrupt ? "abrupt"
-                       : "orderly",
+              test_display_protocols ? "display-protocols"
+              : hold                 ? "hold"
+              : abrupt               ? "abrupt"
+                                     : "orderly",
               static_cast<char *>(nullptr));
         _exit(2);
     }
@@ -513,6 +588,11 @@ bool run_round(bool abrupt, int stop_signal, bool hold = false) {
     }
     const auto snapshot = scene->snapshot();
     const auto pixels = part3_output_get_snapshot(output.get());
+    if (test_display_protocols) {
+        const auto status = scene->render_status(part3_output_handle(output.get()));
+        passed = passed && std::string_view(status.presentation_mode) == "composed" &&
+                 status.night_light == SEASIDE_OUTPUT_UNSUPPORTED;
+    }
     const unsigned expected = abrupt ? 1 : 2;
     const unsigned expected_focus_events = expect_focus ? expected : 0;
     passed = passed && focus.valid && focus.surface == nullptr &&
@@ -559,7 +639,8 @@ int main(int argc, char **argv) {
         const int descriptor = std::atoi(argv[3]);
         const bool hold = std::strcmp(argv[4], "hold") == 0;
         const unsigned char result =
-            exercise_client(argv[2], hold || std::strcmp(argv[4], "abrupt") == 0, hold, descriptor);
+            exercise_client(argv[2], hold || std::strcmp(argv[4], "abrupt") == 0, hold, descriptor,
+                            std::strcmp(argv[4], "display-protocols") == 0);
         ssize_t count = 1;
         if (!hold) {
             do {
@@ -569,10 +650,14 @@ int main(int argc, char **argv) {
         close(descriptor);
         return result == 1 && count == 1 ? EXIT_SUCCESS : EXIT_FAILURE;
     }
-    if (argc != 1) {
+    const bool display_protocols = argc == 2 && std::strcmp(argv[1], "--display-protocols") == 0;
+    if (argc != 1 && !display_protocols) {
         return EXIT_FAILURE;
     }
     try {
+        if (display_protocols) {
+            return run_round(false, SIGTERM, false, true) ? EXIT_SUCCESS : EXIT_FAILURE;
+        }
         const bool passed =
             run_round(false, SIGTERM) && run_round(true, SIGINT) && run_round(true, SIGTERM, true);
         std::printf("{\"event\":\"part3-headless\",\"status\":\"%s\",\"rounds\":%d}\n",

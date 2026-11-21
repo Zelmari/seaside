@@ -5,6 +5,7 @@
 #include "test_directory.hpp"
 #include "wlroots_bridge.h"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdlib>
@@ -13,6 +14,7 @@
 #include <gtest/gtest.h>
 #include <map>
 #include <memory>
+#include <stdexcept>
 #include <sys/socket.h>
 #include <unistd.h>
 #include <utility>
@@ -27,9 +29,25 @@ struct seaside_tty_drm {
     std::vector<wlr_output *> rejected;
     wlr_output *reject_change = nullptr;
     wlr_output *reject_restore = nullptr;
+    wlr_output *reject_adaptive_sync = nullptr;
 };
 
+namespace {
+std::map<wlr_output *, seaside_drm_output_description> descriptions;
+constexpr seaside_drm_output_description standard_display{.make = "Seaside",
+                                                          .model = "Fixture",
+                                                          .preferred_width = 160,
+                                                          .preferred_height = 90,
+                                                          .max_refresh_millihz = 60000,
+                                                          .max_pixels = 160 * 90,
+                                                          .adaptive_sync_supported = false};
+} // namespace
+
 extern "C" {
+seaside_drm_output_description seaside_tty_drm_describe_output(wlr_output *output) {
+    return descriptions.at(output);
+}
+
 bool seaside_tty_drm_output_status(seaside_tty_drm *drm, wlr_output *output,
                                    seaside_drm_output_status *status) {
     *status = drm->state.at(output);
@@ -52,12 +70,17 @@ bool seaside_tty_drm_apply_settings(seaside_tty_drm *drm, wlr_output *output,
     auto &current = drm->state.at(output);
     drm->commits.emplace_back(output, settings->scale);
     if ((output == drm->reject_change && settings->scale == 2) ||
-        (output == drm->reject_restore && settings->scale == 1)) {
+        (output == drm->reject_restore && settings->scale == 1) ||
+        (output == drm->reject_adaptive_sync && settings->adaptive_sync)) {
         return false;
     }
     current.settings = *settings;
-    current.logical_width = settings->scale == 2 ? 80 : 160;
-    current.logical_height = settings->scale == 2 ? 45 : 90;
+    const bool rotated = settings->rotation == 90 || settings->rotation == 270;
+    current.logical_width = static_cast<int>(
+        static_cast<float>(rotated ? settings->height : settings->width) / settings->scale);
+    current.logical_height = static_cast<int>(
+        static_cast<float>(rotated ? settings->width : settings->height) / settings->scale);
+    current.adaptive_sync = settings->adaptive_sync;
     return true;
 }
 
@@ -107,13 +130,16 @@ class OutputTrial : public testing::Test {
         ASSERT_TRUE(wait([this] { return live->transaction().recovery_persisted(); }));
     }
 
+    void TearDown() override { descriptions.clear(); }
+
     FixtureOutput make_output() {
         return {part3_output_create(server->display(), server->backend(), server->allocator(),
                                     server->renderer()),
                 part3_output_destroy};
     }
 
-    void attach(part3_output *handle, std::string_view name, int x) {
+    void attach(part3_output *handle, std::string_view name, int x, std::string_view identity = {},
+                seaside_drm_output_description description = standard_display) {
         auto *output = part3_output_handle(handle);
         seaside_drm_output_status status{};
         status.settings = {nullptr, 160, 90, 60000, x, 0, 0, 1.0F, false};
@@ -121,9 +147,30 @@ class OutputTrial : public testing::Test {
         status.logical_height = 90;
         status.cursor = true;
         drm.state.insert_or_assign(output, status);
-        outputs->observe(output, name, {}, true, nullptr);
-        outputs->enabled(name, true);
-        ASSERT_TRUE(desktop->add_output(output, name, {}, {x, 0, 160, 90}));
+        descriptions.insert_or_assign(output, description);
+        outputs->observe(output, name, identity, true, nullptr);
+        const auto *record = outputs->enabled(output, true);
+        ASSERT_NE(record, nullptr);
+        ASSERT_TRUE(desktop->add_output(output, name, identity, {x, 0, 160, 90}, record->id));
+    }
+
+    void detach(FixtureOutput &handle, std::string_view connector) {
+        auto *output = part3_output_handle(handle.get());
+        outputs->enabled(output, false);
+        desktop->remove_output(output, outputs->ranked_fallback());
+        outputs->observe(output, connector, {}, false, nullptr);
+        descriptions.erase(output);
+        handle.reset();
+    }
+
+    const OutputConfig::Output &connected(std::string_view connector) const {
+        auto found = std::ranges::find_if(outputs->outputs(), [&](const auto &row) {
+            return row.second.handle && row.second.connector == connector;
+        });
+        if (found == outputs->outputs().end()) {
+            throw std::runtime_error("Fixture output is disconnected");
+        }
+        return found->second;
     }
 
     bool wait(const std::function<bool()> &condition) {
@@ -254,10 +301,7 @@ TEST_F(OutputTrial, ReportsNoUsableOutputsAndRecoversTheSameOutputAndWorkspace) 
     EXPECT_TRUE(first["connected"].get<bool>());
     EXPECT_TRUE(workspace.is_number_unsigned());
 
-    auto *handle = part3_output_handle(output.get());
-    desktop->remove_output(handle);
-    outputs->observe(handle, "monitor", {}, false, nullptr);
-    output.reset();
+    detach(output, "monitor");
     const auto disconnected = query("query.outputs")["outputs"].at(0);
     EXPECT_EQ(disconnected["id"], first["id"]);
     EXPECT_EQ(disconnected["connected"], false);
@@ -273,6 +317,175 @@ TEST_F(OutputTrial, ReportsNoUsableOutputsAndRecoversTheSameOutputAndWorkspace) 
     ASSERT_NO_FATAL_FAILURE(attach(output.get(), "monitor", 0));
     EXPECT_EQ(query("query.outputs")["outputs"].at(0), first);
     EXPECT_EQ(query("query.focus")["workspace_id"], workspace);
+}
+
+TEST_F(OutputTrial, RanksAdvertisedModesAndKeepsTheAutomaticPrimaryStable) {
+    auto first = make_output();
+    auto smaller = make_output();
+    auto larger = make_output();
+    auto newcomer = make_output();
+    ASSERT_TRUE(first && smaller && larger && newcomer);
+    auto small_mode = standard_display;
+    small_mode.max_refresh_millihz = 144000;
+    auto large_mode = small_mode;
+    large_mode.max_pixels = 1920 * 1080;
+    auto fastest_mode = standard_display;
+    fastest_mode.max_refresh_millihz = 240000;
+    ASSERT_NO_FATAL_FAILURE(attach(first.get(), "a-first", 0));
+    ASSERT_NO_FATAL_FAILURE(attach(smaller.get(), "b-smaller", 160, {}, small_mode));
+    ASSERT_NO_FATAL_FAILURE(attach(larger.get(), "c-larger", 320, {}, large_mode));
+
+    auto config = default_config();
+    ASSERT_TRUE(outputs->apply(config));
+    ASSERT_NE(outputs->primary(), nullptr);
+    EXPECT_EQ(outputs->primary()->connector, "c-larger");
+    EXPECT_EQ(outputs->primary()->status.settings.x, 0);
+    EXPECT_EQ(connected("b-smaller").status.settings.x, 160);
+
+    ASSERT_NO_FATAL_FAILURE(attach(newcomer.get(), "d-newcomer", 480, {}, fastest_mode));
+    ASSERT_TRUE(outputs->apply(config));
+    EXPECT_EQ(outputs->primary()->connector, "c-larger");
+    EXPECT_EQ(connected("d-newcomer").status.settings.x, 160);
+
+    // The first display has focus history. Migration uses that history when
+    // the primary disappears, even though another display ranks higher.
+    detach(larger, "c-larger");
+    ASSERT_TRUE(outputs->apply(config));
+    EXPECT_EQ(outputs->primary()->connector, "a-first");
+    config.monitors.primary = OutputSelector{SelectorKind::connector, "b-smaller"};
+    ASSERT_TRUE(outputs->apply(config));
+    EXPECT_EQ(outputs->primary()->connector, "b-smaller");
+    config.monitors.primary.reset();
+    ASSERT_TRUE(outputs->apply(config));
+    EXPECT_EQ(outputs->primary()->connector, "d-newcomer");
+}
+
+TEST_F(OutputTrial, RestoresThePhysicalMonitorAndWorkspaceAcrossConnectorChanges) {
+    auto left = make_output();
+    auto right = make_output();
+    ASSERT_TRUE(left && right);
+    auto config = default_config();
+    config.workspaces.mode = WorkspaceMode::per_monitor;
+    desktop->apply_initial_config(config);
+    ASSERT_NO_FATAL_FAILURE(attach(left.get(), "left", 0, "panel-a"));
+    ASSERT_NO_FATAL_FAILURE(attach(right.get(), "right", 160, "panel-b"));
+    const auto left_id = connected("left").id;
+    const auto right_id = connected("right").id;
+    const auto &windows = desktop->windows();
+    const auto workspace = windows.state().output(right_id)->shown;
+    ASSERT_TRUE(workspace);
+
+    detach(right, "right");
+    EXPECT_EQ(windows.workspace_output(*workspace), left_id);
+    EXPECT_EQ(windows.workspace_owner(*workspace), right_id);
+    right = make_output();
+    ASSERT_TRUE(right);
+    ASSERT_NO_FATAL_FAILURE(attach(right.get(), "other-connector", 160, "panel-b"));
+    EXPECT_EQ(connected("other-connector").id, right_id);
+    EXPECT_EQ(windows.workspace_output(*workspace), right_id);
+    EXPECT_EQ(windows.state().output(right_id)->shown, workspace);
+    EXPECT_EQ(windows.focused_output(), left_id);
+    EXPECT_EQ(outputs->outputs().size(), 2);
+}
+
+TEST_F(OutputTrial, UsesModelAndModeHistoryAndKeepsDuplicateSerialsDistinct) {
+    auto first = make_output();
+    auto second = make_output();
+    ASSERT_TRUE(first && second);
+    ASSERT_NO_FATAL_FAILURE(attach(first.get(), "left", 0));
+    const auto id = connected("left").id;
+    detach(first, "left");
+    first = make_output();
+    ASSERT_TRUE(first);
+    ASSERT_NO_FATAL_FAILURE(attach(first.get(), "new-left", 0));
+    EXPECT_EQ(connected("new-left").id, id);
+
+    auto different = standard_display;
+    different.model = "Other Display";
+    detach(first, "new-left");
+    first = make_output();
+    ASSERT_TRUE(first);
+    ASSERT_NO_FATAL_FAILURE(attach(first.get(), "new-left", 0, "duplicate", different));
+    const auto first_duplicate = connected("new-left").id;
+    EXPECT_NE(first_duplicate, id);
+    ASSERT_NO_FATAL_FAILURE(attach(second.get(), "right", 160, "duplicate", different));
+    const auto second_duplicate = connected("right").id;
+    EXPECT_NE(second_duplicate, first_duplicate);
+
+    auto config = default_config();
+    config.monitors.primary = OutputSelector{SelectorKind::identity, "duplicate"};
+    const auto invalid = outputs->apply(config);
+    ASSERT_FALSE(invalid);
+    EXPECT_EQ(invalid.error().field, "monitors.primary");
+
+    detach(second, "right");
+    second = make_output();
+    ASSERT_TRUE(second);
+    ASSERT_NO_FATAL_FAILURE(attach(second.get(), "right", 160, "duplicate", different));
+    EXPECT_EQ(connected("right").id, second_duplicate);
+    EXPECT_EQ(outputs->outputs().size(), 3);
+}
+
+TEST_F(OutputTrial, PlacesFractionalRotatedOutputsUsingTransformedDimensions) {
+    auto left = make_output();
+    auto right = make_output();
+    ASSERT_TRUE(left && right);
+    ASSERT_NO_FATAL_FAILURE(attach(left.get(), "left", 0));
+    ASSERT_NO_FATAL_FAILURE(attach(right.get(), "right", 160));
+    auto config = default_config();
+    auto &settings = config.monitors.defaults;
+    settings.scale = 1.25;
+    settings.rotation = 90;
+    ASSERT_TRUE(outputs->apply(config));
+    EXPECT_EQ(desktop->output_bounds(part3_output_handle(left.get())), (WindowRect{0, 0, 72, 128}));
+    EXPECT_EQ(desktop->output_bounds(part3_output_handle(right.get())),
+              (WindowRect{72, 0, 72, 128}));
+
+    settings.scale = 1.5;
+    settings.rotation = 180;
+    ASSERT_TRUE(outputs->apply(config));
+    EXPECT_EQ(desktop->output_bounds(part3_output_handle(left.get())), (WindowRect{0, 0, 106, 60}));
+    EXPECT_EQ(desktop->output_bounds(part3_output_handle(right.get())),
+              (WindowRect{106, 0, 106, 60}));
+
+    settings.rotation = 270;
+    ASSERT_TRUE(outputs->apply(config));
+    EXPECT_EQ(desktop->output_bounds(part3_output_handle(right.get())),
+              (WindowRect{60, 0, 60, 106}));
+}
+
+TEST_F(OutputTrial, KeepsUsableOutputsWhenAdaptiveSyncIsUnsupportedOrRejected) {
+    auto capable = make_output();
+    auto fixed = make_output();
+    ASSERT_TRUE(capable && fixed);
+    auto description = standard_display;
+    description.adaptive_sync_supported = true;
+    ASSERT_NO_FATAL_FAILURE(attach(capable.get(), "capable", 0, {}, description));
+    ASSERT_NO_FATAL_FAILURE(attach(fixed.get(), "fixed", 160));
+    auto config = default_config();
+    ASSERT_TRUE(outputs->apply(config));
+    EXPECT_EQ(connected("capable").adaptive_sync_supported, true);
+    EXPECT_EQ(connected("fixed").adaptive_sync_supported, false);
+    EXPECT_FALSE(connected("capable").status.adaptive_sync);
+
+    config.render.adaptive_sync = AdaptiveSync::always;
+    ASSERT_TRUE(outputs->apply(config));
+    EXPECT_TRUE(connected("capable").status.adaptive_sync);
+    EXPECT_FALSE(connected("fixed").status.adaptive_sync);
+
+    config.render.adaptive_sync = AdaptiveSync::fullscreen;
+    ASSERT_TRUE(outputs->apply(config));
+    EXPECT_FALSE(connected("capable").status.adaptive_sync);
+
+    drm.reject_adaptive_sync = part3_output_handle(capable.get());
+    config.render.adaptive_sync = AdaptiveSync::always;
+    config.monitors.defaults.scale = 2;
+    ASSERT_TRUE(outputs->apply(config));
+    EXPECT_TRUE(connected("capable").adaptive_sync_rejected);
+    EXPECT_TRUE(connected("capable").enabled);
+    EXPECT_FALSE(connected("capable").status.adaptive_sync);
+    EXPECT_EQ(connected("capable").status.settings.scale, 2);
+    EXPECT_FALSE(connected("fixed").adaptive_sync_rejected);
 }
 
 } // namespace

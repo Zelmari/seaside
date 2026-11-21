@@ -23,12 +23,10 @@ class Desktop final {
 
     void set_input(seaside_tty_input *input) noexcept;
     bool add_output(wlr_output *output, std::string_view connector, std::string_view identity,
-                    WindowRect bounds) noexcept;
-    void remove_output(wlr_output *output) noexcept;
+                    WindowRect bounds, std::string_view id = {}) noexcept;
+    void remove_output(wlr_output *output, std::string_view ranked_fallback = {}) noexcept;
     bool update_output(wlr_output *output, WindowRect bounds) noexcept;
-    void set_primary_output(std::string_view connector) noexcept {
-        windows_.set_primary_output(connector);
-    }
+    void set_primary_output(std::string_view id) noexcept { windows_.set_primary_output(id); }
     void apply_config(const Config &config) noexcept;
     void apply_initial_config(const Config &config) noexcept;
     void on_projection(std::function<void()> notify) { projected_ = std::move(notify); }
@@ -53,7 +51,7 @@ class Desktop final {
 
   private:
     struct Output {
-        std::string connector, identity;
+        std::string id, connector, identity;
     };
     struct Drag {
         WindowId window;
@@ -68,7 +66,6 @@ class Desktop final {
     void project(WindowId resize = 0);
     bool update_size_limits(WindowId id);
     void discard_drag();
-    std::optional<std::string_view> match(const OutputSelector &selector) const noexcept;
     bool resize(WindowId id, Direction direction, int distance);
     bool resize_by(WindowId id, int dx, int dy);
 
@@ -77,7 +74,7 @@ class Desktop final {
     BindingMap bindings_;
     std::function<void()> projected_;
     std::function<void(WindowId, WorkspaceId)> attention_;
-    std::optional<OutputSelector> primary_;
+    FullscreenAspect fullscreen_aspect_ = FullscreenAspect::preserve;
     std::map<wlr_output *, Output> outputs_;
     std::set<WindowId> views_;
     seaside_tty_input *input_ = nullptr;

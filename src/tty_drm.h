@@ -28,6 +28,13 @@ struct seaside_drm_output_settings {
     bool adaptive_sync;
 };
 
+struct seaside_drm_output_description {
+    const char *make, *model;
+    int preferred_width, preferred_height, max_refresh_millihz;
+    int64_t max_pixels;
+    bool adaptive_sync_supported;
+};
+
 struct seaside_drm_output_status {
     struct seaside_drm_output_settings settings;
     int logical_width, logical_height;
@@ -80,6 +87,7 @@ bool seaside_tty_drm_enable_pending(struct seaside_tty_drm *drm, struct wlr_allo
                                     struct wlr_renderer *renderer);
 
 /* These handles and the selected mode are borrowed for one loop turn. */
+struct seaside_drm_output_description seaside_tty_drm_describe_output(struct wlr_output *output);
 bool seaside_tty_drm_output_status(struct seaside_tty_drm *drm, struct wlr_output *output,
                                    struct seaside_drm_output_status *status);
 bool seaside_tty_drm_select_mode(struct wlr_output *output,

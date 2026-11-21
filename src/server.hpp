@@ -11,6 +11,7 @@ struct wl_display;
 struct wlr_allocator;
 struct wlr_backend;
 struct wlr_compositor;
+struct wlr_linux_dmabuf_v1;
 struct wlr_renderer;
 struct wl_event_source;
 
@@ -62,6 +63,7 @@ class Server final {
     wlr_renderer *renderer() const noexcept { return renderer_.get(); }
     wlr_allocator *allocator() const noexcept { return allocator_.get(); }
     wlr_compositor *compositor() const noexcept { return compositor_; }
+    wlr_linux_dmabuf_v1 *dmabuf() const noexcept { return dmabuf_; }
 
   private:
     Server() noexcept = default;
@@ -85,7 +87,8 @@ class Server final {
     std::unique_ptr<wlr_backend, BackendDeleter> backend_;
     std::unique_ptr<wlr_renderer, RendererDeleter> renderer_;
     std::unique_ptr<wlr_allocator, AllocatorDeleter> allocator_;
-    wlr_compositor *compositor_ = nullptr; // Owned by the display.
+    wlr_compositor *compositor_ = nullptr;  // Owned by the display.
+    wlr_linux_dmabuf_v1 *dmabuf_ = nullptr; // Owned by the display.
     std::string named_socket_;
     const char *socket_name_ = nullptr;
     wl_event_source *terminate_signal_ = nullptr;

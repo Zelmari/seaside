@@ -29,10 +29,11 @@ class WindowManager final {
 
     bool add_output(std::string_view id, WindowRect bounds, WindowRect usable,
                     bool primary = false);
-    bool remove_output(std::string_view id);
+    bool remove_output(std::string_view id, std::string_view ranked_fallback = {});
     bool update_output(std::string_view id, WindowRect bounds, WindowRect usable);
     bool focus_output(std::string_view id);
     void set_primary_output(std::string_view id) noexcept;
+    std::optional<std::string_view> primary_output() const noexcept { return primary_output_; }
     bool has_fullscreen(std::string_view id) const;
     bool focus_output_at(double x, double y);
     std::optional<std::string_view> focused_output() const noexcept;

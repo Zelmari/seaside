@@ -34,6 +34,7 @@ PART_QUALIFICATION = {
     1: "pending_arch_vm_drm_and_interactive_checks",
     3: "headless_milestone_only_pending_arch_vm_tty_seat_display_input_and_service_preflight",
     5: "headless_layout_checks_pending_arch_vm_tty_layout_trial",
+    8: "software_checks_only_arch_vm_and_native_drm_evidence_reported_separately",
 }
 
 

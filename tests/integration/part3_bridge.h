@@ -32,6 +32,7 @@ struct part3_output *part3_output_create(struct wl_display *display, struct wlr_
                                          struct wlr_allocator *allocator,
                                          struct wlr_renderer *renderer);
 struct wlr_output *part3_output_handle(struct part3_output *output);
+bool part3_output_set_scale(struct part3_output *output, float scale);
 struct part3_output_snapshot part3_output_get_snapshot(struct part3_output *output);
 bool part3_output_sample_pixel(struct part3_output *output, unsigned x, unsigned y);
 struct part3_output_pixel part3_output_get_pixel(struct part3_output *output);

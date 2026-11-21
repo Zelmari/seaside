@@ -35,7 +35,7 @@ int resize_delta(int size, int delta, int minimum, int maximum) noexcept {
 
 Desktop::Desktop(Scene &scene, const Config &config)
     : scene_(scene), windows_(config), bindings_(config.keybinds),
-      primary_(config.monitors.primary) {
+      fullscreen_aspect_(config.render.fullscreen_aspect) {
     scene_.set_window_handler(on_window, this);
 }
 
@@ -48,9 +48,10 @@ void Desktop::set_input(seaside_tty_input *input) noexcept {
 }
 
 bool Desktop::add_output(wlr_output *output, std::string_view connector, std::string_view identity,
-                         WindowRect bounds) noexcept try {
+                         WindowRect bounds, std::string_view id) noexcept try {
     auto [record, inserted] =
-        outputs_.try_emplace(output, Output{std::string(connector), std::string(identity)});
+        outputs_.try_emplace(output, Output{std::string(id.empty() ? connector : id),
+                                            std::string(connector), std::string(identity)});
     if (!inserted) {
         return false;
     }
@@ -59,8 +60,7 @@ bool Desktop::add_output(wlr_output *output, std::string_view connector, std::st
         outputs_.erase(record);
         return false;
     }
-    const bool primary = primary_ && match(*primary_) == connector;
-    if (!windows_.add_output(connector, bounds, bounds, primary)) {
+    if (!windows_.add_output(record->second.id, bounds, bounds)) {
         scene_.remove_output(output);
         outputs_.erase(record);
         cancel_drag();
@@ -74,12 +74,12 @@ bool Desktop::add_output(wlr_output *output, std::string_view connector, std::st
     return false;
 }
 
-void Desktop::remove_output(wlr_output *output) noexcept try {
+void Desktop::remove_output(wlr_output *output, std::string_view ranked_fallback) noexcept try {
     auto record = outputs_.find(output);
     if (record != outputs_.end()) {
         discard_drag();
         scene_.remove_output(output);
-        windows_.remove_output(record->second.connector);
+        windows_.remove_output(record->second.id, ranked_fallback);
         outputs_.erase(record);
         project();
     }
@@ -93,7 +93,7 @@ bool Desktop::update_output(wlr_output *output, WindowRect bounds) noexcept try 
         return false;
     }
     discard_drag();
-    if (!windows_.update_output(found->second.connector, bounds, bounds) ||
+    if (!windows_.update_output(found->second.id, bounds, bounds) ||
         !scene_.place_output(output, bounds.x, bounds.y)) {
         return false;
     }
@@ -111,13 +111,12 @@ void Desktop::apply_initial_config(const Config &config) noexcept {
 
 void Desktop::apply_config(const Config &config) noexcept try {
     auto bindings = config.keybinds;
-    auto primary = config.monitors.primary;
     if (bindings != bindings_) {
         discard_drag();
         finish_focus_cycle();
         bindings_.swap(bindings);
     }
-    primary_ = std::move(primary);
+    fullscreen_aspect_ = config.render.fullscreen_aspect;
     windows_.apply_layout_config(config);
     project();
 } catch (...) {
@@ -127,7 +126,7 @@ void Desktop::apply_config(const Config &config) noexcept try {
 wlr_output *Desktop::focused_output_handle() const noexcept {
     const auto focused = windows_.focused_output();
     for (const auto &[handle, output] : outputs_) {
-        if (output.connector == focused) {
+        if (output.id == focused) {
             return handle;
         }
     }
@@ -138,22 +137,7 @@ WindowRect Desktop::output_bounds(wlr_output *output) const noexcept {
     const auto entry = outputs_.find(output);
     return entry == outputs_.end()
                ? WindowRect{}
-               : windows_.output_bounds(entry->second.connector).value_or(WindowRect{});
-}
-
-std::optional<std::string_view> Desktop::match(const OutputSelector &selector) const noexcept {
-    std::optional<std::string_view> found;
-    for (const auto &[handle, output] : outputs_) {
-        const auto &value =
-            selector.kind == SelectorKind::connector ? output.connector : output.identity;
-        if (selector.value == value) {
-            if (found) {
-                return std::nullopt;
-            }
-            found = output.connector;
-        }
-    }
-    return found;
+               : windows_.output_bounds(entry->second.id).value_or(WindowRect{});
 }
 
 void Desktop::project(WindowId resize) {
@@ -177,6 +161,7 @@ void Desktop::project(WindowId resize) {
                 .activated = focused == id,
                 .maximized = view.maximized,
                 .fullscreen = view.fullscreen,
+                .stretch_fullscreen = fullscreen_aspect_ == FullscreenAspect::stretch,
                 .tiled = view.tile_layout,
                 .resize = id == resize,
                 .resizing = drag_ && drag_->started && drag_->resize && drag_->window == id,
@@ -269,6 +254,8 @@ std::uint64_t Desktop::window_event(const seaside_scene_window_event &event) {
              current.geometry.height == event.geometry.height)) {
             if (limits_changed) {
                 project();
+            } else if (input_ && current.fullscreen) {
+                seaside_tty_input_refresh_pointer(input_);
             }
             return 0;
         }
@@ -412,7 +399,7 @@ Desktop::dispatch(const Action &action, std::uint8_t modifiers, std::optional<Wi
                 if (destination) {
                     return std::unexpected(Error::ambiguous_output);
                 }
-                destination = output.connector;
+                destination = output.id;
             }
         }
         if (!destination) {

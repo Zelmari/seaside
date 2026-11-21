@@ -5,18 +5,26 @@
 #include <drm_fourcc.h>
 #include <limits.h>
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
 #include <wayland-server-core.h>
+#include <wlr/backend/drm.h>
+#include <wlr/backend/headless.h>
 #include <wlr/interfaces/wlr_buffer.h>
+#include <wlr/render/color.h>
+#include <wlr/render/drm_syncobj.h>
 #include <wlr/render/pass.h>
+#include <wlr/render/swapchain.h>
 #include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_output.h>
 #include <wlr/types/wlr_scene.h>
+#include <wlr/types/wlr_tearing_control_v1.h>
 #include <wlr/types/wlr_xdg_activation_v1.h>
 #include <wlr/types/wlr_xdg_shell.h>
 #include <wlr/util/edges.h>
 #include <wlr/util/transform.h>
+#include <xf86drm.h>
 
 struct seaside_scene_bridge {
     struct wl_display *display;
@@ -25,6 +33,7 @@ struct seaside_scene_bridge {
     struct wlr_buffer *wallpaper;
     struct wlr_xdg_shell *shell;
     struct wlr_xdg_activation_v1 *activation;
+    struct wlr_tearing_control_manager_v1 *tearing;
     struct seaside_window_capture *capture;
     double cursor_x, cursor_y;
     bool cursor_known;
@@ -45,6 +54,13 @@ struct seaside_scene_bridge {
     seaside_scene_focus_fn focus;
     void *focus_data;
     bool attached;
+    bool direct_scanout, allow_tearing, night_light;
+    int temperature_kelvin;
+};
+
+struct fullscreen_projection {
+    double scale_x, scale_y;
+    int x, y;
 };
 
 struct scene_view {
@@ -64,6 +80,9 @@ struct scene_view {
     struct wl_listener request_fullscreen;
     struct wl_listener set_parent;
     struct seaside_scene_window_placement placement;
+    struct fullscreen_projection fullscreen;
+    struct wlr_box source_clip;
+    struct wl_list projected_surfaces;
     uint64_t id;
     uint32_t restore_serial;
     bool mapped;
@@ -74,6 +93,7 @@ struct scene_popup {
     struct wlr_xdg_popup *popup;
     struct wlr_scene_tree *tree;
     struct wlr_scene_tree *surface_tree;
+    struct wlr_box source_clip;
     struct wl_list link;
     struct wl_listener commit;
     struct wl_listener reposition;
@@ -89,9 +109,18 @@ struct scene_output {
     struct wl_listener frame;
     struct wl_listener destroy;
     struct wl_listener commit;
+    struct wl_listener present;
     int width, height;
     int banner_width, banner_height, banner_logical_height;
     float scale;
+    struct seaside_scene_render_status render_status;
+    uint32_t pending_commit;
+    const char *pending_mode, *pending_fallback;
+    bool pending_tearing;
+    struct wlr_drm_syncobj_timeline *unsubmitted_scanout;
+    uint64_t unsubmitted_point;
+    bool retry_synchronized, retry_composed, retry_frame;
+    bool night_light_dirty;
 };
 
 struct scene_image {
@@ -210,15 +239,83 @@ static bool has_viewport(struct seaside_scene_rect rect) {
     return rect.width > 0 && rect.height > 0;
 }
 
+static int clamp_rounded_coordinate(double value) {
+    return (int)fmax(INT_MIN, fmin(INT_MAX, value));
+}
+
+static bool is_projected(const struct scene_view *view) {
+    return view->fullscreen.scale_x > 0;
+}
+
+static void update_fullscreen_projection(struct scene_view *view) {
+    const struct seaside_scene_rect box = view->placement.geometry;
+    const struct wlr_box source = view->toplevel->base->geometry;
+    view->fullscreen = (struct fullscreen_projection){0};
+    if (!view->placement.fullscreen || !has_viewport(box) || wlr_box_empty(&source) ||
+        (box.width == source.width && box.height == source.height)) {
+        return;
+    }
+
+    int width = box.width, height = box.height;
+    if (!view->placement.stretch_fullscreen) {
+        const int64_t width_by_height = (int64_t)width * source.height;
+        const int64_t height_by_width = (int64_t)height * source.width;
+        if (width_by_height > height_by_width) {
+            width = (int)fmax(1, round((double)height_by_width / source.height));
+        } else {
+            height = (int)fmax(1, round((double)width_by_height / source.width));
+        }
+    }
+    view->fullscreen = (struct fullscreen_projection){
+        .scale_x = (double)width / source.width,
+        .scale_y = (double)height / source.height,
+        .x = (box.width - width) / 2,
+        .y = (box.height - height) / 2,
+    };
+}
+
+/* Source geometry is relative to the window's own XDG geometry, regardless
+ * of the current placement or the crop for a particular surface. */
+static void view_source_position(const struct scene_view *view, double *x, double *y) {
+    *x -= view->placement.geometry.x;
+    *y -= view->placement.geometry.y;
+    if (is_projected(view)) {
+        *x = (*x - view->fullscreen.x) / view->fullscreen.scale_x;
+        *y = (*y - view->fullscreen.y) / view->fullscreen.scale_y;
+    }
+}
+
+static void source_node_position(const struct scene_view *view, const struct wlr_scene_node *node,
+                                 int64_t *x, int64_t *y) {
+    *x = 0;
+    *y = 0;
+    /* Only buffer nodes are projected. Their tree ancestors retain the
+     * unscaled positions managed by the wlroots XDG/subsurface helpers. */
+    while (node != &view->tree->node) {
+        *x += node->x;
+        *y += node->y;
+        node = &node->parent->node;
+    }
+}
+
 static void clip_toplevel(struct scene_view *view) {
     const struct seaside_scene_window_placement *placement = &view->placement;
     const struct seaside_scene_rect viewport = placement->clip;
+    const struct seaside_scene_rect box = placement->geometry;
+    const struct wlr_box geometry = view->toplevel->base->geometry;
+    view->source_clip = (struct wlr_box){0};
+    if (placement->fullscreen && has_viewport(box) && !wlr_box_empty(&geometry)) {
+        view->source_clip = (struct wlr_box){0, 0, geometry.width, geometry.height};
+        wlr_scene_subsurface_tree_set_clip(&view->xdg_tree->node,
+                                           is_projected(view) ? NULL : &geometry);
+        wlr_scene_node_set_enabled(&view->xdg_tree->node, true);
+        return;
+    }
     if (!has_viewport(viewport)) {
         wlr_scene_subsurface_tree_set_clip(&view->xdg_tree->node, NULL);
         wlr_scene_node_set_enabled(&view->xdg_tree->node, !placement->tiled);
         return;
     }
-    const struct seaside_scene_rect box = placement->geometry;
     struct wlr_box clip =
         placement->tiled
             ? intersection(viewport, box.x, box.y, box.width, box.height)
@@ -227,11 +324,236 @@ static void clip_toplevel(struct scene_view *view) {
         wlr_scene_node_set_enabled(&view->xdg_tree->node, false);
         return;
     }
-    const struct wlr_box geometry = view->toplevel->base->geometry;
-    clip.x = clamp_coordinate((int64_t)clip.x - box.x + geometry.x);
-    clip.y = clamp_coordinate((int64_t)clip.y - box.y + geometry.y);
+    const int64_t source_x = (int64_t)clip.x - box.x, source_y = (int64_t)clip.y - box.y;
+    view->source_clip = (struct wlr_box){clamp_coordinate(source_x), clamp_coordinate(source_y),
+                                         clip.width, clip.height};
+    clip.x = clamp_coordinate(source_x + geometry.x);
+    clip.y = clamp_coordinate(source_y + geometry.y);
     wlr_scene_subsurface_tree_set_clip(&view->xdg_tree->node, &clip);
     wlr_scene_node_set_enabled(&view->xdg_tree->node, true);
+}
+
+static void clip_view_popups(struct scene_view *view);
+static void project_view_surfaces(struct scene_view *view);
+
+struct projected_surface {
+    struct scene_view *view;
+    struct wlr_scene_surface *scene_surface;
+    wlr_scene_buffer_point_accepts_input_func_t original_point_accepts_input;
+    struct wlr_box source;
+    int width, height;
+    struct wl_listener commit, destroy;
+    struct wl_list link;
+};
+
+static void projected_surface_coords(const struct projected_surface *projected, double *x,
+                                     double *y) {
+    *x = projected->source.x + *x * projected->source.width / projected->width;
+    *y = projected->source.y + *y * projected->source.height / projected->height;
+}
+
+static bool projected_point_accepts_input(struct wlr_scene_buffer *buffer, double *x, double *y) {
+    const struct projected_surface *projected = buffer->node.data;
+    projected_surface_coords(projected, x, y);
+    return wlr_surface_point_accepts_input(projected->scene_surface->surface, *x, *y);
+}
+
+static void destroy_projected_surface(struct projected_surface *projected) {
+    struct wlr_scene_buffer *buffer = projected->scene_surface->buffer;
+    buffer->point_accepts_input = projected->original_point_accepts_input;
+    buffer->node.data = NULL;
+    wl_list_remove(&projected->commit.link);
+    wl_list_remove(&projected->destroy.link);
+    wl_list_remove(&projected->link);
+    free(projected);
+}
+
+static void projected_node_destroy(struct wl_listener *listener, void *data) {
+    (void)data;
+    struct projected_surface *projected = wl_container_of(listener, projected, destroy);
+    destroy_projected_surface(projected);
+}
+
+static void projected_surface_commit(struct wl_listener *listener, void *data) {
+    (void)data;
+    struct projected_surface *projected = wl_container_of(listener, projected, commit);
+    project_view_surfaces(projected->view);
+}
+
+static struct projected_surface *get_projected_surface(struct scene_view *view,
+                                                       struct wlr_scene_surface *surface) {
+    struct wlr_scene_buffer *buffer = surface->buffer;
+    if (buffer->point_accepts_input == projected_point_accepts_input) {
+        return buffer->node.data;
+    }
+    struct projected_surface *projected = calloc(1, sizeof(*projected));
+    if (!projected) {
+        view->owner->snapshot.failed = true;
+        return NULL;
+    }
+    projected->view = view;
+    projected->scene_surface = surface;
+    projected->original_point_accepts_input = buffer->point_accepts_input;
+    projected->commit.notify = projected_surface_commit;
+    projected->destroy.notify = projected_node_destroy;
+    wl_list_init(&projected->commit.link);
+    if (surface->surface != view->toplevel->base->surface &&
+        !surface_popup(view->owner, surface->surface)) {
+        wl_signal_add(&surface->surface->events.commit, &projected->commit);
+    }
+    wl_signal_add(&buffer->node.events.destroy, &projected->destroy);
+    wl_list_insert(&view->projected_surfaces, &projected->link);
+    buffer->node.data = projected;
+    buffer->point_accepts_input = projected_point_accepts_input;
+    return projected;
+}
+
+static struct wlr_fbox cropped_source(struct wlr_surface *surface, const struct wlr_box *crop) {
+    struct wlr_fbox source;
+    wlr_surface_get_buffer_source_box(surface, &source);
+    if (!crop->x && !crop->y && crop->width == surface->current.width &&
+        crop->height == surface->current.height) {
+        return source;
+    }
+    const enum wl_output_transform transform = surface->current.transform;
+    int width = surface->current.buffer_width, height = surface->current.buffer_height;
+    wlr_fbox_transform(&source, &source, transform, width, height);
+    wlr_output_transform_coords(transform, &width, &height);
+    source.x += crop->x * source.width / surface->current.width;
+    source.y += crop->y * source.height / surface->current.height;
+    source.width *= (double)crop->width / surface->current.width;
+    source.height *= (double)crop->height / surface->current.height;
+    wlr_fbox_transform(&source, &source, wlr_output_transform_invert(transform), width, height);
+    source.x = fmax(0, source.x);
+    source.y = fmax(0, source.y);
+    return source;
+}
+
+static void project_buffer(struct scene_view *view, struct wlr_scene_buffer *buffer,
+                           struct wlr_box clip, int64_t x, int64_t y) {
+    const bool scaling = is_projected(view);
+    struct projected_surface *projected =
+        buffer->point_accepts_input == projected_point_accepts_input ? buffer->node.data : NULL;
+    if (!scaling && !projected) {
+        return;
+    }
+    struct wlr_scene_surface *scene_surface = wlr_scene_surface_try_from_buffer(buffer);
+    if (!scene_surface) {
+        return;
+    }
+    struct wlr_surface *surface = scene_surface->surface;
+    const int width = surface->current.width, height = surface->current.height;
+    struct seaside_scene_rect viewport = {clip.x, clip.y, clip.width, clip.height};
+    struct wlr_box visible =
+        !wlr_box_empty(&clip)
+            ? intersection(viewport, x, y, width, height)
+            : (struct wlr_box){clamp_coordinate(x), clamp_coordinate(y), width, height};
+    if (scaling) {
+        projected = get_projected_surface(view, scene_surface);
+        if (!projected) {
+            return;
+        }
+    } else {
+        destroy_projected_surface(projected);
+    }
+    if (wlr_box_empty(&visible)) {
+        if (scaling) {
+            projected->width = 0;
+            projected->height = 0;
+        }
+        wlr_scene_node_set_enabled(&buffer->node, false);
+        return;
+    }
+
+    const struct wlr_box crop = {clamp_coordinate((int64_t)visible.x - x),
+                                 clamp_coordinate((int64_t)visible.y - y), visible.width,
+                                 visible.height};
+    const struct wlr_fbox source = cropped_source(surface, &crop);
+    struct wlr_box destination = visible;
+    pixman_region32_t opaque;
+    pixman_region32_init(&opaque);
+    if (scaling) {
+        const struct fullscreen_projection mapping = view->fullscreen;
+        destination.x = clamp_rounded_coordinate(mapping.x + round(visible.x * mapping.scale_x));
+        destination.y = clamp_rounded_coordinate(mapping.y + round(visible.y * mapping.scale_y));
+        destination.width = clamp_rounded_coordinate(
+            mapping.x + round(((double)visible.x + visible.width) * mapping.scale_x) -
+            destination.x);
+        destination.height = clamp_rounded_coordinate(
+            mapping.y + round(((double)visible.y + visible.height) * mapping.scale_y) -
+            destination.y);
+        projected->source = crop;
+        projected->width = destination.width;
+        projected->height = destination.height;
+        /* Fractional projection can put a filtering footprint across an
+         * opaque-region edge. Only mark a wholly opaque crop as opaque. */
+        pixman_box32_t limits = {crop.x, crop.y, crop.x + crop.width, crop.y + crop.height};
+        if (pixman_region32_contains_rectangle(&surface->opaque_region, &limits) ==
+                PIXMAN_REGION_IN &&
+            !wlr_box_empty(&destination)) {
+            pixman_region32_union_rect(&opaque, &opaque, 0, 0, destination.width,
+                                       destination.height);
+        }
+    } else {
+        pixman_region32_intersect_rect(&opaque, &surface->opaque_region, crop.x, crop.y, crop.width,
+                                       crop.height);
+        pixman_region32_translate(&opaque, -crop.x, -crop.y);
+    }
+
+    const bool visible_pixels = !wlr_box_empty(&destination);
+    wlr_scene_node_set_enabled(&buffer->node, visible_pixels);
+    if (visible_pixels) {
+        wlr_scene_buffer_set_source_box(buffer, &source);
+        wlr_scene_buffer_set_opaque_region(buffer, &opaque);
+        wlr_scene_buffer_set_dest_size(buffer, destination.width, destination.height);
+        wlr_scene_node_set_position(&buffer->node, clamp_coordinate((int64_t)destination.x - x),
+                                    clamp_coordinate((int64_t)destination.y - y));
+    }
+    pixman_region32_fini(&opaque);
+}
+
+static void project_surface_tree(struct scene_view *view, struct wlr_scene_node *node,
+                                 struct wlr_box clip, int64_t x, int64_t y) {
+    if (node->type == WLR_SCENE_NODE_BUFFER) {
+        project_buffer(view, wlr_scene_buffer_from_node(node), clip, x, y);
+    } else if (node->type == WLR_SCENE_NODE_TREE) {
+        struct wlr_scene_node *child;
+        wl_list_for_each(child, &wlr_scene_tree_from_node(node)->children, link) {
+            project_surface_tree(view, child, clip, x + node->x, y + node->y);
+        }
+    }
+}
+
+static void project_tree(struct scene_view *view, struct wlr_scene_node *node,
+                         struct wlr_box clip) {
+    int64_t x, y;
+    source_node_position(view, &node->parent->node, &x, &y);
+    project_surface_tree(view, node, clip, x, y);
+}
+
+static void project_view_surfaces(struct scene_view *view) {
+    if (!is_projected(view) && wl_list_empty(&view->projected_surfaces)) {
+        return;
+    }
+    project_tree(view, &view->xdg_tree->node, view->source_clip);
+    struct scene_popup *popup;
+    wl_list_for_each(popup, &view->owner->popups, link) {
+        if (popup->view == view) {
+            project_tree(view, &popup->surface_tree->node, popup->source_clip);
+        }
+    }
+}
+
+static void project_view_content(struct scene_view *view) {
+    update_fullscreen_projection(view);
+    clip_toplevel(view);
+    clip_view_popups(view);
+    project_view_surfaces(view);
+}
+
+static bool view_presented(const struct scene_view *view) {
+    return view->placement.visible &&
+           (!view->placement.tiled || has_viewport(view->placement.clip));
 }
 
 static uint64_t emit_window(struct scene_view *view, enum seaside_scene_window_event_kind kind,
@@ -285,15 +607,17 @@ static bool capture_window_cursor(void *data, struct wlr_render_texture_options 
             local_y < 0 || local_x >= viewport->width || local_y >= viewport->height) {
             continue;
         }
-        const int x = (int)floor(scene->cursor_x - view->placement.geometry.x -
-                                 (double)cursor->hotspot_x / output->scale);
-        const int y = (int)floor(scene->cursor_y - view->placement.geometry.y -
-                                 (double)cursor->hotspot_y / output->scale);
+        double x = scene->cursor_x - (double)cursor->hotspot_x / output->scale;
+        double y = scene->cursor_y - (double)cursor->hotspot_y / output->scale;
+        view_source_position(view, &x, &y);
+        const double scale_x = output->scale * (is_projected(view) ? view->fullscreen.scale_x : 1);
+        const double scale_y = output->scale * (is_projected(view) ? view->fullscreen.scale_y : 1);
         *texture = (struct wlr_render_texture_options){
             .texture = cursor->texture,
             .src_box = cursor->src_box,
-            .dst_box = {x, y, (int)ceil((double)cursor->width / output->scale),
-                        (int)ceil((double)cursor->height / output->scale)},
+            .dst_box = {clamp_rounded_coordinate(floor(x)), clamp_rounded_coordinate(floor(y)),
+                        clamp_rounded_coordinate(ceil(cursor->width / scale_x)),
+                        clamp_rounded_coordinate(ceil(cursor->height / scale_y))},
             .transform = wlr_output_transform_invert(cursor->transform),
         };
         return true;
@@ -332,8 +656,7 @@ static void view_map(struct wl_listener *listener, void *data) {
     }
     if (view->owner->capture && !view->capture) {
         view->capture = seaside_window_capture_map(view->owner->capture, view->toplevel,
-                                                   view->id ? view->placement.visible &&
-                                                                  has_viewport(view->placement.clip)
+                                                   view->id ? view_presented(view)
                                                             : !wl_list_empty(&view->owner->outputs),
                                                    capture_window_cursor, view);
     }
@@ -351,6 +674,7 @@ static void view_unmap(struct wl_listener *listener, void *data) {
     }
     wlr_scene_node_set_enabled(&view->tree->node, false);
     view->placement = (struct seaside_scene_window_placement){0};
+    project_view_content(view);
     view->restore_serial = 0;
     emit_window(view, SEASIDE_WINDOW_UNMAPPED, false, false);
     if (view->owner->focused_view == view) {
@@ -386,7 +710,11 @@ static void view_commit(struct wl_listener *listener, void *data) {
         if (ordinary) {
             view->restore_serial = 0;
         }
-        clip_toplevel(view);
+        if (view->placement.fullscreen) {
+            project_view_content(view);
+        } else {
+            clip_toplevel(view);
+        }
         emit_window(view, SEASIDE_WINDOW_COMMITTED, false, ordinary);
     }
 }
@@ -459,11 +787,12 @@ static void new_toplevel(struct wl_listener *listener, void *data) {
     }
     view->owner = scene;
     view->toplevel = toplevel;
+    wl_list_init(&view->projected_surfaces);
     view->tree = wlr_scene_tree_create(scene->windows);
     if (view->tree) {
         view->xdg_tree = wlr_scene_xdg_surface_create(view->tree, toplevel->base);
     }
-    if (!view->xdg_tree) {
+    if (!view->tree || !view->xdg_tree) {
         if (view->tree) {
             wlr_scene_node_destroy(&view->tree->node);
         }
@@ -497,32 +826,46 @@ static void new_toplevel(struct wl_listener *listener, void *data) {
     scene->snapshot.live_toplevels++;
 }
 
+static struct wlr_box view_source_viewport(const struct scene_view *view,
+                                           struct seaside_scene_rect viewport) {
+    double left = viewport.x, top = viewport.y;
+    double right = (double)viewport.x + viewport.width,
+           bottom = (double)viewport.y + viewport.height;
+    view_source_position(view, &left, &top);
+    view_source_position(view, &right, &bottom);
+    /* Round towards the viewport so scaling an attached popup cannot put it
+     * on a neighboring output. */
+    return (struct wlr_box){clamp_rounded_coordinate(ceil(left)),
+                            clamp_rounded_coordinate(ceil(top)),
+                            clamp_rounded_coordinate(floor(right) - ceil(left)),
+                            clamp_rounded_coordinate(floor(bottom) - ceil(top))};
+}
+
 static void unconstrain_popup(struct scene_popup *popup) {
     const struct scene_view *view = popup->view;
-    const struct seaside_scene_rect *output = &view->placement.output;
-    if (output->width > 0 && output->height > 0) {
-        struct wlr_box bounds = {
-            .x = output->x - view->placement.geometry.x + view->toplevel->base->geometry.x,
-            .y = output->y - view->placement.geometry.y + view->toplevel->base->geometry.y,
-            .width = output->width,
-            .height = output->height,
-        };
+    struct wlr_box bounds = view_source_viewport(view, view->placement.output);
+    if (!wlr_box_empty(&bounds)) {
+        bounds.x = clamp_coordinate((int64_t)bounds.x + view->toplevel->base->geometry.x);
+        bounds.y = clamp_coordinate((int64_t)bounds.y + view->toplevel->base->geometry.y);
         wlr_xdg_popup_unconstrain_from_box(popup->popup, &bounds);
     }
 }
 
 static void clip_popup(struct scene_popup *popup) {
-    const struct seaside_scene_rect viewport = popup->view->placement.clip;
+    struct scene_view *view = popup->view;
+    const struct seaside_scene_rect viewport =
+        view->placement.fullscreen ? view->placement.output : view->placement.clip;
     struct wlr_scene_node *node = &popup->surface_tree->node;
-    if (!has_viewport(viewport)) {
+    popup->source_clip = view_source_viewport(view, viewport);
+    if (is_projected(view) || !has_viewport(viewport)) {
         wlr_scene_subsurface_tree_set_clip(node, NULL);
         return;
     }
-    int x, y;
-    wlr_scene_node_coords(node, &x, &y);
-    const struct wlr_box clip = {clamp_coordinate((int64_t)viewport.x - x),
-                                 clamp_coordinate((int64_t)viewport.y - y), viewport.width,
-                                 viewport.height};
+    int64_t x, y;
+    source_node_position(view, node, &x, &y);
+    const struct wlr_box clip = {clamp_coordinate((int64_t)popup->source_clip.x - x),
+                                 clamp_coordinate((int64_t)popup->source_clip.y - y),
+                                 popup->source_clip.width, popup->source_clip.height};
     wlr_scene_subsurface_tree_set_clip(node, &clip);
 }
 
@@ -548,6 +891,7 @@ static void popup_commit(struct wl_listener *listener, void *data) {
     wlr_scene_node_set_position(&popup->surface_tree->node, clamp_coordinate(-(int64_t)geometry.x),
                                 clamp_coordinate(-(int64_t)geometry.y));
     clip_view_popups(popup->view);
+    project_view_surfaces(popup->view);
 }
 
 static void popup_reposition(struct wl_listener *listener, void *data) {
@@ -625,7 +969,7 @@ static void new_popup(struct wl_listener *listener, void *data) {
     wl_signal_add(&popup->tree->node.events.destroy, &popup->tree_destroy);
 }
 
-static struct scene_output *find_output(struct seaside_scene_bridge *scene,
+static struct scene_output *find_output(const struct seaside_scene_bridge *scene,
                                         const struct wlr_output *output) {
     struct scene_output *view;
     wl_list_for_each(view, &scene->outputs, link) {
@@ -702,15 +1046,200 @@ static void output_commit(struct wl_listener *listener, void *data) {
     if (event->state->committed & (WLR_OUTPUT_STATE_ENABLED | WLR_OUTPUT_STATE_MODE |
                                    WLR_OUTPUT_STATE_SCALE | WLR_OUTPUT_STATE_TRANSFORM)) {
         update_output_appearance(view);
+        if (view->owner->night_light || view->render_status.night_light_applied) {
+            view->night_light_dirty = true;
+            wlr_output_schedule_frame(view->viewport->output);
+        }
     }
+}
+
+static void output_present(struct wl_listener *listener, void *data) {
+    struct scene_output *view = wl_container_of(listener, view, present);
+    const struct wlr_output_event_present *event = data;
+    if (!view->pending_mode || event->commit_seq != view->pending_commit) {
+        return;
+    }
+    if (event->presented) {
+        view->render_status.presentation_mode = view->pending_mode;
+        view->render_status.fallback_reason = view->pending_fallback;
+        view->render_status.tearing_applied =
+            view->pending_tearing && !(event->flags & WLR_OUTPUT_PRESENT_VSYNC);
+        if (view->unsubmitted_scanout) {
+            // A replacement flip has retired earlier scanout buffers. Only
+            // now can the point for an unsubmitted buffer be signalled safely.
+            wlr_drm_syncobj_timeline_signal(view->unsubmitted_scanout, view->unsubmitted_point);
+            wlr_drm_syncobj_timeline_unref(view->unsubmitted_scanout);
+            view->unsubmitted_scanout = NULL;
+        }
+    }
+    view->pending_mode = NULL;
+}
+
+static enum seaside_output_support tearing_support(struct wlr_output *output) {
+    if (!wlr_output_is_drm(output)) {
+        return SEASIDE_OUTPUT_UNSUPPORTED;
+    }
+    int fd = wlr_backend_get_drm_fd(output->backend);
+    uint64_t atomic = 0, legacy = 0;
+    bool known_atomic = drmGetCap(fd, DRM_CAP_ATOMIC_ASYNC_PAGE_FLIP, &atomic) == 0;
+    bool known_legacy = drmGetCap(fd, DRM_CAP_ASYNC_PAGE_FLIP, &legacy) == 0;
+    if (atomic || legacy) {
+        return SEASIDE_OUTPUT_SUPPORTED;
+    }
+    return known_atomic && known_legacy ? SEASIDE_OUTPUT_UNSUPPORTED : SEASIDE_OUTPUT_UNKNOWN;
+}
+
+static bool wants_tearing(const struct scene_output *output) {
+    const struct seaside_scene_bridge *scene = output->owner;
+    if (!scene->allow_tearing || output->retry_synchronized || output->night_light_dirty ||
+        output->render_status.tearing == SEASIDE_OUTPUT_UNSUPPORTED ||
+        output->banner->node.enabled || !wl_list_empty(&scene->drag_icons->children) ||
+        output->viewport->output->attach_render_locks > (scene->direct_scanout ? 0 : 1)) {
+        return false;
+    }
+    const struct scene_view *top = NULL, *view;
+    wl_list_for_each(view, &scene->views, link) {
+        if (view->mapped && view->placement.visible &&
+            view->placement.output.x == output->viewport->x &&
+            view->placement.output.y == output->viewport->y &&
+            (!top || view->placement.stacking > top->placement.stacking)) {
+            top = view;
+        }
+    }
+    return top && top->placement.fullscreen &&
+           wlr_tearing_control_manager_v1_surface_hint_from_surface(scene->tearing,
+                                                                    top->toplevel->base->surface) ==
+               WP_TEARING_CONTROL_V1_PRESENTATION_HINT_ASYNC;
+}
+
+static struct wlr_color_transform *night_light_transform(size_t size, int kelvin) {
+    // Approximate black-body RGB gains relative to the compositor's neutral
+    // 6500 K white, using representative wavelengths and SDR encoding.
+    const double wavelengths[] = {610e-9, 550e-9, 460e-9};
+    double gains[3], peak = 0;
+    for (size_t channel = 0; channel < 3; ++channel) {
+        const double c2 = 0.01438776877 / wavelengths[channel];
+        gains[channel] = expm1(c2 / 6500) / expm1(c2 / kelvin);
+        peak = fmax(peak, gains[channel]);
+    }
+    uint16_t *ramp = malloc(3 * size * sizeof(*ramp));
+    if (!ramp) {
+        return NULL;
+    }
+    for (size_t channel = 0; channel < 3; ++channel) {
+        const double gain = pow(gains[channel] / peak, 1.0 / 2.2);
+        for (size_t i = 0; i < size; ++i) {
+            ramp[channel * size + i] =
+                (uint16_t)lround(gain * UINT16_MAX * (double)i / (double)(size - 1));
+        }
+    }
+    struct wlr_color_transform *transform =
+        wlr_color_transform_init_lut_3x1d(size, ramp, ramp + size, ramp + 2 * size);
+    free(ramp);
+    return transform;
+}
+
+static bool prepare_night_light(struct scene_output *view, struct wlr_output_state *state) {
+    if (!view->night_light_dirty) {
+        return false;
+    }
+    view->night_light_dirty = false;
+    const struct seaside_scene_bridge *scene = view->owner;
+    const size_t size = wlr_output_get_gamma_size(view->viewport->output);
+    if (size < 2 || size > UINT16_MAX + 1u) {
+        view->render_status.night_light_reason = "no usable hardware gamma LUT";
+        return false;
+    }
+    if (!scene->night_light && !view->render_status.night_light_applied) {
+        view->render_status.night_light_reason = NULL;
+        return false;
+    }
+    struct wlr_color_transform *transform =
+        scene->night_light ? night_light_transform(size, scene->temperature_kelvin) : NULL;
+    if (scene->night_light && !transform) {
+        view->render_status.night_light_reason = "could not allocate hardware gamma LUT";
+        return false;
+    }
+    // This state goes directly to KMS. The scene's color transform option
+    // would render a GPU pass, which is outside the hardware-only policy.
+    wlr_output_state_set_color_transform(state, transform);
+    wlr_color_transform_unref(transform);
+    return true;
+}
+
+static bool commit_frame(struct scene_output *view) {
+    struct wlr_scene_output *scene_output = view->viewport;
+    struct wlr_output *output = scene_output->output;
+    if (!wlr_scene_output_needs_frame(scene_output) && !view->night_light_dirty) {
+        return true;
+    }
+
+    struct wlr_output_state state;
+    wlr_output_state_init(&state);
+    if (view->retry_composed) {
+        wlr_output_lock_attach_render(output, true);
+    }
+    bool built = wlr_scene_output_build_state(scene_output, &state, NULL);
+    if (view->retry_composed) {
+        wlr_output_lock_attach_render(output, false);
+    }
+    const bool scanout =
+        built && state.buffer &&
+        (!output->swapchain || !wlr_swapchain_has_buffer(output->swapchain, state.buffer));
+    const bool async = built && state.buffer && wants_tearing(view);
+    const bool lut = built && prepare_night_light(view, &state);
+    state.tearing_page_flip = async;
+    const bool committed = built && wlr_output_commit_state(output, &state);
+    if (!committed && scanout && state.signal_timeline) {
+        wlr_drm_syncobj_timeline_unref(view->unsubmitted_scanout);
+        view->unsubmitted_scanout = wlr_drm_syncobj_timeline_ref(state.signal_timeline);
+        view->unsubmitted_point = state.signal_point;
+    }
+    if (committed) {
+        if (lut) {
+            view->render_status.night_light_reason = NULL;
+            view->render_status.night_light_applied = view->owner->night_light;
+        }
+        if (state.buffer) {
+            view->pending_commit = output->commit_seq;
+            view->pending_mode = scanout ? "scanout" : "composed";
+            view->pending_tearing = async;
+            view->pending_fallback = scanout                        ? NULL
+                                     : view->retry_composed         ? "scanout commit rejected"
+                                     : !view->owner->direct_scanout ? "direct scanout disabled"
+                                     : !wlr_output_is_direct_scanout_allowed(output)
+                                         ? "output requires composition"
+                                         : "scene or buffer not eligible for scanout";
+        }
+        if (async) {
+            view->render_status.tearing = SEASIDE_OUTPUT_SUPPORTED;
+            view->render_status.tearing_reason = NULL;
+        }
+        view->retry_synchronized = view->retry_composed = view->retry_frame = false;
+    } else if (async) {
+        view->render_status.tearing_reason = "backend rejected asynchronous presentation";
+        view->retry_synchronized = true;
+        wlr_output_schedule_frame(output);
+    } else if (lut) {
+        view->render_status.night_light_reason = "backend rejected hardware gamma LUT";
+        fprintf(stderr, "seaside: %s: %s\n", output->name, view->render_status.night_light_reason);
+        wlr_output_schedule_frame(output);
+    } else if (scanout) {
+        view->retry_composed = true;
+        wlr_output_schedule_frame(output);
+    } else if (!view->retry_frame) {
+        view->retry_frame = true;
+        wlr_output_schedule_frame(output);
+    }
+    wlr_output_state_finish(&state);
+    return committed;
 }
 
 static void output_frame(struct wl_listener *listener, void *data) {
     (void)data;
     struct scene_output *output = wl_container_of(listener, output, frame);
-    if (!wlr_scene_output_commit(output->viewport, NULL)) {
+    if (!commit_frame(output)) {
         output->owner->snapshot.failed_frames++;
-        output->owner->snapshot.failed = true;
         return;
     }
     output->owner->snapshot.frames++;
@@ -730,9 +1259,11 @@ static void output_destroy(struct wl_listener *listener, void *data) {
     wl_list_remove(&output->frame.link);
     wl_list_remove(&output->destroy.link);
     wl_list_remove(&output->commit.link);
+    wl_list_remove(&output->present.link);
     wl_list_remove(&output->link);
     wlr_scene_node_destroy(&output->wallpaper->node);
     wlr_scene_node_destroy(&output->banner->node);
+    wlr_drm_syncobj_timeline_unref(output->unsubmitted_scanout);
     if (scene->appearance) {
         scene->appearance(scene->appearance_data, output->viewport->output, 0, 0);
     }
@@ -809,6 +1340,8 @@ struct seaside_scene_bridge *seaside_scene_create(struct wl_display *display) {
         return NULL;
     }
     scene->display = display;
+    scene->direct_scanout = true;
+    scene->temperature_kelvin = 4500;
     wl_list_init(&scene->views);
     wl_list_init(&scene->popups);
     wl_list_init(&scene->outputs);
@@ -833,7 +1366,8 @@ struct seaside_scene_bridge *seaside_scene_create(struct wl_display *display) {
         return NULL;
     }
     scene->activation = wlr_xdg_activation_v1_create(display);
-    if (!scene->activation) {
+    scene->tearing = wlr_tearing_control_manager_v1_create(display, 1);
+    if (!scene->activation || !scene->tearing) {
         wlr_scene_node_destroy(&scene->scene->tree.node);
         free(scene);
         return NULL;
@@ -850,6 +1384,63 @@ struct seaside_scene_bridge *seaside_scene_create(struct wl_display *display) {
     wl_signal_add(&scene->activation->events.request_activate, &scene->request_activation);
     scene->attached = true;
     return scene;
+}
+
+void seaside_scene_set_linux_dmabuf(struct seaside_scene_bridge *scene,
+                                    struct wlr_linux_dmabuf_v1 *dmabuf) {
+    if (dmabuf) {
+        wlr_scene_set_linux_dmabuf_v1(scene->scene, dmabuf);
+    }
+}
+
+void seaside_scene_set_render_policy(struct seaside_scene_bridge *scene, bool direct_scanout,
+                                     bool allow_tearing, bool night_light, int temperature_kelvin) {
+    const bool color_changed = scene->night_light != night_light ||
+                               (night_light && scene->temperature_kelvin != temperature_kelvin);
+    const bool redraw = color_changed || scene->allow_tearing != allow_tearing ||
+                        scene->direct_scanout != direct_scanout;
+    scene->direct_scanout = direct_scanout;
+    scene->allow_tearing = allow_tearing;
+    scene->night_light = night_light;
+    scene->temperature_kelvin = temperature_kelvin;
+    if (redraw) {
+        struct scene_output *view;
+        wl_list_for_each(view, &scene->outputs, link) {
+            view->night_light_dirty |= color_changed;
+            if (!allow_tearing) {
+                view->render_status.tearing_reason = NULL;
+            }
+            wlr_output_schedule_frame(view->viewport->output);
+        }
+    }
+}
+
+struct seaside_scene_render_status
+seaside_scene_get_render_status(const struct seaside_scene_bridge *scene,
+                                struct wlr_output *output) {
+    const struct scene_output *view = output ? find_output(scene, output) : NULL;
+    if (!view || !output->enabled) {
+        return (struct seaside_scene_render_status){.frame_state = "inactive",
+                                                    .presentation_mode = "unknown"};
+    }
+    struct seaside_scene_render_status status = view->render_status;
+    status.backend = wlr_output_is_drm(output)        ? "drm"
+                     : wlr_output_is_headless(output) ? "headless"
+                                                      : NULL;
+    status.frame_state = output->frame_pending                          ? "waiting_for_present"
+                         : wlr_scene_output_needs_frame(view->viewport) ? "scheduled"
+                                                                        : "idle";
+    const size_t gamma_size = wlr_output_get_gamma_size(output);
+    status.night_light = gamma_size >= 2 && gamma_size <= UINT16_MAX + 1u
+                             ? SEASIDE_OUTPUT_SUPPORTED
+                             : SEASIDE_OUTPUT_UNSUPPORTED;
+    if (status.night_light == SEASIDE_OUTPUT_UNSUPPORTED) {
+        status.night_light_reason = "no usable hardware gamma LUT";
+    }
+    if (status.tearing == SEASIDE_OUTPUT_UNSUPPORTED) {
+        status.tearing_reason = "backend has no asynchronous page flips";
+    }
+    return status;
 }
 
 void seaside_scene_set_drag_icon(struct seaside_scene_bridge *scene, struct wlr_drag_icon *icon) {
@@ -902,9 +1493,14 @@ bool seaside_scene_add_output(struct seaside_scene_bridge *scene, struct wlr_out
     view->frame.notify = output_frame;
     view->destroy.notify = output_destroy;
     view->commit.notify = output_commit;
+    view->present.notify = output_present;
+    view->render_status.tearing = tearing_support(output);
+    view->render_status.presentation_mode = "unknown";
+    view->night_light_dirty = scene->night_light;
     wl_signal_add(&output->events.frame, &view->frame);
     wl_signal_add(&view->viewport->events.destroy, &view->destroy);
     wl_signal_add(&output->events.commit, &view->commit);
+    wl_signal_add(&output->events.present, &view->present);
     wl_list_insert(&scene->outputs, &view->link);
     scene->snapshot.outputs++;
     update_output_appearance(view);
@@ -1089,23 +1685,22 @@ void seaside_scene_place_window(struct seaside_scene_bridge *scene, uint64_t id,
     view->placement = *placement;
     const struct seaside_scene_rect box = placement->geometry;
     wlr_scene_node_set_position(&view->tree->node, box.x, box.y);
-    clip_toplevel(view);
-    clip_view_popups(view);
+    project_view_content(view);
     project_borders(view);
     wlr_scene_node_set_enabled(&view->tree->node, view->mapped && placement->visible);
-    seaside_window_capture_presented(view->capture,
-                                     placement->visible && has_viewport(placement->clip));
+    seaside_window_capture_presented(view->capture, view_presented(view));
     if (placement->visible && (!previous.visible || placement->stacking != previous.stacking)) {
         restack_view(view);
     }
     if (previous.geometry.x != box.x || previous.geometry.y != box.y ||
         previous.geometry.width != box.width || previous.geometry.height != box.height ||
-        previous.visible != placement->visible || previous.stacking != placement->stacking) {
+        previous.visible != placement->visible || previous.stacking != placement->stacking ||
+        previous.fullscreen != placement->fullscreen ||
+        previous.stretch_fullscreen != placement->stretch_fullscreen) {
         seaside_window_capture_cursor_changed(scene->capture);
     }
-    /* While the client is still applying a fullscreen configure, its old
-     * buffer may cover only part of the output. Keep that output's backdrop
-     * opaque throughout the transition. */
+    /* Keep the background opaque throughout the fullscreen transition and
+     * behind any letterboxing, pillarboxing or transparent content. */
     if (placement->fullscreen && !view->fullscreen_background) {
         const float black[4] = {0, 0, 0, 1};
         view->fullscreen_background =
@@ -1238,14 +1833,28 @@ static bool exact_surface_at(struct seaside_scene_bridge *scene, double x, doubl
     if (!view || !view->mapped || (view->id && !view->placement.visible)) {
         return false;
     }
+    const struct projected_surface *projected;
+    wl_list_for_each(projected, &view->projected_surfaces, link) {
+        if (projected->scene_surface->surface == target->surface && projected->width > 0 &&
+            projected->height > 0) {
+            int lx, ly;
+            wlr_scene_node_coords(&projected->scene_surface->buffer->node, &lx, &ly);
+            target->sx = x - lx;
+            target->sy = y - ly;
+            projected_surface_coords(projected, &target->sx, &target->sy);
+            target->id = view->id;
+            return true;
+        }
+    }
     /* An implicit grab still needs surface coordinates when a viewport shift
      * clips its original target. The protocol tree gives its uncropped origin. */
-    int lx, ly;
+    int64_t lx, ly;
     struct wlr_scene_node *node = popup ? &popup->surface_tree->node : &view->tree->node;
-    wlr_scene_node_coords(node, &lx, &ly);
+    source_node_position(view, node, &lx, &ly);
+    view_source_position(view, &x, &y);
     const struct wlr_box geometry = popup ? (struct wlr_box){0} : view->toplevel->base->geometry;
     struct exact_target search = {
-        .target = target, .x = x - lx + geometry.x, .y = y - ly + geometry.y};
+        .target = target, .x = x - (double)lx + geometry.x, .y = y - (double)ly + geometry.y};
     wlr_surface_for_each_surface(root, match_target, &search);
     if (search.found) {
         target->id = view->id;

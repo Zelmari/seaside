@@ -73,6 +73,9 @@ struct Client {
         if (shm) {
             wl_shm_destroy(shm);
         }
+        if (subcompositor) {
+            wl_subcompositor_destroy(subcompositor);
+        }
         if (compositor) {
             wl_compositor_destroy(compositor);
         }
@@ -102,6 +105,7 @@ struct Client {
     wl_display *display = nullptr;
     wl_registry *registry = nullptr;
     wl_compositor *compositor = nullptr;
+    wl_subcompositor *subcompositor = nullptr;
     wl_shm *shm = nullptr;
     xdg_wm_base *shell = nullptr;
     xdg_activation_v1 *activation = nullptr;
@@ -137,6 +141,20 @@ struct Popup {
     bool dismissed = false;
 };
 
+struct Subsurface {
+    ~Subsurface() {
+        if (role) {
+            wl_subsurface_destroy(role);
+        }
+        if (surface) {
+            wl_surface_destroy(surface);
+        }
+    }
+
+    wl_surface *surface = nullptr;
+    wl_subsurface *role = nullptr;
+};
+
 void ping(void *, xdg_wm_base *shell, std::uint32_t serial) {
     xdg_wm_base_pong(shell, serial);
 }
@@ -148,6 +166,9 @@ void global(void *data, wl_registry *registry, std::uint32_t name, const char *i
     if (std::strcmp(interface, wl_compositor_interface.name) == 0 && version >= 4) {
         client.compositor = static_cast<wl_compositor *>(
             wl_registry_bind(registry, name, &wl_compositor_interface, 4));
+    } else if (std::strcmp(interface, wl_subcompositor_interface.name) == 0) {
+        client.subcompositor = static_cast<wl_subcompositor *>(
+            wl_registry_bind(registry, name, &wl_subcompositor_interface, 1));
     } else if (std::strcmp(interface, wl_shm_interface.name) == 0) {
         client.shm = static_cast<wl_shm *>(wl_registry_bind(registry, name, &wl_shm_interface, 1));
     } else if (std::strcmp(interface, xdg_wm_base_interface.name) == 0 && version >= 6) {
@@ -313,6 +334,11 @@ class Connection {
 
     bool attach_configured(Client &client, std::uint32_t rgb = 0) {
         return attach(client, client.configured.width, client.configured.height, true, rgb);
+    }
+
+    bool attach_subsurface(Client &client, Subsurface &subsurface, int width, int height,
+                           std::uint32_t rgb) {
+        return attach(client, subsurface.surface, nullptr, 0, width, height, rgb);
     }
 
     bool open_popup(Client &client, Popup &popup) {
@@ -611,6 +637,97 @@ bool wait_pixel(Connection &connection, Client &client, part3_output *output, un
                      expected, pixel.rgb, pixel.frames);
     }
     return ready;
+}
+
+bool run_fullscreen_aspect(const Fixture &fixture) {
+    auto &desktop = fixture.desktop;
+    auto &scene = fixture.scene;
+    auto output = fixture.output();
+    auto *handle = part3_output_handle(output.get());
+    REQUIRE(handle && desktop.add_output(handle, "HEADLESS-1", "", output_bounds));
+
+    Connection connection(fixture.display);
+    Client client;
+    REQUIRE(connection.connect(client) && client.subcompositor && connection.open(client));
+    REQUIRE(connection.attach(client, 60, 60, true, red));
+    const auto id = desktop.windows().focused_window().value_or(0);
+    REQUIRE(id);
+    const auto ordinary = desktop.windows().view(id).geometry;
+    REQUIRE(ordinary.width == 60 && ordinary.height == 60);
+
+    Subsurface child;
+    child.surface = wl_compositor_create_surface(client.compositor);
+    child.role =
+        wl_subcompositor_get_subsurface(client.subcompositor, child.surface, client.surface);
+    wl_subsurface_set_desync(child.role);
+    wl_subsurface_set_position(child.role, 30, 2);
+    REQUIRE(connection.attach_subsurface(client, child, 8, 8, blue));
+    xdg_toplevel_set_fullscreen(client.toplevel, nullptr);
+    REQUIRE(connection.wait(client, [&] { return client.configured.fullscreen; }));
+    REQUIRE(client.configured.width == 160 && client.configured.height == 90);
+    REQUIRE(connection.attach(client, 60, 60, true, green));
+    REQUIRE(desktop.windows().view(id).geometry == output_bounds);
+    REQUIRE(wait_pixel(connection, client, output.get(), 34, 45, 0));
+    REQUIRE(wait_pixel(connection, client, output.get(), 35, 45, green));
+    REQUIRE(wait_pixel(connection, client, output.get(), 124, 45, green));
+    REQUIRE(wait_pixel(connection, client, output.get(), 125, 45, 0));
+    REQUIRE(wait_pixel(connection, client, output.get(), 83, 6, blue));
+
+    seaside_scene_target target{};
+    REQUIRE(!scene.window_at(34, 45, target));
+    REQUIRE(scene.window_at(65, 45, target) && target.id == id &&
+            target.surface == scene.window_surface(id) && target.sx == 20 && target.sy == 30);
+    REQUIRE(scene.window_at(32, 45, target) && target.sx == -2 && target.sy == 30);
+    auto *input = wl_compositor_create_region(client.compositor);
+    wl_region_add(input, 10, 20, 25, 25);
+    wl_surface_set_input_region(client.surface, input);
+    wl_region_destroy(input);
+    wl_surface_commit(client.surface);
+    REQUIRE(connection.roundtrip(client));
+    target = {};
+    REQUIRE(!scene.window_at(40, 45, target));
+    REQUIRE(scene.window_at(65, 45, target) && target.sx == 20 && target.sy == 30);
+    wl_surface_set_input_region(client.surface, nullptr);
+    wl_surface_commit(client.surface);
+    REQUIRE(connection.roundtrip(client));
+    target = {};
+    REQUIRE(scene.window_at(83, 6, target) && target.id == id &&
+            target.surface != scene.window_surface(id) && target.sx == 2 && target.sy == 2);
+
+    Popup popup;
+    REQUIRE(connection.open_popup(client, popup));
+    REQUIRE(wait_pixel(connection, client, output.get(), 53, 18, 0));
+    target = {};
+    REQUIRE(scene.window_at(53, 18, target) && target.id == id && target.sx == 2 && target.sy == 2);
+    REQUIRE(scene.window_at(47, 18, target) && target.sx == -2 && target.sy == 2);
+
+    auto stretch = seaside::default_config();
+    stretch.window.tiling = false;
+    stretch.render.fullscreen_aspect = seaside::FullscreenAspect::stretch;
+    desktop.apply_config(stretch);
+    REQUIRE(wait_pixel(connection, client, output.get(), 1, 45, green));
+    REQUIRE(wait_pixel(connection, client, output.get(), 158, 45, green));
+    REQUIRE(wait_pixel(connection, client, output.get(), 30, 18, 0));
+    REQUIRE(wait_pixel(connection, client, output.get(), 83, 11, blue));
+    REQUIRE(connection.attach_subsurface(client, child, 12, 4, red));
+    REQUIRE(wait_pixel(connection, client, output.get(), 105, 6, red));
+    REQUIRE(wait_pixel(connection, client, output.get(), 105, 11, green));
+
+    stretch.render.fullscreen_aspect = seaside::FullscreenAspect::preserve;
+    desktop.apply_config(stretch);
+    REQUIRE(connection.attach(client, 160, 90, false, red));
+    REQUIRE(wait_pixel(connection, client, output.get(), 1, 45, red));
+    REQUIRE(wait_pixel(connection, client, output.get(), 158, 45, red));
+    target = {};
+    REQUIRE(scene.window_at(100, 60, target) && target.sx == 100 && target.sy == 60);
+
+    xdg_toplevel_unset_fullscreen(client.toplevel);
+    REQUIRE(connection.wait(client, [&] { return !client.configured.fullscreen; }));
+    REQUIRE(desktop.windows().view(id).geometry == ordinary);
+    REQUIRE(connection.attach_configured(client, green));
+    REQUIRE(hit(scene, ordinary, id));
+    REQUIRE(!desktop.failed() && !scene.snapshot().failed);
+    return true;
 }
 
 bool run_dwindle(const Fixture &fixture) {
@@ -919,6 +1036,10 @@ int main(int argc, char **argv) {
         return run_fixture(config, run_part4) ? EXIT_SUCCESS : EXIT_FAILURE;
     }
     const std::string_view scenario = argv[1];
+    if (argc == 2 && scenario == "fullscreen-aspect") {
+        config.window.tiling = false;
+        return run_fixture(config, run_fullscreen_aspect) ? EXIT_SUCCESS : EXIT_FAILURE;
+    }
     if (argc == 2 && scenario == "attention") {
         config.window.tiling = false;
         return run_fixture(config, run_attention) ? EXIT_SUCCESS : EXIT_FAILURE;

@@ -11,18 +11,17 @@ template <typename T> Json nullable(const std::optional<T> &value) {
     return value ? Json(*value) : Json(nullptr);
 }
 
-Json nullable(const std::string *value) {
-    return value ? Json(*value) : Json(nullptr);
-}
-
 Json capability(std::optional<bool> supported, bool applied, const char *reason) {
     return {{"supported", nullable(supported)},
             {"applied", applied},
             {"reason", reason ? Json(reason) : Json(nullptr)}};
 }
 
-Json night_light_capability() {
-    return capability(std::nullopt, false, "hardware color qualification pending");
+Json capability(seaside_output_support supported, bool applied, const char *reason) {
+    const auto known = supported == SEASIDE_OUTPUT_UNKNOWN
+                           ? std::nullopt
+                           : std::optional{supported == SEASIDE_OUTPUT_SUPPORTED};
+    return capability(known, applied, reason);
 }
 
 std::string bounded_utf8(const char *value, std::size_t limit) {
@@ -180,7 +179,7 @@ IpcJson SessionControl::focus() const {
     const auto &desktop = desktop_.windows();
     return {{"window_id", nullable(desktop.focused_window())},
             {"workspace_id", nullable(desktop.focused_workspace())},
-            {"output_id", nullable(outputs_.id(desktop.focused_output()))}};
+            {"output_id", nullable(desktop.focused_output())}};
 }
 
 IpcJson SessionControl::workspaces() const {
@@ -190,8 +189,8 @@ IpcJson SessionControl::workspaces() const {
         const auto output = desktop.workspace_output(id);
         const auto *state = output ? desktop.state().output(*output) : nullptr;
         result.push_back({{"id", id},
-                          {"owner_output_id", nullable(outputs_.id(desktop.workspace_owner(id)))},
-                          {"output_id", nullable(outputs_.id(output))},
+                          {"owner_output_id", nullable(desktop.workspace_owner(id))},
+                          {"output_id", nullable(output)},
                           {"visible", state && state->shown == id},
                           {"focused", desktop.focused_workspace() == id}});
     }
@@ -219,8 +218,9 @@ IpcJson SessionControl::windows() const {
 
 IpcJson SessionControl::output_rows() const {
     auto result = Json::array();
-    for (const auto &[connector, output] : outputs_.outputs()) {
+    for (const auto &[id, output] : outputs_.outputs()) {
         const auto &state = output.status.settings;
+        const auto render = scene_.render_status(output.handle);
         auto mode = state.width > 0 && state.height > 0 && state.refresh_millihz > 0
                         ? Json{{"width", state.width},
                                {"height", state.height},
@@ -228,13 +228,13 @@ IpcJson SessionControl::output_rows() const {
                         : Json(nullptr);
         result.push_back({
             {"id", output.id},
-            {"selector", "connector:" + connector},
+            {"selector", "connector:" + output.connector},
             {"identity_selector",
              output.identity.empty() ? Json(nullptr) : Json("identity:" + output.identity)},
-            {"connector", connector},
+            {"connector", output.connector},
             {"connected", output.handle != nullptr},
             {"enabled", output.enabled},
-            {"focused", desktop_.windows().focused_output() == connector},
+            {"focused", desktop_.windows().focused_output() == id},
             {"disabled_reason",
              output.disabled_reason.empty() ? Json(nullptr) : Json(output.disabled_reason)},
             {"position", {{"x", state.x}, {"y", state.y}}},
@@ -245,11 +245,12 @@ IpcJson SessionControl::output_rows() const {
             {"adaptive_sync",
              capability(output.adaptive_sync_supported,
                         output.enabled && output.status.adaptive_sync,
-                        output.adaptive_sync_supported == false ? "backend rejected adaptive sync"
+                        output.adaptive_sync_supported == false ? "output lacks adaptive sync"
+                        : output.adaptive_sync_rejected         ? "backend rejected adaptive sync"
                                                                 : nullptr)},
-            {"tearing",
-             capability(std::nullopt, false, "native presentation qualification pending")},
-            {"night_light", night_light_capability()},
+            {"tearing", capability(render.tearing, render.tearing_applied, render.tearing_reason)},
+            {"night_light",
+             capability(render.night_light, render.night_light_applied, render.night_light_reason)},
         });
     }
     return result;
@@ -257,8 +258,10 @@ IpcJson SessionControl::output_rows() const {
 
 IpcJson SessionControl::night_light(const ConfigTransaction &config) const {
     auto outputs = Json::array();
-    for (const auto &[connector, output] : outputs_.outputs()) {
-        auto cap = night_light_capability();
+    for (const auto &[id, output] : outputs_.outputs()) {
+        const auto render = scene_.render_status(output.handle);
+        auto cap =
+            capability(render.night_light, render.night_light_applied, render.night_light_reason);
         cap["output_id"] = output.id;
         outputs.push_back(std::move(cap));
     }
@@ -270,17 +273,18 @@ IpcJson SessionControl::night_light(const ConfigTransaction &config) const {
 
 IpcJson SessionControl::diagnostics() const {
     auto outputs = Json::array();
-    for (const auto &[connector, output] : outputs_.outputs()) {
+    for (const auto &[id, output] : outputs_.outputs()) {
         const auto &status = output.status;
+        const auto render = scene_.render_status(output.handle);
+        const auto fallback =
+            render.fallback_reason ? Json::array({render.fallback_reason}) : Json::array();
         outputs.push_back({
             {"output_id", output.id},
-            {"backend", "drm"},
+            {"backend", render.backend ? Json(render.backend) : Json(nullptr)},
             {"renderer", renderer_ ? Json(renderer_) : Json(nullptr)},
-            {"frame_state", !output.enabled        ? "inactive"
-                            : status.frame_pending ? "waiting_for_present"
-                                                   : "idle"},
-            {"presentation_mode", "unknown"},
-            {"fallback_reasons", Json::array()},
+            {"frame_state", render.frame_state},
+            {"presentation_mode", render.presentation_mode},
+            {"fallback_reasons", fallback},
             {"committed_frames", status.committed_frames},
             {"presented_frames", status.presented_frames},
             {"discarded_frames", status.discarded_frames},
@@ -356,7 +360,7 @@ void SessionControl::publish(IpcServer &ipc) {
         }
         previous->second = {window.home_workspace, window.mapped};
     }
-    for (const auto &[connector, output] : outputs_.outputs()) {
+    for (const auto &[id, output] : outputs_.outputs()) {
         const auto &state = output.status.settings;
         Json next{{"connected", output.handle != nullptr},
                   {"enabled", output.enabled},
@@ -364,7 +368,7 @@ void SessionControl::publish(IpcServer &ipc) {
                    {state.width, state.height, state.refresh_millihz, state.scale, state.rotation}},
                   {"position", {state.x, state.y}},
                   {"adaptive_sync", output.status.adaptive_sync},
-                  {"id", output.id}};
+                  {"connector", output.connector}};
         if (published_outputs_[output.id] != next) {
             ipc.event("output.changed", {{"output_id", output.id},
                                          {"connected", output.handle != nullptr},

@@ -285,7 +285,7 @@ bool WindowManager::add_output(std::string_view id, WindowRect bounds, WindowRec
     return true;
 }
 
-bool WindowManager::remove_output(std::string_view id) {
+bool WindowManager::remove_output(std::string_view id, std::string_view ranked_fallback) {
     auto position = outputs_.find(id);
     if (position == outputs_.end() || !position->second.connected) {
         return false;
@@ -304,7 +304,8 @@ bool WindowManager::remove_output(std::string_view id) {
     } else {
         std::uint64_t last_focused = 0;
         for (const auto &[other, entry] : outputs_) {
-            if (entry.connected && (!fallback || entry.last_focused > last_focused)) {
+            if (entry.connected && (!fallback || entry.last_focused > last_focused ||
+                                    (!last_focused && other == ranked_fallback))) {
                 fallback = other;
                 last_focused = entry.last_focused;
             }

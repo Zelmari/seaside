@@ -11,6 +11,7 @@ struct wlr_allocator;
 struct wlr_buffer;
 struct wlr_drag_icon;
 struct wlr_ext_image_copy_capture_manager_v1;
+struct wlr_linux_dmabuf_v1;
 struct wlr_output;
 struct wlr_renderer;
 struct wlr_surface;
@@ -23,6 +24,19 @@ typedef void (*seaside_scene_image_release_fn)(void *data);
 
 struct seaside_scene_rect {
     int x, y, width, height;
+};
+
+enum seaside_output_support {
+    SEASIDE_OUTPUT_UNKNOWN,
+    SEASIDE_OUTPUT_UNSUPPORTED,
+    SEASIDE_OUTPUT_SUPPORTED
+};
+
+struct seaside_scene_render_status {
+    enum seaside_output_support tearing, night_light;
+    bool tearing_applied, night_light_applied;
+    const char *tearing_reason, *night_light_reason;
+    const char *backend, *frame_state, *presentation_mode, *fallback_reason;
 };
 
 enum seaside_scene_window_event_kind {
@@ -54,7 +68,7 @@ struct seaside_scene_window_placement {
     struct seaside_scene_rect geometry, output, clip;
     uint64_t stacking;
     int border_width;
-    bool visible, activated, maximized, fullscreen, tiled, resize, resizing;
+    bool visible, activated, maximized, fullscreen, stretch_fullscreen, tiled, resize, resizing;
 };
 
 struct seaside_scene_target {
@@ -88,6 +102,14 @@ struct seaside_scene_snapshot {
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+void seaside_scene_set_linux_dmabuf(struct seaside_scene_bridge *scene,
+                                    struct wlr_linux_dmabuf_v1 *dmabuf);
+void seaside_scene_set_render_policy(struct seaside_scene_bridge *scene, bool direct_scanout,
+                                     bool allow_tearing, bool night_light, int temperature_kelvin);
+struct seaside_scene_render_status
+seaside_scene_get_render_status(const struct seaside_scene_bridge *scene,
+                                struct wlr_output *output);
 
 struct seaside_scene_bridge *seaside_scene_create(struct wl_display *display);
 void seaside_scene_destroy(struct seaside_scene_bridge *scene);

@@ -40,6 +40,19 @@ glib = dependency('glib-2.0', include_type: 'system')
 find_program('dbus-daemon')
 find_program('pipewire')
 wayland_scanner = find_program('wayland-scanner')
+display_protocols = []
+foreach protocol : ['stable/presentation-time/presentation-time', 'staging/fractional-scale/fractional-scale-v1']
+  name = protocol.split('/')[-1]
+  xml = wayland_protocols.get_variable(pkgconfig: 'pkgdatadir') / (protocol + '.xml')
+  display_protocols += custom_target(
+    name + '-client-header', input: xml, output: name + '-client-protocol.h',
+    command: [wayland_scanner, 'client-header', '@INPUT@', '@OUTPUT@'],
+  )
+  display_protocols += custom_target(
+    name + '-private-code', input: xml, output: name + '-protocol.c',
+    command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'],
+  )
+endforeach
 xdg_shell_xml = wayland_protocols.get_variable(pkgconfig: 'pkgdatadir') / 'stable/xdg-shell/xdg-shell.xml'
 xdg_shell_client_header = custom_target(
   'xdg-shell-client-header', input: xdg_shell_xml, output: 'xdg-shell-client-protocol.h',
@@ -202,6 +215,16 @@ cursor_layout_tests = executable(
 )
 test('part6-cursor-layout', cursor_layout_tests, suite: ['unit', 'part6'], timeout: 10,
   env: {'SEASIDE_GTEST': '1', 'SEASIDE_TEST_PART': '6', 'SEASIDE_REQUIREMENTS': '5.2,6.2,12.2b'},
+)
+
+drm_mode_tests = executable(
+  'seaside-part8-drm-modes', 'tests/unit/part8_drm_modes.c',
+  include_directories: include_directories('src'),
+  dependencies: [wlroots, wayland_server, libdrm, libinput, pixman],
+  link_with: tty_foundation, install: false,
+)
+test('part8-drm-modes', drm_mode_tests, suite: ['unit', 'part8'], timeout: 10,
+  env: {'SEASIDE_TEST_PART': '8', 'SEASIDE_REQUIREMENTS': '5.2,8.2'},
 )
 
 tty_fixture = executable(
@@ -425,13 +448,17 @@ headless_fixture = executable(
 part3_fixture = executable(
   'seaside-part3-fixture',
   ['tests/integration/part3.cpp', 'tests/integration/part3_bridge.c',
-   xdg_shell_client_header, xdg_shell_private_code],
+   xdg_shell_client_header, xdg_shell_private_code, display_protocols],
   include_directories: include_directories('src', 'tests/integration'),
   dependencies: [wlroots, wayland_server, wayland_client, pixman, libdrm, threads],
   link_with: core, install: false,
 )
 test('part3-headless-session', part3_fixture, suite: ['integration', 'part3'], timeout: 30,
   env: {'SEASIDE_TEST_PART': '3', 'SEASIDE_REQUIREMENTS': '2.1,2.2,3,12.2b'},
+)
+test('part8-display-protocols', part3_fixture, args: ['--display-protocols'],
+  suite: ['integration', 'part8'], timeout: 20,
+  env: {'SEASIDE_TEST_PART': '8', 'SEASIDE_REQUIREMENTS': '6.1,8.2,11,12.2b'},
 )
 
 appearance_tests = executable(
@@ -455,8 +482,8 @@ part6_output_tests = executable(
   link_with: [desktop_foundation, core, tty_foundation, config_foundation, ipc_foundation],
   install: false,
 )
-test('part6-output-transaction', part6_output_tests, suite: ['integration', 'part6'], timeout: 20,
-  env: {'SEASIDE_GTEST': '1', 'SEASIDE_TEST_PART': '6', 'SEASIDE_REQUIREMENTS': '5.2,5.3,8.1,10.6,12.2b'},
+test('part8-output-policy', part6_output_tests, suite: ['integration', 'part6', 'part8'], timeout: 20,
+  env: {'SEASIDE_GTEST': '1', 'SEASIDE_TEST_PART': '8', 'SEASIDE_REQUIREMENTS': '5.2,5.3,6.1,8.1,8.2,10.6,12.2b'},
 )
 
 part4_fixture = executable(
@@ -478,6 +505,10 @@ test('part5-headless-scrolling', part4_fixture, args: ['scrolling'], suite: ['in
 )
 test('part6-headless-attention', part4_fixture, args: ['attention'], suite: ['integration', 'part6'],
   timeout: 30, env: {'SEASIDE_TEST_PART': '6', 'SEASIDE_REQUIREMENTS': '6.1,8.1,10.4,12.2b'},
+)
+test('part8-fullscreen-aspect', part4_fixture, args: ['fullscreen-aspect'],
+  suite: ['integration', 'part8'], timeout: 30,
+  env: {'SEASIDE_TEST_PART': '8', 'SEASIDE_REQUIREMENTS': '6.1,6.2,7.2,12.2b'},
 )
 
 test('part6-binding-reload-during-drag', part4_fixture, args: ['binding-reload'],

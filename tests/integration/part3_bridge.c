@@ -47,6 +47,8 @@ static void output_commit(struct wl_listener *listener, void *data) {
         black = false;
         client = false;
     } else {
+        const unsigned width = (unsigned)(CLIENT_WIDTH * observer->output->scale + 0.5f);
+        const unsigned height = (unsigned)(CLIENT_HEIGHT * observer->output->scale + 0.5f);
         for (unsigned y = 0; y < OUTPUT_HEIGHT; y++) {
             for (unsigned x = 0; x < OUTPUT_WIDTH; x++) {
                 uint32_t pixel;
@@ -58,7 +60,7 @@ static void output_commit(struct wl_listener *listener, void *data) {
                     observer->sample.rgb = pixel;
                 }
                 black = black && pixel == 0;
-                const uint32_t expected = x < CLIENT_WIDTH && y < CLIENT_HEIGHT ? CLIENT_RGB : 0;
+                const uint32_t expected = x < width && y < height ? CLIENT_RGB : 0;
                 client = client && pixel == expected;
             }
         }
@@ -132,6 +134,15 @@ struct part3_output *part3_output_create(struct wl_display *display, struct wlr_
 
 struct wlr_output *part3_output_handle(struct part3_output *output) {
     return output ? output->output : NULL;
+}
+
+bool part3_output_set_scale(struct part3_output *output, float scale) {
+    struct wlr_output_state state;
+    wlr_output_state_init(&state);
+    wlr_output_state_set_scale(&state, scale);
+    bool committed = wlr_output_commit_state(output->output, &state);
+    wlr_output_state_finish(&state);
+    return committed;
 }
 
 struct part3_output_snapshot part3_output_get_snapshot(struct part3_output *output) {

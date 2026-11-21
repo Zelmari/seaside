@@ -11,7 +11,12 @@
 #include <wlr/render/allocator.h>
 #include <wlr/render/pixman.h>
 #include <wlr/render/wlr_renderer.h>
+#include <wlr/types/wlr_buffer.h>
 #include <wlr/types/wlr_compositor.h>
+#include <wlr/types/wlr_fractional_scale_v1.h>
+#include <wlr/types/wlr_linux_dmabuf_v1.h>
+#include <wlr/types/wlr_linux_drm_syncobj_v1.h>
+#include <wlr/types/wlr_presentation_time.h>
 #include <wlr/types/wlr_subcompositor.h>
 #include <wlr/types/wlr_viewporter.h>
 
@@ -20,8 +25,26 @@ struct wlr_allocator *seaside_wlr_allocator_create(struct wlr_backend *backend,
     return wlr_allocator_autocreate(backend, renderer);
 }
 
-bool seaside_wlr_renderer_init_display(struct wlr_renderer *renderer, struct wl_display *display) {
-    return wlr_renderer_init_wl_display(renderer, display);
+bool seaside_wlr_renderer_init_display(struct wlr_renderer *renderer, struct wl_display *display,
+                                       struct wlr_backend *backend,
+                                       struct wlr_linux_dmabuf_v1 **dmabuf) {
+    if (!wlr_renderer_init_wl_shm(renderer, display) ||
+        !wlr_presentation_create(display, backend, 2) ||
+        !wlr_fractional_scale_manager_v1_create(display, 1)) {
+        return false;
+    }
+    const int drm_fd = wlr_renderer_get_drm_fd(renderer);
+    if (drm_fd >= 0 && wlr_renderer_get_texture_formats(renderer, WLR_BUFFER_CAP_DMABUF)) {
+        *dmabuf = wlr_linux_dmabuf_v1_create_with_renderer(display, 5, renderer);
+        if (!*dmabuf) {
+            return false;
+        }
+        if (renderer->features.timeline && backend->features.timeline &&
+            !wlr_linux_drm_syncobj_manager_v1_create(display, 1, drm_fd)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 struct wlr_compositor *seaside_wlr_compositor_create(struct wl_display *display,
