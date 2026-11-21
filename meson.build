@@ -337,6 +337,11 @@ test('part7-satellite', satellite_tests, suite: ['unit', 'part7'], timeout: 20,
   env: {'SEASIDE_GTEST': '1', 'SEASIDE_TEST_PART': '7', 'SEASIDE_REQUIREMENTS': '3,11,12.2b'},
 )
 
+executable(
+  'seaside-part7-x11-client', 'tests/integration/part7_x11_client.c',
+  dependencies: dependency('xcb', method: 'pkg-config'), install: false,
+)
+
 ipc_foundation = static_library(
   'seaside-ipc-foundation', ['src/ipc.cpp', 'src/ipc_protocol.cpp'],
   include_directories: include_directories('src'),
