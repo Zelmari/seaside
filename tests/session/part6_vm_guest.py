@@ -246,6 +246,7 @@ def run_live(repo, directory, result_dir, state):
     second_autostart = directory / "next-autostart.txt"
     initial = with_autostart(baseline_config, first_autostart)
     repair = with_autostart(repaired_config, second_autostart)
+    unsupported_config = repair + "\n[monitors]\nresolution = '313x271'\n"
     moved_config = repair + "\n[monitors]\nposition = [64, 32]\n"
     config.parent.mkdir(parents=True)
     replace(config, initial)
@@ -295,7 +296,7 @@ def run_live(repo, directory, result_dir, state):
             session.wait(lambda: session.strip(region) == clean, "banner removal after repair")
             session.screenshot(result_dir, "recovered")
 
-            replace(config, repair + "\n[monitors]\nresolution = '313x271'\n")
+            replace(config, unsupported_config)
             mode_rejected = events.expect("config.error")
             retained = session.focused_output()
             require(session.config()["error"]["field"] == "monitors.resolution" and
@@ -339,13 +340,14 @@ def run_live(repo, directory, result_dir, state):
                     not second_autostart.exists(), "Reload reran autostart commands")
             session.exit()
 
-    replace(config, bad_config)
+    replace(config, unsupported_config)
     with Session(repo, directory, result_dir, "restart") as session:
         recovered = session.config()
-        require(recovered["source"] == "last_good" and recovered["error"] and
+        require(recovered["source"] == "last_good" and
+                recovered["error"]["field"] == "monitors.resolution" and
                 not recovered["pending_restart"] and recovered["active_workspace_mode"] == "per-monitor" and
-                snapshot.read_text() == moved_config and config.read_text() == bad_config,
-                "Restart failed to recover the requested workspace mode from last-good TOML")
+                snapshot.read_text() == moved_config and config.read_text() == unsupported_config,
+                "An unsupported boot mode did not recover the last-good configuration")
         require(not session.ctl("night-light", "status")["result"]["enabled"],
                 "Restart restored a transient night-light override")
         session.wait(second_autostart.is_file, "the restart autostart command")
