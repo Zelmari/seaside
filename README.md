@@ -4,8 +4,9 @@ An Arch Linux Wayland compositor using **C++23 and wlroots**, **GCC** as the
 primary compiler and **Meson + Ninja** for builds. The TTY session owns a live
 Wayland display, enforces hardware cursors, and checks mandatory session
 services before it starts configured commands. It manages XDG windows,
-workspaces, focus, maximize, fullscreen, and pin. Part 5 adds Dwindle tiling
-by default and scrolling columns selectable in the TOML config.
+workspaces, focus, maximize, fullscreen, and pin. Dwindle is the default
+tiling layout, and scrolling columns are selectable in the TOML config.
+TOML edits apply live, and `seasidectl` exposes local status, actions, and events.
 
 The product contract is in [the design](Specification/SEASIDE_SPEC.md). Build and
 verification details are in [the part 1 handoff](Specification/PART1.md).
@@ -14,7 +15,8 @@ Configuration/state implementation and checks are recorded in
 The [Part 3 handoff](Specification/PART3.md) records the TTY and session VM
 trials. The [Part 4 handoff](Specification/PART4.md) records the window and
 workspace checks. The [Part 5 handoff](Specification/PART5.md) records layout
-behavior and checks.
+behavior and checks. The [Part 6 handoff](Specification/PART6.md) covers live
+reload, IPC, and manual test steps.
 Future latency investigations are tracked in
 [the performance research notes](Specification/Research/PERFORMANCE.md).
 Approved choices and documentation needs for users and contributors are also
@@ -25,7 +27,9 @@ recorded in [the public documentation record](Specification/PUBLIC_DOCUMENTATION
 Install the build and test dependencies in the Arch development environment:
 
 ```sh
-sudo pacman -S --needed gcc pkgconf meson ninja python wlroots0.20 wayland wayland-protocols libdrm pixman gtest clang gdb tomlplusplus libxkbcommon systemd-libs libpipewire pipewire dbus
+sudo pacman -S --needed gcc pkgconf meson ninja python wlroots0.20 wayland wayland-protocols \
+  libdrm libinput pixman gtest clang gdb tomlplusplus nlohmann-json libxkbcommon systemd-libs \
+  libpipewire pipewire dbus libpng libjpeg-turbo libwebp pango cairo ttf-dejavu
 ```
 
 Then run:
