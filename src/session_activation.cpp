@@ -54,6 +54,11 @@ bool valid_socket(std::string_view name) {
                std::string_view::npos;
 }
 
+std::string config_home_environment() {
+    const auto *path = std::getenv("XDG_CONFIG_HOME");
+    return path && path[0] == '/' ? std::string("XDG_CONFIG_HOME=") + path : std::string{};
+}
+
 bool is_missing(sd_bus_message *message) {
     const auto *error = message ? sd_bus_message_get_error(message) : nullptr;
     const auto *sender = message ? sd_bus_message_get_sender(message) : nullptr;
@@ -94,6 +99,7 @@ struct PortalActivation::Impl final : std::enable_shared_from_this<Impl> {
     std::array<Unit, services.size()> units{};
     std::string wayland;
     std::string bus_address;
+    std::string config_home;
     Completion completion;
     const Clock::time_point deadline;
     std::size_t stage = 0;
@@ -106,7 +112,8 @@ struct PortalActivation::Impl final : std::enable_shared_from_this<Impl> {
         : bus(connection), wayland("WAYLAND_DISPLAY=" + std::string(socket)),
           bus_address("DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/" + std::to_string(getuid()) +
                       "/bus"),
-          completion(std::move(callback)), deadline(Clock::now() + limit) {}
+          config_home(config_home_environment()), completion(std::move(callback)),
+          deadline(Clock::now() + limit) {}
 
     ~Impl() { remove_timer(); }
 
@@ -157,14 +164,41 @@ struct PortalActivation::Impl final : std::enable_shared_from_this<Impl> {
     int append_launch(sd_bus_message *message, const Service &service) const {
         // The environment belongs to these unit invocations. A manager-wide
         // SetEnvironment cannot be restored atomically if another session starts.
-        return sd_bus_message_append(
-            message, "ssa(sv)a(sa(sv))", units[stage].name.c_str(), "fail", 8, "Type", "s", "exec",
-            "CollectMode", "s", "inactive-or-failed", "TimeoutStopUSec", "t",
-            static_cast<std::uint64_t>(1'000'000), "TimeoutStartUSec", "t",
-            static_cast<std::uint64_t>(4'000'000), "KillMode", "s", "control-group", "Environment",
-            "as", 5, wayland.c_str(), bus_address.c_str(), "XDG_CURRENT_DESKTOP=Seaside",
-            "XDG_SESSION_TYPE=wayland", "GDK_BACKEND=wayland", "UnsetEnvironment", "as", 1,
-            "DISPLAY", "ExecStart", "a(sasb)", 1, service.binary, 1, service.binary, 0, 0);
+        const int fixed = sd_bus_message_append(message, "ss", units[stage].name.c_str(), "fail");
+        if (fixed < 0) {
+            return fixed;
+        }
+        const int array = sd_bus_message_open_container(message, 'a', "(sv)");
+        if (array < 0) {
+            return array;
+        }
+        const int properties = sd_bus_message_append(
+            message, "(sv)(sv)(sv)(sv)(sv)", "Type", "s", "exec", "CollectMode", "s",
+            "inactive-or-failed", "TimeoutStopUSec", "t", static_cast<std::uint64_t>(1'000'000),
+            "TimeoutStartUSec", "t", static_cast<std::uint64_t>(4'000'000), "KillMode", "s",
+            "control-group");
+        if (properties < 0) {
+            return properties;
+        }
+        // An explicit XDG config directory also contains the external chooser's config.
+        const int environment = sd_bus_message_append(
+            message, "(sv)", "Environment", "as", config_home.empty() ? 5 : 6, wayland.c_str(),
+            bus_address.c_str(), "XDG_CURRENT_DESKTOP=Seaside", "XDG_SESSION_TYPE=wayland",
+            "GDK_BACKEND=wayland", config_home.c_str());
+        if (environment < 0) {
+            return environment;
+        }
+        const int exec =
+            sd_bus_message_append(message, "(sv)(sv)", "UnsetEnvironment", "as", 1, "DISPLAY",
+                                  "ExecStart", "a(sasb)", 1, service.binary, 1, service.binary, 0);
+        if (exec < 0) {
+            return exec;
+        }
+        const int end = sd_bus_message_close_container(message);
+        if (end < 0) {
+            return end;
+        }
+        return sd_bus_message_append(message, "a(sa(sv))", 0);
     }
 
     ServiceReport request(Step step, const char *owner = nullptr, std::uint32_t pid = 0) noexcept {

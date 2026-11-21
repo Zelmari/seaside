@@ -472,6 +472,13 @@ portal_smoke = executable(
   dependencies: [wlroots, wayland_server, pixman, libdrm, systemd, pipewire, threads],
   link_with: [core, capture_foundation, session_foundation], install: false,
 )
+executable('seaside-portal-stream', 'tests/integration/portal_stream.cpp',
+  dependencies: [systemd, pipewire], install: false,
+)
+executable('seaside-part7-native-client',
+  ['tests/integration/part7_native_client.c', xdg_shell_client_header, xdg_shell_private_code],
+  dependencies: wayland_client, install: false,
+)
 test('part3-real-portals', python,
   args: [files('tests/integration/test_real_portals.py'), portal_smoke,
          files('packaging/seaside-portals.conf')],
