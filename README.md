@@ -16,7 +16,8 @@ The [Part 3 handoff](Specification/PART3.md) records the TTY and session VM
 trials. The [Part 4 handoff](Specification/PART4.md) records the window and
 workspace checks. The [Part 5 handoff](Specification/PART5.md) records layout
 behavior and checks. The [Part 6 handoff](Specification/PART6.md) covers live
-reload, IPC, and manual test steps.
+reload, IPC, and manual test steps. The [Part 7 handoff](Specification/PART7.md)
+covers X11, clipboard, audio, and sharing.
 Future latency investigations are tracked in
 [the performance research notes](Specification/Research/PERFORMANCE.md).
 Approved choices and documentation needs for users and contributors are also
