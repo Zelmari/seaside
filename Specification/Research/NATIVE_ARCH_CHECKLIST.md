@@ -4,7 +4,7 @@ Use this checklist when Seaside becomes the main desktop on the native Arch
 installation. Start with the first-login checks, then exercise the apps,
 devices, and workflows used day to day. Run each item once its implementation
 is available. Record results here as the native trial progresses.
-[Seaside design](../SEASIDE_SPEC.md) · [Part 7 handoff](../Parts/Part-07/HANDOFF.md) · [Performance investigations](PERFORMANCE.md)
+[Seaside design](../SEASIDE_SPEC.md) · [Part 7 handoff](../Parts/Part-07/HANDOFF.md) · [Part 8 handoff](../Parts/Part-08/HANDOFF.md) · [Performance investigations](PERFORMANCE.md)
 
 ## First login
 
@@ -53,6 +53,50 @@ receiving end of a test call.
   changes on the current default output, the 100% cap, and mute toggle.
   Check that ordinary F10–F12 reach a focused app when they emit function-key
   events, and try any media-key remapping used on the main desktop.
+
+## Part 8 checks on the Framework Desktop
+
+Start Seaside from a logged-in native Arch TTY with the actual AMD renderer.
+Use the read-only collector inside the running session to record the display
+and presentation state around each trial. Give each run a short label, such as
+`fullscreen before sharing` or `after VT return`.
+
+```sh
+python3 tests/hardware/part8_display.py 'fullscreen before sharing' --seconds 5
+```
+
+- [ ] Check active hardware cursor planes and cursor alignment on each AMD
+  output at 1.0, 1.25 and 1.5 scale and at the supported rotations. Repeat after
+  a mode change, VT switch, suspend/resume, and reconnect. Move the pointer
+  across monitor boundaries and check that it reaches the expected pixels.
+- [ ] Use two physical monitors with different refresh rates and, where
+  available, two similar displays with ambiguous EDIDs. Reconnect on another
+  port, unplug the primary and secondary in turn, and reconnect after removing
+  every output. Verify primary ranking and stability, workspace migration and
+  restoration, preservation of manual workspace moves, and client survival.
+- [ ] Use a native DMA-BUF client with `linux-drm-syncobj`. Observe acquire and
+  release fences through composition, direct scanout and selected-window
+  capture, including a hidden window. Exercise replacement or destruction of
+  a buffer, client or output with a fence pending. Include removing the
+  surface's sync object before committing a replacement buffer. Check
+  implicit-sync clients on the same GPU and look for corruption or stuck
+  buffers.
+- [ ] Compare an eligible fullscreen or ordinary surface with composition for
+  overlap, scaling, rotation, the config-error banner, and active capture.
+  Verify actual AMD scanout and recovery after each obstacle is removed. Record
+  presentation feedback, KMS state, fallback reasons, idle work, frame pacing
+  and missed presentations with matched workloads. Use external equipment for
+  physical input-to-photon timing if it is measured.
+- [ ] Run fullscreen Steam/Proton and native clients on a VRR-capable monitor.
+  Verify fixed refresh with VRR off, per-output fullscreen VRR, and `always`
+  where supported. Use a client that sets an async hint to verify supported
+  fullscreen-only tearing and synchronized fallback for a rejected flip.
+  Check preserve/stretch, focus, pointer lock and shortcuts during game play.
+- [ ] Enable night light at 4500 K, check the hardware LUT and visible warmth,
+  adjust the temperature, and turn it off. Verify color restoration through
+  a VT switch, modeset and resume, and on mixed-capability outputs. Observe
+  direct scanout with and without the LUT. An unsupported monitor should stay
+  available with its prior colors.
 
 ## Main desktop use
 
