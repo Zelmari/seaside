@@ -131,7 +131,7 @@ portal selection. OBS and Discord are absent from the test guest. Sharing in
 those applications, desktop audio in their receiving clients, and physical
 microphone and Fn-key behavior remain open. Native gaming and GPU checks
 remain on the reference system. Isolated application audio is deferred beyond
-v1. [Capture and audio acceptance](SEASIDE_SPEC.md#122-required-test-suite)
+v1. [Native Arch desktop checklist](Research/NATIVE_ARCH_CHECKLIST.md) · [Capture and audio acceptance](SEASIDE_SPEC.md#122-required-test-suite)
 
 Earlier trials occasionally reached a linked PipeWire stream with no samples
 at the receiver. A recovered xdpw trace showed that the first Wayland frame

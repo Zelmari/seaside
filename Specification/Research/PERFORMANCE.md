@@ -7,6 +7,9 @@ The [design](../SEASIDE_SPEC.md), especially §§2, 6, 7, 12 and 14, remains the
 product contract. Each item below is an unmeasured investigation candidate.
 It is not a promise of lower latency or a request for additional functionality.
 
+For the day-to-day desktop trial on the native installation, see the
+[native Arch desktop checklist](NATIVE_ARCH_CHECKLIST.md).
+
 ## Selected baseline
 
 - C++23 with GCC, wlroots, its existing scene graph and renderers,
