@@ -9,7 +9,8 @@ from part5_vm import revision_bundle, run
 
 ARTIFACTS = {"part7-session.log", "part7-native.log", "part7-x11.log", "part7-monitor.log",
              "part7-window.log", "part7-cancel.log", "part7-x11-window.log", "part7-grim.png",
-             "part7-portals.log", "part7-pipewire.log", "part7-memory.jsonl"}
+             "part7-portals.log", "part7-pipewire.log", "part7-memory.jsonl", "part7-recorder.log",
+             "part7-monitor.mkv"}
 
 KEYS = {
     "cycle": ("38", "0f", "8f", "b8"),
@@ -40,12 +41,15 @@ def main():
     parser.add_argument("--pkg-config-path", type=Path)
     parser.add_argument("--runtime-prefix", type=Path,
                         help="guest-local signed packages with bin/ and lib/ directories")
+    parser.add_argument("--recorder-prefix", type=Path,
+                        help="guest-local wf-recorder and FFmpeg runtime directory")
     args = parser.parse_args()
-    for path in (args.pkg_config_path, args.runtime_prefix):
+    for path in (args.pkg_config_path, args.runtime_prefix, args.recorder_prefix):
         if path is not None and not path.is_absolute():
             parser.error("package and runtime paths must be absolute guest paths")
     settings = (f"part7_pkg_config_path = {str(args.pkg_config_path or '')!r}\n"
-                f"part7_runtime_prefix = {str(args.runtime_prefix or '')!r}\n")
+                f"part7_runtime_prefix = {str(args.runtime_prefix or '')!r}\n"
+                f"part7_recorder_prefix = {str(args.recorder_prefix or '')!r}\n")
     with revision_bundle() as (revision, bundle):
         return run(args, revision, bundle, scenario="part7", captures=ARTIFACTS,
                    send_input=send_input, settings=settings)

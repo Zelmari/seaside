@@ -294,7 +294,32 @@ def wait_color(path, child, color, size=None):
                     8, f"portal frame with {color} pixels", child)
 
 
-def run_video(session, results, state):
+@contextmanager
+def start_stream(session, results, state, log, source, lifetime, choice, first_frame):
+    for attempt in range(1, 4):
+        with process(session, log, "seaside-portal-stream", source, lifetime) as reader:
+            choose(session, reader, choice=choice)
+            try:
+                first = first_frame(reader)
+            except RuntimeError:
+                diagnostic = log.read_text(errors="replace")
+                if (attempt == 3 or frame_rows(log) or reader.poll() is not None or
+                        "PipeWire stream state streaming" not in diagnostic):
+                    raise
+                retries = state.setdefault("portal_start_retries", [])
+                retries.append({"source": choice, "attempt": attempt, "receiver_log": diagnostic})
+                event("part7", f"retry {choice} after a linked stream delivered no frames")
+                if len(retries) == 1:
+                    graph = results / "part7-pipewire.log"
+                    for args in (["systemctl", "--user", "show", "-p", "MainPID,SubState", "wireplumber"],
+                                 ["pw-cli", "ls", "Node"], ["pw-link", "-l"]):
+                        run_logged(args, session.repo, graph, 3, env=session.env)
+                continue
+            yield reader, first
+            return
+
+
+def run_monitor(session, results, state):
     tools = state["tools"]
     grab = results / "part7-grim.png"
     output([tools["grim"], "-c", grab], env=session.env)
@@ -303,21 +328,21 @@ def run_video(session, results, state):
     monitor_size = tuple(map(str, struct.unpack(">II", png[16:24])))
     state["grim_dimensions"] = monitor_size
     monitor_log = results / "part7-monitor.log"
-    with process(session, monitor_log, "seaside-portal-stream", "monitor", "frame") as reader:
-        choose(session, reader, choice="Monitor")
-        try:
-            wait_for(lambda: frame_rows(monitor_log) or reader.poll() is not None, 9,
-                     "a PipeWire monitor frame", session.process)
-        except RuntimeError:
-            graph = results / "part7-pipewire.log"
-            for args in (["systemctl", "--user", "show", "-p", "MainPID,SubState", "wireplumber"],
-                         ["pw-cli", "ls", "Node"], ["pw-link", "-l"]):
-                run_logged(args, session.repo, graph, 3, env=session.env)
-        require(reader.wait(timeout=27) == 0, f"Monitor stream failed: {monitor_log.read_text()}")
-        rows = frame_rows(monitor_log)
+
+    def first_frame(reader):
+        rows = wait_for(lambda: frame_rows(monitor_log) or reader.poll() is not None, 8,
+                        "a PipeWire monitor frame", session.process)
+        require(isinstance(rows, list), f"The monitor receiver exited: {monitor_log.read_text()}")
+        return rows
+
+    with start_stream(session, results, state, monitor_log, "monitor", "frame", "Monitor",
+                      first_frame) as (reader, rows):
+        require(reader.wait(timeout=8) == 0, f"Monitor stream failed: {monitor_log.read_text()}")
         require(rows and rows[0][:2] == monitor_size, "Portal monitor dimensions differ from grim")
         state["monitor_frames"] = rows
 
+
+def run_video(session, results, state):
     native_log = results / "part7-native.log"
     cast_log = results / "part7-window.log"
     with process(session, native_log, "seaside-part7-native-client", NATIVE_TITLE, "b04e29",
@@ -328,10 +353,9 @@ def run_video(session, results, state):
             choose(session, reader)
             require(reader.wait(timeout=12) == 0 and "cancelled" in cancel_log.read_text(),
                     f"Chooser did not cancel: {cancel_log.read_text()}")
-        with process(session, cast_log, "seaside-portal-stream", "window", "closed") as reader:
-            choose(session, reader, choice=NATIVE_TITLE)
-            first = wait_color(cast_log, reader, "b04e29")
-            require(first[:2] != monitor_size, "The window stream has monitor dimensions")
+        with start_stream(session, results, state, cast_log, "window", "closed", NATIVE_TITLE,
+                          lambda reader: wait_color(cast_log, reader, "b04e29")) as (reader, first):
+            require(first[:2] != tuple(state.get("grim_dimensions", ())), "The window stream has monitor dimensions")
             with process(session, results / "part7-overlap.log", "seaside-part7-native-client",
                          "Part7 Overlap", "fa2277", stdin=True) as overlap:
                 wait_for(lambda: session.window("Part7 Overlap"), 8, "overlap window", overlap)
@@ -364,9 +388,8 @@ def run_x11(session, results, state):
         wait_for(lambda: session.window(X11_TITLE), 12, "first satellite-backed X11 window", client)
         first_pid = wait_for(lambda: re.search(r"xwayland-satellite started pid=([0-9]+)", session.log_text()),
                              5, "the owned satellite child", session.process)[1]
-        with process(session, cast_log, "seaside-portal-stream", "window", "closed") as reader:
-            choose(session, reader, choice=X11_TITLE)
-            first = wait_color(cast_log, reader, "2496d0")
+        with start_stream(session, results, state, cast_log, "window", "closed", X11_TITLE,
+                          lambda reader: wait_color(cast_log, reader, "2496d0")) as (reader, first):
             session.ctl("workspace", "2")
             before = session.ctl("focus")
             command(client, "color c24122")
@@ -561,6 +584,47 @@ def run_capture_soak(session, state):
     require(after["VmRSS"] <= before["VmRSS"] + 32 * 1024, "Capture kept over 32 MiB after disconnect")
 
 
+def run_recorder(session, results, state):
+    env = session.env.copy()
+    if part7_recorder_prefix:
+        prefix = Path(part7_recorder_prefix)
+        libraries = (str(prefix / "lib"), str(prefix / "lib/pulseaudio"))
+        env["LD_LIBRARY_PATH"] = os.pathsep.join(filter(None, (*libraries, env.get("LD_LIBRARY_PATH"))))
+        recorder, probe = (prefix / "bin" / tool for tool in ("wf-recorder", "ffprobe"))
+        require(all(path.is_file() and os.access(path, os.X_OK) for path in (recorder, probe)),
+                "The supplied recorder directory lacks executable wf-recorder or ffprobe")
+    else:
+        recorder, probe = (shutil.which(tool, path=env.get("PATH")) for tool in ("wf-recorder", "ffprobe"))
+        if not recorder or not probe:
+            state["external_recorder"] = {"status": "blocked", "reason": "wf-recorder or ffprobe absent"}
+            return
+    log_path = results / "part7-recorder.log"
+    recording = results / "part7-monitor.mkv"
+    with log_path.open("w") as log:
+        child = subprocess.Popen([recorder, "--no-dmabuf", "-D", "-c", "libx264", "-x", "yuv444p",
+                                  "-p", "threads=2", "-f", recording], stdin=subprocess.DEVNULL,
+                                 stdout=log, stderr=subprocess.STDOUT, env=env)
+        try:
+            wait_for(lambda: "Output #0" in log_path.read_text(errors="replace"), 8,
+                     "wf-recorder encoding its first frame", child)
+            # Capture multiple frames even if the compositor is otherwise idle.
+            time.sleep(.65)
+            child.send_signal(signal.SIGINT)
+            require(child.wait(timeout=8) == 0, "wf-recorder failed to finalize its recording")
+        finally:
+            standard["stop"](child)
+    info = json.loads(output([probe, "-v", "error", "-count_frames", "-select_streams", "v:0",
+                              "-show_entries", "stream=codec_name,width,height,nb_read_frames",
+                              "-of", "json", recording], env=env))
+    stream = info["streams"][0]
+    require(stream["codec_name"] == "h264" and int(stream["nb_read_frames"]) > 1,
+            "ffprobe did not decode multiple H.264 frames")
+    if "grim_dimensions" in state:
+        require([stream["width"], stream["height"]] == list(map(int, state["grim_dimensions"])),
+                "The decoded recording does not match the monitor dimensions")
+    state["external_recorder"] = {"status": "pass", **stream}
+
+
 def publish_state(results, state, artifacts):
     for name in artifacts:
         upload(name, results / name)
@@ -583,7 +647,7 @@ def trial():
     artifacts = ("prepare.log", "harness.log", "normal.log", "failure.log", "part7-session.log",
                  "part7-native.log", "part7-x11.log", "part7-monitor.log", "part7-window.log",
                  "part7-cancel.log", "part7-x11-window.log", "part7-grim.png", "part7-portals.log",
-                 "part7-pipewire.log", "part7-memory.jsonl")
+                 "part7-pipewire.log", "part7-memory.jsonl", "part7-recorder.log", "part7-monitor.mkv")
     state = {"revision": revision, "kernel": os.uname().release, "renderer": "pixman", "ok": False}
     try:
         env = environment(state)
@@ -615,7 +679,9 @@ def trial():
 
                         checks = {
                             "capture-soak": lambda: run_capture_soak(session, state),
+                            "monitor": lambda: run_monitor(session, results, state),
                             "video": lambda: run_video(session, results, state),
+                            "recorder": lambda: run_recorder(session, results, state),
                             "x11": lambda: run_x11(session, results, state),
                             "clipboard": clipboard,
                             "portal-loss": lambda: run_portal_loss(session, results, state),
@@ -627,7 +693,7 @@ def trial():
                             try:
                                 session.ctl("workspace", "1")
                                 check()
-                                outcomes[name] = "pass"
+                                outcomes[name] = state["external_recorder"]["status"] if name == "recorder" else "pass"
                             except (OSError, RuntimeError, ValueError, KeyError, subprocess.SubprocessError) as error:
                                 outcomes[name] = str(error) or type(error).__name__
                                 event("diagnostic", f"{name}: {outcomes[name]}")
