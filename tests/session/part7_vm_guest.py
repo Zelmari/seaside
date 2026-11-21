@@ -627,15 +627,18 @@ def run_recorder(session, results, state):
             return
     log_path = results / "part7-recorder.log"
     recording = results / "part7-monitor.mkv"
+    width, height = (int(value) & ~1 for value in state["grim_dimensions"])
+    before = memory(session.process.pid)
     with log_path.open("w") as log:
-        child = subprocess.Popen([recorder, "--no-dmabuf", "-D", "-c", "libx264", "-x", "yuv444p",
+        child = subprocess.Popen([recorder, "--no-dmabuf", "-D", "-r", "30", "-g", f"0,0 {width}x{height}",
+                                  "-c", "libx264", "-x", "yuv420p",
                                   "-p", "threads=2", "-f", recording], stdin=subprocess.DEVNULL,
                                  stdout=log, stderr=subprocess.STDOUT, env=env)
         try:
             wait_for(lambda: "Output #0" in log_path.read_text(errors="replace"), 8,
                      "wf-recorder encoding its first frame", child)
             # Capture multiple frames even if the compositor is otherwise idle.
-            time.sleep(.65)
+            time.sleep(2)
             child.send_signal(signal.SIGINT)
             require(child.wait(timeout=8) == 0, "wf-recorder failed to finalize its recording")
         finally:
@@ -646,10 +649,12 @@ def run_recorder(session, results, state):
     stream = info["streams"][0]
     require(stream["codec_name"] == "h264" and int(stream["nb_read_frames"]) > 1,
             "ffprobe did not decode multiple H.264 frames")
-    if "grim_dimensions" in state:
-        require([stream["width"], stream["height"]] == list(map(int, state["grim_dimensions"])),
-                "The decoded recording does not match the monitor dimensions")
-    state["external_recorder"] = {"status": "pass", **stream}
+    require([stream["width"], stream["height"]] == [width, height],
+            "The decoded recording does not match the requested even-pixel region")
+    after = memory(session.process.pid)
+    require(after["VmRSS"] <= before["VmRSS"] + 16 * 1024 and after["fds"] <= before["fds"] + 2,
+            "Recording retained memory or file descriptors after the client disconnected")
+    state["external_recorder"] = {"status": "pass", **stream, "before_kb": before, "after_kb": after}
 
 
 def publish_state(results, state, artifacts):
