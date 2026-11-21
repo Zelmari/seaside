@@ -1,4 +1,5 @@
 #include "output_capture.h"
+#include "satellite.hpp"
 #include "scene.hpp"
 #include "server.hpp"
 #include "session_activation.hpp"
@@ -71,11 +72,13 @@ seaside::LoadedConfig startup_defaults(seaside::Diagnostic error) {
 
 class Commands {
   public:
-    Commands(std::string_view socket, const std::string &control_socket) {
+    Commands(std::string_view socket, const std::string &control_socket,
+             const seaside::Satellite *satellite) {
         for (auto **entry = environ; *entry; ++entry) {
             const std::string_view value(*entry);
             if (!value.starts_with("WAYLAND_SOCKET=") && !value.starts_with("WAYLAND_DISPLAY=") &&
                 !value.starts_with("SEASIDE_SOCKET=") && !value.starts_with("DISPLAY=") &&
+                !value.starts_with("XAUTHORITY=") &&
                 !value.starts_with("XDG_CURRENT_DESKTOP=") &&
                 !value.starts_with("XDG_SESSION_TYPE=") &&
                 !value.starts_with("DBUS_SESSION_BUS_ADDRESS=")) {
@@ -84,6 +87,10 @@ class Commands {
         }
         values_.push_back("WAYLAND_DISPLAY=" + std::string(socket));
         values_.push_back("SEASIDE_SOCKET=" + control_socket);
+        if (satellite) {
+            values_.push_back("DISPLAY=" + std::string(satellite->display_name()));
+            values_.push_back("XAUTHORITY=" + std::string(satellite->authority_path()));
+        }
         values_.emplace_back("XDG_CURRENT_DESKTOP=Seaside");
         values_.emplace_back("XDG_SESSION_TYPE=wayland");
         values_.push_back("DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/" +
@@ -281,7 +288,14 @@ class Session {
         }
         ipc_ = std::move(*ipc);
         control_.set_renderer(seaside_wlr_renderer_name(server_.renderer()));
-        commands_.emplace(socket_, ipc_->path());
+        auto satellite = seaside::Satellite::reserve(loop_, socket_, std::getenv("XDG_RUNTIME_DIR"));
+        if (satellite) {
+            satellite_ = std::move(*satellite);
+        } else {
+            std::fprintf(stderr, "seaside: could not reserve an X11 display: %s\n",
+                         std::strerror(satellite.error()));
+        }
+        commands_.emplace(socket_, ipc_->path(), satellite_.get());
         desktop_.on_projection([this] { publish(); });
         desktop_.on_attention([this](seaside::WindowId window, seaside::WorkspaceId workspace) {
             attention(window, workspace);
@@ -310,6 +324,7 @@ class Session {
     Outcome shut_down() noexcept {
         stopping_ = true;
         timer_.reset();
+        satellite_.reset();
         portal_.reset();
         systemd_.reset();
         pipewire_.reset();
@@ -606,6 +621,9 @@ class Session {
     }
 
     void mark_ready(uint32_t cursor_plane) noexcept {
+        if (satellite_ && !satellite_->enable()) {
+            std::fputs("seaside: could not enable X11 listeners\n", stderr);
+        }
         ready_ = true;
         std::fprintf(stderr, "seaside READY cursor-plane=%" PRIu32 "\n", cursor_plane);
         config_->session_ready();
@@ -895,6 +913,7 @@ class Session {
     wl_event_loop *loop_;
     const seaside::ConfigPaths &paths_;
     std::vector<std::string> startup_commands_;
+    std::unique_ptr<seaside::Satellite> satellite_;
     std::optional<Commands> commands_;
     seaside::Desktop desktop_;
     seaside::OutputConfig outputs_;

@@ -28,6 +28,7 @@ gtest = dependency('gtest_main', version: '>=1.14.0', method: 'pkg-config')
 tomlplusplus = dependency('tomlplusplus', version: ['>=3.4.0', '<3.5.0'], method: 'pkg-config')
 nlohmann_json = dependency('nlohmann_json', version: '>=3.11.0', method: 'pkg-config')
 xkbcommon = dependency('xkbcommon', method: 'pkg-config')
+xau = dependency('xau', method: 'pkg-config')
 systemd = dependency('libsystemd', method: 'pkg-config')
 pipewire = dependency('libpipewire-0.3', method: 'pkg-config', include_type: 'system')
 libpng = dependency('libpng')
@@ -255,9 +256,9 @@ session_foundation = static_library(
   'seaside-session-foundation',
   ['src/session_activation.cpp', 'src/session_bus.cpp', 'src/session_pipewire.cpp',
    'src/session_portal.cpp', 'src/session_services.cpp', 'src/session_systemd.cpp',
-   'src/startup_gate.cpp'],
+   'src/startup_gate.cpp', 'src/satellite.cpp'],
   include_directories: include_directories('src'),
-  dependencies: [systemd, pipewire, wayland_server, threads],
+  dependencies: [systemd, pipewire, wayland_server, threads, xau],
   install: false,
 )
 
@@ -326,6 +327,16 @@ test('part3-session-activation', session_activation_tests, suite: ['unit', 'part
   env: {'SEASIDE_GTEST': '1', 'SEASIDE_TEST_PART': '3', 'SEASIDE_REQUIREMENTS': '3.1,12.2b'},
 )
 
+satellite_tests = executable(
+  'seaside-satellite-tests', 'tests/unit/satellite_test.cpp',
+  include_directories: include_directories('src', 'tests/unit'),
+  dependencies: [wayland_server, xau, gtest],
+  link_with: session_foundation, install: false,
+)
+test('part7-satellite', satellite_tests, suite: ['unit', 'part7'], timeout: 20,
+  env: {'SEASIDE_GTEST': '1', 'SEASIDE_TEST_PART': '7', 'SEASIDE_REQUIREMENTS': '3,11,12.2b'},
+)
+
 ipc_foundation = static_library(
   'seaside-ipc-foundation', ['src/ipc.cpp', 'src/ipc_protocol.cpp'],
   include_directories: include_directories('src'),
@@ -353,7 +364,7 @@ test('part6-cli', python, args: [files('tests/integration/test_seasidectl.py'), 
 seaside = executable(
   'seaside', ['src/session_entry.cpp', 'src/session_control.cpp', 'src/output_config.cpp'],
   include_directories: include_directories('src'),
-  dependencies: [wlroots, wayland_server, pixman, libdrm, systemd, pipewire, xkbcommon, threads, nlohmann_json],
+  dependencies: [wlroots, wayland_server, pixman, libdrm, systemd, pipewire, xkbcommon, xau, threads, nlohmann_json],
   link_with: [core, tty_foundation, config_foundation, capture_foundation, session_foundation,
               desktop_foundation, ipc_foundation],
   install: true,

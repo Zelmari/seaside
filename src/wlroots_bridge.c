@@ -13,6 +13,7 @@
 #include <wlr/render/wlr_renderer.h>
 #include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_subcompositor.h>
+#include <wlr/types/wlr_viewporter.h>
 
 struct wlr_allocator *seaside_wlr_allocator_create(struct wlr_backend *backend,
                                                    struct wlr_renderer *renderer) {
@@ -25,9 +26,9 @@ bool seaside_wlr_renderer_init_display(struct wlr_renderer *renderer, struct wl_
 
 struct wlr_compositor *seaside_wlr_compositor_create(struct wl_display *display,
                                                      struct wlr_renderer *renderer) {
-    /* Both globals are display-owned, including on partial creation failure. */
+    /* These globals are display-owned, including on partial creation failure. */
     struct wlr_compositor *compositor = wlr_compositor_create(display, 6, renderer);
-    if (!compositor || !wlr_subcompositor_create(display)) {
+    if (!compositor || !wlr_subcompositor_create(display) || !wlr_viewporter_create(display)) {
         return NULL;
     }
     return compositor;
