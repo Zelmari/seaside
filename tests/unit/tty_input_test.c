@@ -603,7 +603,7 @@ static bool scene_target(void *data, struct seaside_tty_pointer_target *target) 
     }
     target->surface = scene->surfaces[slot];
     target->window_id = slot + 1;
-    target->sx = scene->x - 100 * slot;
+    target->sx = scene->x - (slot == 0 ? 0.0 : 100.0);
     target->sy = scene->y;
     return target->surface != NULL;
 }
