@@ -203,5 +203,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if (args.stream_receiver is None) != (args.native_client is None):
         parser.error("--stream-receiver and --native-client must be used together")
-    sys.exit(run(args.fixture, args.routing, args.package_root, args.stream_receiver,
-                 args.native_client))
+    receiver = args.stream_receiver.resolve() if args.stream_receiver is not None else None
+    native = args.native_client.resolve() if args.native_client is not None else None
+    sys.exit(run(args.fixture.resolve(), args.routing.resolve(), args.package_root.resolve(),
+                 receiver, native))
