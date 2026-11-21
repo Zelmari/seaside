@@ -196,7 +196,9 @@ class Session {
     bool configure(seaside::LoadedConfig config, const seaside::ConfigStore &store,
                    seaside::Wallpaper wallpaper) {
         capture_.reset(seaside_output_capture_create(server_.display()));
-        if (!capture_ || !scene_.enable_window_capture(server_.allocator(), server_.renderer())) {
+        if (!capture_ ||
+            !scene_.enable_window_capture(server_.allocator(), server_.renderer(),
+                                          seaside_output_capture_copy_manager(capture_.get()))) {
             return false;
         }
         if (!seaside_tty_drm_enable_pending(drm_, server_.allocator(), server_.renderer())) {
@@ -355,6 +357,7 @@ class Session {
             seaside_output_capture_cursor_changed(session.capture_.get());
             if (seaside_tty_drm_cursor_position(session.drm_, &x, &y)) {
                 session.desktop_.motion(x, y);
+                session.scene_.capture_pointer(x, y);
             }
         }
     }
@@ -393,6 +396,10 @@ class Session {
         auto &session = *static_cast<Session *>(data);
         seaside_tty_drm_set_cursor_visible(session.drm_, !locked);
         seaside_output_capture_cursor_changed(session.capture_.get());
+        double x, y;
+        if (seaside_tty_drm_cursor_position(session.drm_, &x, &y)) {
+            session.scene_.capture_pointer(x, y);
+        }
     }
 
     static void pointer_cancelled(void *data) noexcept {
@@ -638,6 +645,10 @@ class Session {
     }
 
     void mark_ready(uint32_t cursor_plane) noexcept {
+        double x, y;
+        if (seaside_tty_drm_cursor_position(drm_, &x, &y)) {
+            scene_.capture_pointer(x, y);
+        }
         if (satellite_ && !satellite_->enable()) {
             std::fputs("seaside: could not enable X11 listeners\n", stderr);
         }

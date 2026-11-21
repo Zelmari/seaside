@@ -5,6 +5,7 @@
 #include <sys/types.h>
 
 struct wl_display;
+struct wlr_ext_image_copy_capture_manager_v1;
 struct wlr_output;
 struct seaside_output_capture;
 
@@ -16,6 +17,9 @@ extern "C" {
  * belong to the display event-loop thread. */
 struct seaside_output_capture *seaside_output_capture_create(struct wl_display *display);
 void seaside_output_capture_destroy(struct seaside_output_capture *capture);
+/* The shared image-copy manager is owned by the display. */
+struct wlr_ext_image_copy_capture_manager_v1 *
+seaside_output_capture_copy_manager(const struct seaside_output_capture *capture);
 
 /* Removing an output stops only its capture sessions. The global bindings
  * survive VT switches and output hotplug. */

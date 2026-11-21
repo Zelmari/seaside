@@ -13,6 +13,7 @@
 #include <wlr/render/pass.h>
 #include <wlr/render/swapchain.h>
 #include <wlr/render/wlr_renderer.h>
+#include <wlr/render/wlr_texture.h>
 #include <wlr/types/wlr_buffer.h>
 #include <wlr/types/wlr_ext_foreign_toplevel_list_v1.h>
 #include <wlr/types/wlr_ext_image_copy_capture_v1.h>
@@ -27,7 +28,8 @@ struct seaside_window_capture {
     const struct wlr_drm_format *format;
     struct wlr_ext_foreign_toplevel_list_v1 *list;
     struct wlr_ext_foreign_toplevel_image_capture_source_manager_v1 *sources;
-    struct wl_listener request;
+    struct wl_list painting;
+    struct wl_listener request, new_session;
 };
 
 struct seaside_window_source {
@@ -38,9 +40,19 @@ struct seaside_window_source {
     struct wlr_swapchain *swapchain;
     struct wl_event_source *timer;
     struct wl_list observers;
+    struct wl_list painted_link, painted_sessions;
     struct wl_listener title, app_id;
+    seaside_window_cursor_fn cursor;
+    void *cursor_data;
     size_t active;
-    bool scheduled, pending, damaged, refresh, presented;
+    bool scheduled, pending, damaged, refresh, presented, painting_cursor, cursor_painted;
+};
+
+struct painted_session {
+    struct seaside_window_source *target;
+    struct wlr_ext_image_copy_capture_session_v1 *session;
+    struct wl_listener destroy;
+    struct wl_list link;
 };
 
 struct observed_surface {
@@ -55,6 +67,7 @@ struct observed_surface {
 struct window_frame {
     struct wlr_ext_image_capture_source_v1_frame_event base;
     struct wlr_buffer *buffer;
+    struct wlr_buffer *with_cursor;
     struct timespec when;
 };
 
@@ -316,6 +329,7 @@ static bool emit_frame(struct seaside_window_source *target, struct timespec whe
             struct window_frame frame = {
                 .base = {.damage = &full_damage}, .buffer = buffer, .when = when};
             wl_signal_emit_mutable(&target->source.events.frame, &frame.base);
+            wlr_buffer_unlock(frame.with_cursor);
         }
         pixman_region32_fini(&full_damage);
     }
@@ -347,15 +361,19 @@ static int capture_tick(void *data) {
         target->pending = false;
         target->damaged = false;
     }
-    if (requested && !target->presented) {
+    // An occluded view can still be on the active workspace. Give the
+    // requested capture its own pacing even if the output skipped that view.
+    // The one-shot callbacks are removed on delivery, so the output cannot
+    // deliver the same callback a second time.
+    if (requested) {
         wlr_xdg_surface_for_each_surface(target->toplevel->base, callback_surface, &now);
     }
     return 0;
 }
 
 static void start(struct wlr_ext_image_capture_source_v1 *source, bool with_cursors) {
-    (void)with_cursors;
     struct seaside_window_source *target = wl_container_of(source, target, source);
+    target->painting_cursor = with_cursors;
     if (target->active++ == 0) {
         // wlroots sends the first buffer constraints immediately after start.
         // Defer stopping the source on failure until it attaches the session.
@@ -388,13 +406,62 @@ static void request_frame(struct wlr_ext_image_capture_source_v1 *source, bool n
     schedule(target);
 }
 
+static bool paint_cursor(struct seaside_window_source *target, struct window_frame *frame) {
+    if (frame->with_cursor) {
+        return true;
+    }
+    struct wlr_render_texture_options cursor;
+    target->cursor_painted = target->presented && target->cursor(target->cursor_data, &cursor);
+    if (!target->cursor_painted) {
+        return true;
+    }
+    struct wlr_buffer *buffer = wlr_swapchain_acquire(target->swapchain);
+    if (!buffer) {
+        return false;
+    }
+    struct wlr_renderer *renderer = target->owner->renderer;
+    struct wlr_texture *content = wlr_texture_from_buffer(renderer, frame->buffer);
+    struct wlr_render_pass *pass =
+        content ? wlr_renderer_begin_buffer_pass(renderer, buffer, NULL) : NULL;
+    if (pass) {
+        wlr_render_pass_add_texture(pass, &(struct wlr_render_texture_options){
+                                              .texture = content,
+                                              .blend_mode = WLR_RENDER_BLEND_MODE_NONE,
+                                          });
+        wlr_render_pass_add_texture(pass, &cursor);
+        if (wlr_render_pass_submit(pass)) {
+            frame->with_cursor = buffer;
+        }
+    }
+    wlr_texture_destroy(content);
+    if (!frame->with_cursor) {
+        wlr_buffer_unlock(buffer);
+        return false;
+    }
+    return true;
+}
+
 static void copy_frame(struct wlr_ext_image_capture_source_v1 *source,
                        struct wlr_ext_image_copy_capture_frame_v1 *frame,
                        struct wlr_ext_image_capture_source_v1_frame_event *data) {
     struct seaside_window_source *target = wl_container_of(source, target, source);
-    const struct window_frame *event = wl_container_of(data, event, base);
-    if (wlr_ext_image_copy_capture_frame_v1_copy_buffer(frame, event->buffer,
-                                                        target->owner->renderer)) {
+    struct window_frame *event = wl_container_of(data, event, base);
+    struct wlr_buffer *buffer = event->buffer;
+    struct painted_session *painting;
+    wl_list_for_each(painting, &target->painted_sessions, link) {
+        if (painting->session->frame == frame) {
+            if (!paint_cursor(target, event)) {
+                wlr_ext_image_copy_capture_frame_v1_fail(
+                    frame, EXT_IMAGE_COPY_CAPTURE_FRAME_V1_FAILURE_REASON_UNKNOWN);
+                return;
+            }
+            if (event->with_cursor) {
+                buffer = event->with_cursor;
+            }
+            break;
+        }
+    }
+    if (wlr_ext_image_copy_capture_frame_v1_copy_buffer(frame, buffer, target->owner->renderer)) {
         wlr_ext_image_copy_capture_frame_v1_ready(frame, WL_OUTPUT_TRANSFORM_NORMAL, &event->when);
     }
 }
@@ -405,6 +472,44 @@ static const struct wlr_ext_image_capture_source_v1_interface window_source_impl
     .request_frame = request_frame,
     .copy_frame = copy_frame,
 };
+
+static void painted_session_destroy(struct wl_listener *listener, void *data) {
+    (void)data;
+    struct painted_session *painting = wl_container_of(listener, painting, destroy);
+    struct seaside_window_source *target = painting->target;
+    wl_list_remove(&painting->destroy.link);
+    wl_list_remove(&painting->link);
+    if (wl_list_empty(&target->painted_sessions)) {
+        wl_list_remove(&target->painted_link);
+        target->cursor_painted = false;
+    }
+    free(painting);
+}
+
+static void new_session(struct wl_listener *listener, void *data) {
+    struct seaside_window_capture *capture = wl_container_of(listener, capture, new_session);
+    struct wlr_ext_image_copy_capture_session_v1 *session = data;
+    if (session->source->impl != &window_source_impl) {
+        return;
+    }
+    struct seaside_window_source *target = wl_container_of(session->source, target, source);
+    if (!target->painting_cursor) {
+        return;
+    }
+    struct painted_session *painting = calloc(1, sizeof(*painting));
+    if (!painting) {
+        wl_client_post_no_memory(wl_resource_get_client(session->resource));
+        return;
+    }
+    painting->target = target;
+    painting->session = session;
+    painting->destroy.notify = painted_session_destroy;
+    wl_signal_add(&session->events.destroy, &painting->destroy);
+    if (wl_list_empty(&target->painted_sessions)) {
+        wl_list_insert(&capture->painting, &target->painted_link);
+    }
+    wl_list_insert(&target->painted_sessions, &painting->link);
+}
 
 static void source_request(struct wl_listener *listener, void *data) {
     struct seaside_window_capture *capture = wl_container_of(listener, capture, request);
@@ -420,10 +525,11 @@ static void source_request(struct wl_listener *listener, void *data) {
     wlr_ext_foreign_toplevel_image_capture_source_manager_v1_request_accept(request, source);
 }
 
-struct seaside_window_capture *seaside_window_capture_create(struct wl_display *display,
-                                                             struct wlr_allocator *allocator,
-                                                             struct wlr_renderer *renderer) {
-    if (!display || !allocator || !renderer) {
+struct seaside_window_capture *
+seaside_window_capture_create(struct wl_display *display, struct wlr_allocator *allocator,
+                              struct wlr_renderer *renderer,
+                              struct wlr_ext_image_copy_capture_manager_v1 *copy) {
+    if (!display || !allocator || !renderer || !copy) {
         return NULL;
     }
     const struct wlr_drm_format_set *formats =
@@ -448,13 +554,17 @@ struct seaside_window_capture *seaside_window_capture_create(struct wl_display *
         return NULL;
     }
     capture->request.notify = source_request;
+    capture->new_session.notify = new_session;
     wl_signal_add(&capture->sources->events.new_request, &capture->request);
+    wl_signal_add(&copy->events.new_session, &capture->new_session);
+    wl_list_init(&capture->painting);
     return capture;
 }
 
 void seaside_window_capture_destroy(struct seaside_window_capture *capture) {
     if (capture) {
         wl_list_remove(&capture->request.link);
+        wl_list_remove(&capture->new_session.link);
         free(capture);
     }
 }
@@ -525,7 +635,9 @@ static void app_id_changed(struct wl_listener *listener, void *data) {
 
 struct seaside_window_source *seaside_window_capture_map(struct seaside_window_capture *capture,
                                                          struct wlr_xdg_toplevel *toplevel,
-                                                         bool presented) {
+                                                         bool presented,
+                                                         seaside_window_cursor_fn cursor,
+                                                         void *cursor_data) {
     struct seaside_window_source *target = calloc(1, sizeof(*target));
     if (!target) {
         return NULL;
@@ -533,6 +645,8 @@ struct seaside_window_source *seaside_window_capture_map(struct seaside_window_c
     target->owner = capture;
     target->toplevel = toplevel;
     target->presented = presented;
+    target->cursor = cursor;
+    target->cursor_data = cursor_data;
     target->timer =
         wl_event_loop_add_timer(wl_display_get_event_loop(capture->display), capture_tick, target);
     struct foreign_metadata metadata;
@@ -548,6 +662,7 @@ struct seaside_window_source *seaside_window_capture_map(struct seaside_window_c
     }
     target->handle->data = target;
     wl_list_init(&target->observers);
+    wl_list_init(&target->painted_sessions);
     wlr_ext_image_capture_source_v1_init(&target->source, &window_source_impl);
     target->title.notify = title_changed;
     target->app_id.notify = app_id_changed;
@@ -571,8 +686,23 @@ void seaside_window_capture_unmap(struct seaside_window_source *target) {
 void seaside_window_capture_presented(struct seaside_window_source *target, bool presented) {
     if (target && target->presented != presented) {
         target->presented = presented;
+        target->damaged |= target->cursor_painted;
         if (target->active && !presented) {
             schedule(target);
+        }
+    }
+}
+
+void seaside_window_capture_cursor_changed(struct seaside_window_capture *capture) {
+    if (capture) {
+        struct seaside_window_source *target;
+        wl_list_for_each(target, &capture->painting, painted_link) {
+            struct wlr_render_texture_options cursor;
+            if (target->cursor_painted ||
+                (target->presented && target->cursor(target->cursor_data, &cursor))) {
+                target->damaged = true;
+                schedule(target);
+            }
         }
     }
 }

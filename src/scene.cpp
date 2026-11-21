@@ -252,12 +252,17 @@ void Scene::set_window_handler(seaside_scene_window_fn handler, void *data) noex
     seaside_scene_set_window_handler(bridge_, handler, data);
 }
 
-bool Scene::enable_window_capture(wlr_allocator *allocator, wlr_renderer *renderer) noexcept {
-    return seaside_scene_enable_window_capture(bridge_, allocator, renderer);
+bool Scene::enable_window_capture(wlr_allocator *allocator, wlr_renderer *renderer,
+                                  wlr_ext_image_copy_capture_manager_v1 *copy) noexcept {
+    return seaside_scene_enable_window_capture(bridge_, allocator, renderer, copy);
 }
 
 bool Scene::window_capture_client_ready(pid_t pid, uid_t uid) const noexcept {
     return seaside_scene_window_capture_client_ready(bridge_, pid, uid);
+}
+
+void Scene::capture_pointer(double x, double y) noexcept {
+    seaside_scene_capture_pointer(bridge_, x, y);
 }
 
 void Scene::place_window(std::uint64_t id,

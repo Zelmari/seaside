@@ -579,6 +579,11 @@ void seaside_output_capture_destroy(struct seaside_output_capture *capture) {
     }
 }
 
+struct wlr_ext_image_copy_capture_manager_v1 *
+seaside_output_capture_copy_manager(const struct seaside_output_capture *capture) {
+    return capture ? capture->copy_manager : NULL;
+}
+
 struct client_bindings {
     const struct seaside_output_capture *capture;
     bool shm;

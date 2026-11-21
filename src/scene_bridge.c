@@ -4,16 +4,19 @@
 
 #include <drm_fourcc.h>
 #include <limits.h>
+#include <math.h>
 #include <stdlib.h>
 #include <time.h>
 #include <wayland-server-core.h>
 #include <wlr/interfaces/wlr_buffer.h>
+#include <wlr/render/pass.h>
 #include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_output.h>
 #include <wlr/types/wlr_scene.h>
 #include <wlr/types/wlr_xdg_activation_v1.h>
 #include <wlr/types/wlr_xdg_shell.h>
 #include <wlr/util/edges.h>
+#include <wlr/util/transform.h>
 
 struct seaside_scene_bridge {
     struct wl_display *display;
@@ -23,6 +26,8 @@ struct seaside_scene_bridge {
     struct wlr_xdg_shell *shell;
     struct wlr_xdg_activation_v1 *activation;
     struct seaside_window_capture *capture;
+    double cursor_x, cursor_y;
+    bool cursor_known;
     struct wl_list views;
     struct wl_list popups;
     struct wl_list outputs;
@@ -260,6 +265,42 @@ static void end_focus(struct seaside_scene_bridge *scene, bool deactivate) {
     scene->focus(scene->focus_data, NULL);
 }
 
+static bool capture_window_cursor(void *data, struct wlr_render_texture_options *texture) {
+    struct scene_view *view = data;
+    struct seaside_scene_bridge *scene = view->owner;
+    struct seaside_scene_target hit = {0};
+    if (!scene->cursor_known || !view->placement.visible ||
+        !seaside_scene_window_at(scene, scene->cursor_x, scene->cursor_y, &hit) ||
+        hit.id != view->id) {
+        return false;
+    }
+
+    struct scene_output *viewport;
+    wl_list_for_each(viewport, &scene->outputs, link) {
+        const struct wlr_output *output = viewport->viewport->output;
+        const struct wlr_output_cursor *cursor = output->hardware_cursor;
+        const double local_x = scene->cursor_x - viewport->viewport->x;
+        const double local_y = scene->cursor_y - viewport->viewport->y;
+        if (!cursor || !cursor->enabled || !cursor->visible || !cursor->texture || local_x < 0 ||
+            local_y < 0 || local_x >= viewport->width || local_y >= viewport->height) {
+            continue;
+        }
+        const int x = (int)floor(scene->cursor_x - view->placement.geometry.x -
+                                 (double)cursor->hotspot_x / output->scale);
+        const int y = (int)floor(scene->cursor_y - view->placement.geometry.y -
+                                 (double)cursor->hotspot_y / output->scale);
+        *texture = (struct wlr_render_texture_options){
+            .texture = cursor->texture,
+            .src_box = cursor->src_box,
+            .dst_box = {x, y, (int)ceil((double)cursor->width / output->scale),
+                        (int)ceil((double)cursor->height / output->scale)},
+            .transform = wlr_output_transform_invert(cursor->transform),
+        };
+        return true;
+    }
+    return false;
+}
+
 static void consider_focus(struct scene_view *view) {
     struct seaside_scene_bridge *scene = view->owner;
     if (scene->watched_pid == 0 || scene->focused_view) {
@@ -290,10 +331,11 @@ static void view_map(struct wl_listener *listener, void *data) {
         consider_focus(view);
     }
     if (view->owner->capture && !view->capture) {
-        view->capture = seaside_window_capture_map(
-            view->owner->capture, view->toplevel,
-            view->id ? view->placement.visible && has_viewport(view->placement.clip)
-                     : !wl_list_empty(&view->owner->outputs));
+        view->capture = seaside_window_capture_map(view->owner->capture, view->toplevel,
+                                                   view->id ? view->placement.visible &&
+                                                                  has_viewport(view->placement.clip)
+                                                            : !wl_list_empty(&view->owner->outputs),
+                                                   capture_window_cursor, view);
     }
 }
 
@@ -944,17 +986,27 @@ void seaside_scene_set_window_handler(struct seaside_scene_bridge *scene,
 
 bool seaside_scene_enable_window_capture(struct seaside_scene_bridge *scene,
                                          struct wlr_allocator *allocator,
-                                         struct wlr_renderer *renderer) {
+                                         struct wlr_renderer *renderer,
+                                         struct wlr_ext_image_copy_capture_manager_v1 *copy) {
     if (!scene || !scene->attached || scene->capture) {
         return false;
     }
-    scene->capture = seaside_window_capture_create(scene->display, allocator, renderer);
+    scene->capture = seaside_window_capture_create(scene->display, allocator, renderer, copy);
     return scene->capture != NULL;
 }
 
 bool seaside_scene_window_capture_client_ready(const struct seaside_scene_bridge *scene, pid_t pid,
                                                uid_t uid) {
     return scene && seaside_window_capture_client_ready(scene->capture, pid, uid);
+}
+
+void seaside_scene_capture_pointer(struct seaside_scene_bridge *scene, double x, double y) {
+    if (scene && scene->capture) {
+        scene->cursor_known = isfinite(x) && isfinite(y);
+        scene->cursor_x = x;
+        scene->cursor_y = y;
+        seaside_window_capture_cursor_changed(scene->capture);
+    }
 }
 
 static bool below(const struct scene_view *left, const struct scene_view *right) {
@@ -1045,6 +1097,11 @@ void seaside_scene_place_window(struct seaside_scene_bridge *scene, uint64_t id,
                                      placement->visible && has_viewport(placement->clip));
     if (placement->visible && (!previous.visible || placement->stacking != previous.stacking)) {
         restack_view(view);
+    }
+    if (previous.geometry.x != box.x || previous.geometry.y != box.y ||
+        previous.geometry.width != box.width || previous.geometry.height != box.height ||
+        previous.visible != placement->visible || previous.stacking != placement->stacking) {
+        seaside_window_capture_cursor_changed(scene->capture);
     }
     /* While the client is still applying a fullscreen configure, its old
      * buffer may cover only part of the output. Keep that output's backdrop

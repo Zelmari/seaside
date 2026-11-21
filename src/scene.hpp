@@ -34,8 +34,10 @@ class Scene final {
     void set_config_error(const std::optional<Diagnostic> &error) noexcept;
     seaside_scene_snapshot snapshot() const noexcept;
     void set_window_handler(seaside_scene_window_fn handler, void *data) noexcept;
-    bool enable_window_capture(wlr_allocator *allocator, wlr_renderer *renderer) noexcept;
+    bool enable_window_capture(wlr_allocator *allocator, wlr_renderer *renderer,
+                               wlr_ext_image_copy_capture_manager_v1 *copy) noexcept;
     bool window_capture_client_ready(pid_t pid, uid_t uid) const noexcept;
+    void capture_pointer(double x, double y) noexcept;
     void place_window(std::uint64_t id, const seaside_scene_window_placement &placement) noexcept;
     wlr_surface *window_surface(std::uint64_t id) noexcept;
     bool close_window(std::uint64_t id) noexcept;

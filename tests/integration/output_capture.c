@@ -926,7 +926,7 @@ static bool check_selected_window(struct fixture *fixture) {
     struct painted_window selected = {0}, occluding = {0};
     struct seaside_scene_bridge *scene = seaside_scene_create(fixture->server);
     struct window_placement placement = {.scene = scene};
-    struct capture_client window = {0}, stale = {0};
+    struct capture_client window = {0}, painted = {0}, stale = {0};
     struct wl_surface *child = NULL;
     struct wl_subsurface *subsurface = NULL;
     struct ext_image_capture_source_v1 *selected_source = NULL, *stale_source = NULL;
@@ -934,7 +934,9 @@ static bool check_selected_window(struct fixture *fixture) {
     bool idle_frame = false, hidden_frame = false;
     CHECK(scene && wlr_compositor_create(fixture->server, 6, fixture->renderer));
     CHECK(wlr_subcompositor_create(fixture->server));
-    CHECK(seaside_scene_enable_window_capture(scene, fixture->allocator, fixture->renderer));
+    CHECK(
+        seaside_scene_enable_window_capture(scene, fixture->allocator, fixture->renderer,
+                                            seaside_output_capture_copy_manager(fixture->capture)));
     wl_list_remove(&fixture->output_frame.link);
     wl_list_init(&fixture->output_frame.link);
     CHECK(seaside_scene_add_output(scene, fixture->output));
@@ -948,7 +950,8 @@ static bool check_selected_window(struct fixture *fixture) {
     CHECK(!seaside_scene_window_capture_client_ready(scene, getpid(), getuid() + 1));
     CHECK(!seaside_scene_window_capture_client_ready(scene, getpid() + 1, getuid()));
 
-    CHECK(map_painted_window(fixture, &selected, "selected", CURSOR_RGB));
+    const uint32_t selected_rgb = 0xa84819;
+    CHECK(map_painted_window(fixture, &selected, "selected", selected_rgb));
     CHECK(map_painted_window(fixture, &occluding, "overlap", SECOND_RGB));
     CHECK(pump_until(fixture, &fixture->windows[0].done) &&
           pump_until(fixture, &fixture->windows[1].done));
@@ -982,7 +985,28 @@ static bool check_selected_window(struct fixture *fixture) {
     CHECK(pump_until(fixture, &window.constrained) && window.width == 20 && window.height == 14 &&
           create_buffer(fixture, &window));
     CHECK(request_capture(&window) && pump_until(fixture, &window.ready) &&
-          plain_frame(&window, CURSOR_RGB));
+          plain_frame(&window, selected_rgb));
+    CHECK(
+        start_session(fixture, &painted, EXT_IMAGE_COPY_CAPTURE_MANAGER_V1_OPTIONS_PAINT_CURSORS));
+    CHECK(pump_until(fixture, &painted.constrained) && create_buffer(fixture, &painted));
+    CHECK(wlr_output_cursor_move(fixture->cursor, 8, 9));
+    seaside_scene_capture_pointer(scene, 8, 9);
+    CHECK(request_capture(&painted) && pump_until(fixture, &painted.ready) &&
+          plain_frame(&painted, selected_rgb));
+    // Once the pointer is over the selected view, only the opted-in session
+    // receives the private cursor sprite. The physical cursor remains in use.
+    place_window(scene, 2, 24, 19, true);
+    CHECK(wlr_output_cursor_move(fixture->cursor, 9, 10));
+    seaside_scene_capture_pointer(scene, 9, 10);
+    CHECK(request_capture(&painted) && request_capture(&window));
+    CHECK(pump_until(fixture, &painted.ready) && !painted.failed &&
+          (painted.pixels[6 * painted.width + 6] & 0xffffff) == CURSOR_RGB &&
+          (painted.pixels[5 * painted.width + 5] & 0xffffff) == selected_rgb);
+    CHECK(pump_until(fixture, &window.ready) && plain_frame(&window, selected_rgb) &&
+          fixture->output->hardware_cursor == fixture->cursor &&
+          fixture->output->software_cursor_locks == 0);
+    finish_session(&painted);
+    CHECK(sync_client(fixture));
 
     // Moving and then hiding the selected scene view must not change its source.
     place_window(scene, 1, 25, 9, true);
@@ -1068,6 +1092,7 @@ done:
         wl_surface_destroy(child);
     }
     finish_session(&window);
+    finish_session(&painted);
     finish_session(&stale);
     if (stale_source) {
         ext_image_capture_source_v1_destroy(stale_source);
@@ -1168,7 +1193,8 @@ int main(int argc, char **argv) {
          "cursor-locks=0");
     if (part7) {
         puts("selected window capture PASS isolated-pixels=no-overlap hidden-updates=yes "
-             "resized=yes subsurface=yes idle-callbacks=0 loss=stopped two-outputs=yes");
+             "resized=yes subsurface=yes idle-callbacks=0 loss=stopped two-outputs=yes "
+             "paint-cursors=verified");
     }
     result = 0;
 
