@@ -272,6 +272,9 @@ class VideoReceiver {
         if (!core_) {
             throw std::runtime_error("cannot connect to the portal's PipeWire remote");
         }
+        core_events_.version = PW_VERSION_CORE_EVENTS;
+        core_events_.error = core_error;
+        pw_core_add_listener(core_, &core_listener_, &core_events_, this);
         auto *properties = pw_properties_new(PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY,
                                              "Capture", PW_KEY_MEDIA_ROLE, "Screen", nullptr);
         stream_ = pw_stream_new(core_, "Seaside Part 7 receiver", properties);
@@ -305,9 +308,14 @@ class VideoReceiver {
     std::size_t frames() const { return frames_; }
 
   private:
+    static void core_error(void *, std::uint32_t id, int, int result, const char *message) {
+        std::fprintf(stderr, "PipeWire object %u error %d: %s\n", id, result, message);
+    }
+
     static void state_changed(void *data, pw_stream_state old, pw_stream_state next,
                               const char *error) {
         auto &self = *static_cast<VideoReceiver *>(data);
+        std::fprintf(stderr, "PipeWire stream state %s\n", pw_stream_state_as_string(next));
         if (next == PW_STREAM_STATE_ERROR ||
             (next == PW_STREAM_STATE_UNCONNECTED && old >= PW_STREAM_STATE_PAUSED)) {
             self.ended_ = true;
@@ -323,6 +331,8 @@ class VideoReceiver {
             spa_format_video_raw_parse(value, &self.format_) < 0) {
             return;
         }
+        std::fprintf(stderr, "PipeWire format %u %ux%u\n", self.format_.format,
+                     self.format_.size.width, self.format_.size.height);
         std::array<std::uint8_t, 256> storage{};
         spa_pod_builder builder = SPA_POD_BUILDER_INIT(storage.data(), storage.size());
         const auto *parameters = static_cast<const spa_pod *>(spa_pod_builder_add_object(
@@ -346,6 +356,10 @@ class VideoReceiver {
     void sample(const spa_data &data) {
         const auto width = format_.size.width;
         const auto height = format_.size.height;
+        if (observed_buffers_++ < 3 && data.chunk) {
+            std::fprintf(stderr, "PipeWire buffer type=%u size=%u stride=%d mapped=%d\n", data.type,
+                         data.chunk->size, data.chunk->stride, data.data != nullptr);
+        }
         if (!data.data || !data.chunk || width == 0 || height == 0 || width > 16384 ||
             height > 16384 || data.chunk->size == 0 || data.chunk->offset >= data.maxsize ||
             data.chunk->stride < static_cast<std::int32_t>(width * 4)) {
@@ -388,10 +402,13 @@ class VideoReceiver {
     pw_context *context_ = nullptr;
     pw_core *core_ = nullptr;
     pw_stream *stream_ = nullptr;
+    pw_core_events core_events_{};
     pw_stream_events events_{};
+    spa_hook core_listener_{};
     spa_hook listener_{};
     spa_video_info_raw format_{};
     std::size_t frames_ = 0;
+    std::size_t observed_buffers_ = 0;
     bool ended_ = false;
     std::array<std::uint32_t, 5> last_pixels_{};
     std::uint32_t last_width_ = 0;

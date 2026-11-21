@@ -78,8 +78,7 @@ class Commands {
             const std::string_view value(*entry);
             if (!value.starts_with("WAYLAND_SOCKET=") && !value.starts_with("WAYLAND_DISPLAY=") &&
                 !value.starts_with("SEASIDE_SOCKET=") && !value.starts_with("DISPLAY=") &&
-                !value.starts_with("XAUTHORITY=") &&
-                !value.starts_with("XDG_CURRENT_DESKTOP=") &&
+                !value.starts_with("XAUTHORITY=") && !value.starts_with("XDG_CURRENT_DESKTOP=") &&
                 !value.starts_with("XDG_SESSION_TYPE=") &&
                 !value.starts_with("DBUS_SESSION_BUS_ADDRESS=")) {
                 values_.emplace_back(value);
@@ -292,7 +291,8 @@ class Session {
         }
         ipc_ = std::move(*ipc);
         control_.set_renderer(seaside_wlr_renderer_name(server_.renderer()));
-        auto satellite = seaside::Satellite::reserve(loop_, socket_, std::getenv("XDG_RUNTIME_DIR"));
+        auto satellite =
+            seaside::Satellite::reserve(loop_, socket_, std::getenv("XDG_RUNTIME_DIR"));
         if (satellite) {
             satellite_ = std::move(*satellite);
         } else {

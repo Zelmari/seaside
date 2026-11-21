@@ -68,7 +68,7 @@ def prepare_xkbcomp(env, root, state):
     script = ('set -eu; packages=$1; shift; mount --make-rprivate /; '
               'mount -t overlay overlay -o "lowerdir=$packages:/usr/bin" /usr/bin; '
               'exec "$packages/Xwayland" "$@"')
-    launcher = ["/usr/bin/unshare", "--user", "--map-current-user", "--mount", "--",
+    launcher = ["/usr/bin/unshare", "--user", "--map-root-user", "--mount", "--",
                 "/bin/sh", "-c", script, "sh", str(package_bin)]
     wrapper.write_text("#!/bin/sh\nexec " + shlex.join(launcher) + ' "$@"\n')
     wrapper.chmod(0o700)
@@ -263,7 +263,15 @@ def run_video(session, results, state):
     monitor_log = results / "part7-monitor.log"
     with process(session, monitor_log, "seaside-portal-stream", "monitor", "frame") as reader:
         choose(session, reader, choice="Monitor")
-        require(reader.wait(timeout=16) == 0, f"Monitor stream failed: {monitor_log.read_text()}")
+        try:
+            wait_for(lambda: frame_rows(monitor_log) or reader.poll() is not None, 9,
+                     "a PipeWire monitor frame", session.process)
+        except RuntimeError:
+            graph = results / "part7-pipewire.log"
+            for args in (["systemctl", "--user", "show", "-p", "MainPID,SubState", "wireplumber"],
+                         ["pw-cli", "ls", "Node"], ["pw-link", "-l"]):
+                run_logged(args, session.repo, graph, 3, env=session.env)
+        require(reader.wait(timeout=27) == 0, f"Monitor stream failed: {monitor_log.read_text()}")
         rows = frame_rows(monitor_log)
         require(rows and rows[0][:2] == monitor_size, "Portal monitor dimensions differ from grim")
         state["monitor_frames"] = rows
@@ -355,7 +363,21 @@ def run_audio(session, state):
     def pulse(*args):
         return output(["pactl", *args], env=session.env)
 
-    previous = pulse("get-default-sink")
+    default_key = "default.configured.audio.sink"
+
+    def metadata(*args):
+        return output(["pw-metadata", "-n", "default", *args], env=session.env)
+
+    def configured_sink():
+        prefix = f"update: id:0 key:'{default_key}' value:'"
+        for row in metadata("0", default_key).splitlines():
+            if row.startswith(prefix):
+                value, marker, kind = row[len(prefix):].rpartition("' type:'")
+                require(bool(marker) and kind.endswith("'"), "Could not parse default sink metadata")
+                return value, kind[:-1]
+        return None
+
+    previous = configured_sink()
     modules = []
     sink_name = f"seaside_part7_{session.process.pid}"
     try:
@@ -390,31 +412,52 @@ def run_audio(session, state):
         changes.append(key("down", (.95, False)))
         state["media_key_volume_mute"] = changes
 
-        # A known PCM pattern proves playback through the PulseAudio compatibility
-        # client and capture of that playback from the selected sink monitor.
-        with tempfile.TemporaryFile(dir=session.root) as pcm:
-            record = subprocess.Popen(["parec", "--raw", "--format=s16le", "--channels=1", "--rate=48000",
-                                       "--device=" + second + ".monitor"], env=session.env,
-                                      stdout=pcm, stderr=subprocess.DEVNULL)
+        monitor_name = second + ".monitor"
+        sources = json.loads(pulse("-f", "json", "list", "sources"))
+        monitor = next((row["index"] for row in sources if row["name"] == monitor_name), None)
+        require(monitor is not None, f"PulseAudio did not expose {monitor_name}")
+        sample_format = ["--raw", "--format=s16le", "--channels=1", "--rate=48000", "--latency-msec=25"]
+        evidence = {"source": monitor_name, "source_index": monitor}
+        with (tempfile.TemporaryFile(dir=session.root) as pcm,
+              tempfile.TemporaryFile(dir=session.root) as log):
+            record = subprocess.Popen(["parec", *sample_format, "--device=" + monitor_name],
+                                      env=session.env, stdout=pcm, stderr=log)
+
+            def receiver_ready():
+                streams = json.loads(pulse("-f", "json", "list", "source-outputs"))
+                return next((row for row in streams if row["source"] == monitor and
+                             row["properties"].get("application.process.id") == str(record.pid) and
+                             not row["corked"]), None)
+
+            def recorded_pattern():
+                samples = os.pread(pcm.fileno(), 2 * 1024 * 1024, 0)
+                values = struct.unpack(f"<{len(samples) // 2}h", samples[:len(samples) // 2 * 2])
+                peak = [min(values), max(values)] if values else [0, 0]
+                evidence.update(sample_count=len(values), range=peak)
+                return peak[0] < -1000 and peak[1] > 1000
+
             tone = struct.pack("<480h", *([9216] * 120 + [-9216] * 120) * 2) * 100
             try:
-                wait_for(lambda: "parec" in pulse("list", "source-outputs"), 6,
-                         "external monitor receiver", record)
-                subprocess.run(["pacat", "--playback", "--raw", "--format=s16le", "--channels=1",
-                                "--rate=48000", "--device=" + second], input=tone, env=session.env,
-                               timeout=8, check=True)
+                stream = wait_for(receiver_ready, 6, "uncorked receiver on " + monitor_name, record)
+                evidence["source_output_index"] = stream["index"]
+                subprocess.run(["pacat", "--playback", *sample_format, "--device=" + second],
+                               input=tone, env=session.env, timeout=8, check=True)
+                # Playback can drain before the recorder receives its last
+                # fragments. Read without changing the recorder's file offset.
+                wait_for(recorded_pattern, 6, "playback pattern on " + monitor_name, record)
             finally:
                 standard["stop"](record)
-            pcm.seek(0)
-            samples = pcm.read(2 * 1024 * 1024)
-        values = struct.unpack(f"<{len(samples) // 2}h", samples[:len(samples) // 2 * 2])
-        require(values and max(values) > 1000 and min(values) < -1000,
-                "The external audio receiver did not capture the playback pattern")
-        state["external_playback_monitor"] = {"sample_count": len(values), "range": [min(values), max(values)]}
+                log.seek(0)
+                evidence["receiver_diagnostic"] = log.read(4096).decode(errors="replace")
+                state["playback_monitor_evidence"] = evidence
+        state["external_playback_monitor"] = evidence
     finally:
         try:
-            if any(row.split()[1] == previous for row in pulse("list", "short", "sinks").splitlines()):
-                pulse("set-default-sink", previous)
+            if previous is None:
+                metadata("-d", "0", default_key)
+            else:
+                metadata("0", default_key, *previous)
+            wait_for(lambda: configured_sink() == previous, 5, "restored configured audio sink")
         finally:
             for module in reversed(modules):
                 pulse("unload-module", module)
@@ -521,7 +564,8 @@ def trial():
         (results / "part7-portals.log").write_bytes(journal.stdout)
         artifacts = ("prepare.log", "harness.log", "normal.log", "failure.log", "part7-session.log",
                      "part7-native.log", "part7-x11.log", "part7-monitor.log", "part7-window.log",
-                     "part7-cancel.log", "part7-x11-window.log", "part7-grim.png", "part7-portals.log")
+                     "part7-cancel.log", "part7-x11-window.log", "part7-grim.png", "part7-portals.log",
+                     "part7-pipewire.log")
         for name in artifacts:
             upload(name, results / name)
         state["guest_evidence"] = str(results)
