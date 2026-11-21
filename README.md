@@ -8,20 +8,9 @@ workspaces, focus, maximize, fullscreen, and pin. Dwindle is the default
 tiling layout, and scrolling columns are selectable in the TOML config.
 TOML edits apply live, and `seasidectl` exposes local status, actions, and events.
 
-The product contract is in [the design](Specification/SEASIDE_SPEC.md). Build and
-verification details are in [the part 1 handoff](Specification/PART1.md).
-Configuration/state implementation and checks are recorded in
-[the part 2 handoff](Specification/PART2.md).
-The [Part 3 handoff](Specification/PART3.md) records the TTY and session VM
-trials. The [Part 4 handoff](Specification/PART4.md) records the window and
-workspace checks. The [Part 5 handoff](Specification/PART5.md) records layout
-behavior and checks. The [Part 6 handoff](Specification/PART6.md) covers live
-reload, IPC, and manual test steps. The [Part 7 handoff](Specification/PART7.md)
-covers X11, clipboard, audio, and sharing.
-Future latency investigations are tracked in
-[the performance research notes](Specification/Research/PERFORMANCE.md).
-Approved choices and documentation needs for users and contributors are also
-recorded in [the public documentation record](Specification/PUBLIC_DOCUMENTATION.md).
+The product contract is in [the design](Specification/SEASIDE_SPEC.md). Find
+development plans, handoffs, native testing, and performance notes in the
+[documentation index](Specification/README.md).
 
 ## Build and test
 
@@ -61,7 +50,8 @@ project translation unit using the actual compilation database. Retained legacy
 C integration clients/probes keep their existing formatting; the new Part 3
 integration fixture is checked too. GDB is available
 for interactive debugging, for example `gdb --args build/seaside-server-tests`.
-The tool versions tested with this foundation are recorded in the part 1 handoff.
+The tool versions tested with this foundation are recorded in the
+[Part 1 handoff](Specification/Parts/Part-01/HANDOFF.md).
 
 Static analysis runs at most two Clang processes concurrently, with a per-file
 deadline. The runner's default command deadline is 300 seconds; `--timeout`

@@ -4,7 +4,7 @@ Seaside reserves a local X11 display and starts `xwayland-satellite` on
 its first X11 connection. Commands launched by Seaside inherit `DISPLAY`
 and `XAUTHORITY`. If satellite exits, the next X11 connection can start
 another child. The session owns the listening sockets and the private
-Xauthority file. [Part 7 plan](PART7_PLAN.md) · [Seaside design](SEASIDE_SPEC.md)
+Xauthority file. [Part 7 plan](PLAN.md) · [Seaside design](../../SEASIDE_SPEC.md)
 
 The focused client can receive clipboard and primary selection data. A
 Wayland client with a valid seat serial can publish a selection, including
@@ -26,7 +26,7 @@ external utilities.
 ## Try Part 7 in an Arch session
 
 Install the standard satellite and audio packages and a compatible chooser.
-The portal route in the Part 3 handoff remains required. [Portal setup](PART3.md)
+The portal route in the Part 3 handoff remains required. [Portal setup](../Part-03/HANDOFF.md)
 
 ```sh
 sudo pacman -S --needed xwayland-satellite xorg-xwayland wofi \
@@ -131,7 +131,7 @@ portal selection. OBS and Discord are absent from the test guest. Sharing in
 those applications, desktop audio in their receiving clients, and physical
 microphone and Fn-key behavior remain open. Native gaming and GPU checks
 remain on the reference system. Isolated application audio is deferred beyond
-v1. [Native Arch desktop checklist](Research/NATIVE_ARCH_CHECKLIST.md) · [Capture and audio acceptance](SEASIDE_SPEC.md#122-required-test-suite)
+v1. [Native Arch desktop checklist](../../Research/NATIVE_ARCH_CHECKLIST.md) · [Capture and audio acceptance](../../SEASIDE_SPEC.md#122-required-test-suite)
 
 Earlier trials occasionally reached a linked PipeWire stream with no samples
 at the receiver. A recovered xdpw trace showed that the first Wayland frame

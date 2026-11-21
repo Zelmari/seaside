@@ -3,8 +3,8 @@
 Status: implemented and software-verified in Arch WSL2; independent static review
 completed. Designated Arch-VM and native/session/hardware qualification pending.
 
-This implements [the Part 2 plan](PART2_PLAN.md) against the existing
-[specification](SEASIDE_SPEC.md), particularly §§2.2, 8–9, 12.2b and 14.
+This implements [the Part 2 plan](PLAN.md) against the existing
+[specification](../../SEASIDE_SPEC.md), particularly §§2.2, 8–9, 12.2b and 14.
 It is a library/test foundation; there is still no installed `seaside` session.
 Part 3 has not been started.
 

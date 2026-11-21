@@ -6,11 +6,11 @@ stack and the default media keys from Part 6. Reuse Part 3's strict session
 preflight and monitor-capture path, Part 4's window and workspace lifetimes,
 and Part 6's bindings and session status. The current portal smoke test
 verifies a screenshot. The Part 7 streaming checks must observe frames from
-the selected source in a receiver. [Part 3 handoff](PART3.md) · [Part 4 handoff](PART4.md) · [Part 6 handoff](PART6.md)
+the selected source in a receiver. [Part 3 handoff](../Part-03/HANDOFF.md) · [Part 4 handoff](../Part-04/HANDOFF.md) · [Part 6 handoff](../Part-06/HANDOFF.md)
 
 The requirements are in §§3, 7.2–7.3, 7.5, 11–12, and 14. G6 covers
 end-to-end capture, and Part 7 supplies the X11 session and desktop evidence
-for G12. [Seaside design](SEASIDE_SPEC.md)
+for G12. [Seaside design](../../SEASIDE_SPEC.md)
 
 ## Delivery steps
 
@@ -42,7 +42,7 @@ for G12. [Seaside design](SEASIDE_SPEC.md)
 - If an approved external clipboard manager needs a data-control protocol,
   pin the minimum compatible interface and verify its privileged access and
   denied-client cases. Clipboard history and source-exit persistence belong
-  to external utilities. [Clipboard requirements](SEASIDE_SPEC.md#73-clipboard-and-drag-and-drop)
+  to external utilities. [Clipboard requirements](../../SEASIDE_SPEC.md#73-clipboard-and-drag-and-drop)
 
 ## Capture and portal acceptance
 
@@ -96,11 +96,11 @@ for G12. [Seaside design](SEASIDE_SPEC.md)
   separation, audio/video sync, cancellation, and device changes. Establish
   which playback devices the external path actually includes before claiming
   support for a multi-device mix. Isolated application audio remains deferred
-  beyond v1. [Audio requirements](SEASIDE_SPEC.md#75-audio-boundary-desktop-sharing-and-deferred-application-isolation)
+  beyond v1. [Audio requirements](../../SEASIDE_SPEC.md#75-audio-boundary-desktop-sharing-and-deferred-application-isolation)
 - Run `tools/run-tests --suite part7`, relevant earlier suites, and ASan/UBSan
   where the changed C/C++ lifetimes warrant it. Extend the guest runner with
   per-trial config and artifacts. Record the exact tested revision, package
   and protocol versions, renderer, source types, receiver results, and logs.
-  In `PART7.md`, give the smallest reproducible checklist for chooser steps,
+  In the [Part 7 handoff](HANDOFF.md), give the smallest reproducible checklist for chooser steps,
   receiving-client interactions, and physical observations that still need a
   person. Native display and GPU qualification is scheduled for Part 8.

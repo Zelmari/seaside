@@ -4,7 +4,7 @@ Use this checklist when Seaside becomes the main desktop on the native Arch
 installation. Start with the first-login checks, then exercise the apps,
 devices, and workflows used day to day. Run each item once its implementation
 is available. Record results here as the native trial progresses.
-[Seaside design](../SEASIDE_SPEC.md) · [Part 7 handoff](../PART7.md) · [Performance investigations](PERFORMANCE.md)
+[Seaside design](../SEASIDE_SPEC.md) · [Part 7 handoff](../Parts/Part-07/HANDOFF.md) · [Performance investigations](PERFORMANCE.md)
 
 ## First login
 

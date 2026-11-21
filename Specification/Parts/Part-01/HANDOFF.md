@@ -1,14 +1,14 @@
 # Part 1: build, feasibility and harness foundation
 
 This records the software foundation for the first development part in §14 of
-`SEASIDE_SPEC.md`.
+[the Seaside design](../../SEASIDE_SPEC.md).
 
 The foundation was originally implemented in C/wlroots/Meson. On 2026-11-20
 the lifecycle core was migrated to C++23 with a narrow C interoperability bridge,
 RAII ownership, typed errors, GoogleTest and development code checks. The
 original 2026-11-19 evidence below remains historical; see the C++ migration
 section for migration-checkpoint verification. Subsequent configuration/state
-work is recorded in [the part 2 handoff](PART2.md).
+work is recorded in [the part 2 handoff](../Part-02/HANDOFF.md).
 
 Requirements covered are the shared event-loop/lifetime boundary (§2), bounded
 test tooling and isolation (§12.2b), and actual build/API evidence for G1 (§13).
@@ -186,7 +186,7 @@ glibc does not supply those `_s` APIs; the other analyzer checks remain enabled.
 The C++ migration is implemented and software-verified in Arch WSL2. The
 full-VM, actual guest cursor observation, native hardware and session gates
 remain pending. This checkpoint preceded part 2; its later implementation and
-evidence are recorded in [the part 2 handoff](PART2.md).
+evidence are recorded in [the part 2 handoff](../Part-02/HANDOFF.md).
 
 ## Reproduce and extend
 

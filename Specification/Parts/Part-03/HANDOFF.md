@@ -9,7 +9,7 @@ Pixman, including monitor capture, the VT round trip and the required-service
 failure path. The intermittent terminal stalls and native qualification
 remain open.
 
-This implements the bounded [Part 3 plan](PART3_PLAN.md) against specification
+This implements the bounded [Part 3 plan](PLAN.md) against specification
 §§2.1–2.2, 3–3.1, 12.2b and 14. The checks below cover the headless milestone
 and the subsequent Arch VM checkpoints. `seaside` is the real TTY entrypoint.
 
@@ -363,7 +363,7 @@ while a capture portal name was already owned also returned to the shell with
 
 The owner also observed intermittent pauses of about half a second before
 typed characters appeared together in `foot`. See the
-[performance investigation](Research/PERFORMANCE.md#virtualbox-terminal-stalls).
+[performance investigation](../../Research/PERFORMANCE.md#virtualbox-terminal-stalls).
 
 Native hardware cursor, latency, VRR, tearing, colour and suspend/resume evidence
 remain separate. Later window/workspace/layout/IPC/compatibility parts have not

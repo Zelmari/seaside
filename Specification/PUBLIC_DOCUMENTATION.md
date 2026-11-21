@@ -17,7 +17,7 @@ a narrow C bridge for wlroots, GoogleTest ownership/failure cases, development
 code checks, a retained real-client C headless fixture, bounded Python test
 runner and safe DRM inspection tool. See the
 [README](../README.md) for current commands and the
-[part 1 handoff](PART1.md) for evidence and pending checks.
+[part 1 handoff](Parts/Part-01/HANDOFF.md) for evidence and pending checks.
 
 The foundation uses C++23; later compositor features, an installable desktop
 session and native hardware qualification remain pending. Documentation must
@@ -25,17 +25,17 @@ distinguish selected, implemented and
 verified behavior. WSL/headless results do not qualify physical AMD outputs
 or establish input-to-screen latency.
 
-[Part 2's configuration/state foundations](PART2.md) are implemented, with
+[Part 2's configuration/state foundations](Parts/Part-02/HANDOFF.md) are implemented, with
 normal/sanitizer verification and external static review completed in Arch WSL2.
-Designated VM/native qualification remains pending. The [plan](PART2_PLAN.md) retains
+Designated VM/native qualification remains pending. The [plan](Parts/Part-02/PLAN.md) retains
 the acceptance cases and scope; the specification retains the requirements.
 
-[Part 3 headless groundwork](PART3.md) adds a live Wayland socket, minimal
+[Part 3 headless groundwork](Parts/Part-03/HANDOFF.md) adds a live Wayland socket, minimal
 XDG/scene ownership, asynchronous direct sd-bus and libpipewire adapters, and
 mandatory-service result coordination. Real-client offscreen pixels and private
 service exchanges provide software evidence; systemd activation, actual portal
 readiness, TTY/seat/output/input and hardware cursors remain unqualified. The
-owner-approved [milestone boundary](PART3_PLAN.md) stops for the first Arch-VM
+owner-approved [milestone boundary](Parts/Part-03/PLAN.md) stops for the first Arch-VM
 checks before extending the real graphical session.
 
 ## Approved technology choices
@@ -57,7 +57,7 @@ checks before extending the real graphical session.
 | Error handling | `std::expected` for recoverable failures, RAII cleanup, exceptions contained at C callback and worker boundaries | §2.2 |
 | Development tools | clang-format, clang-tidy, GDB and AddressSanitizer/UndefinedBehaviorSanitizer test builds; GCC remains primary | §14.3 |
 
-The [part 1 handoff](PART1.md) records qualified foundation versions and commands;
+The [part 1 handoff](Parts/Part-01/HANDOFF.md) records qualified foundation versions and commands;
 later feature libraries still need integration qualification. The specification retains library-specific constraints,
 including the initial toml++ release to qualify. The portal backend/chooser
 and font baseline still need resolution and evidence.

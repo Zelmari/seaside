@@ -5,7 +5,7 @@ Scope: implement the independent, headless-testable foundation of specification
 its first required Arch-VM qualification. This is a partial Part 3 milestone,
 not completion of Part 3 or gates G1/G2/G7.
 
-Status: implemented and software-verified in Arch WSL2. The [handoff](PART3.md)
+Status: implemented and software-verified in Arch WSL2. The [handoff](HANDOFF.md)
 records the final normal/sanitizer results, review fixes and remaining VM work.
 
 | Block | Implementation | Evidence |

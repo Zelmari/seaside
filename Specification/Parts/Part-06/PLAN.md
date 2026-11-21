@@ -6,11 +6,11 @@ already supplies `ConfigStore`, `ConfigTransaction`, and `AsyncConfigIo`.
 Production startup uses the loader and writes a recovery snapshot after
 readiness. Part 4 supplies the desktop action paths, and Part 5 supplies layout
 updates and override reset behavior. Reuse these foundations in the running
-session. [Part 2 handoff](PART2.md) · [Part 4 handoff](PART4.md) · [Part 5 handoff](PART5.md)
+session. [Part 2 handoff](../Part-02/HANDOFF.md) · [Part 4 handoff](../Part-04/HANDOFF.md) · [Part 5 handoff](../Part-05/HANDOFF.md)
 
 The contracts are in §§2, 5.2, 6, 8–10, 12.2b, and 14 of the design. The TOML
 schema, default chords, and IPC method and event names are already specified.
-[Seaside design](SEASIDE_SPEC.md)
+[Seaside design](../../SEASIDE_SPEC.md)
 
 ## Delivery steps
 
