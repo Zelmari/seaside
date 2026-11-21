@@ -194,7 +194,7 @@ class Session {
     ~Session() noexcept { seaside_tty_drm_set_output_callbacks(drm_, nullptr, nullptr); }
 
     bool configure(seaside::LoadedConfig config, const seaside::ConfigStore &store,
-                   seaside::Wallpaper wallpaper) {
+                   seaside::Wallpaper wallpaper, std::string_view runtime) {
         capture_.reset(seaside_output_capture_create(server_.display()));
         if (!capture_ ||
             !scene_.enable_window_capture(server_.allocator(), server_.renderer(),
@@ -293,8 +293,7 @@ class Session {
         }
         ipc_ = std::move(*ipc);
         control_.set_renderer(seaside_wlr_renderer_name(server_.renderer()));
-        auto satellite =
-            seaside::Satellite::reserve(loop_, socket_, std::getenv("XDG_RUNTIME_DIR"));
+        auto satellite = seaside::Satellite::reserve(loop_, socket_, runtime);
         if (satellite) {
             satellite_ = std::move(*satellite);
         } else {
@@ -946,10 +945,9 @@ class Session {
     bool stopping_ = false;
 };
 
-std::expected<Outcome, const char *> run_session(seaside::LoadedConfig config,
-                                                 seaside::Wallpaper wallpaper,
-                                                 seaside::ConfigStore &store,
-                                                 const seaside::ConfigPaths &paths) {
+std::expected<Outcome, const char *>
+run_session(seaside::LoadedConfig config, seaside::Wallpaper wallpaper, seaside::ConfigStore &store,
+            const seaside::ConfigPaths &paths, std::string_view runtime) {
     // The seat owner outlives Server, which releases the backend and its
     // borrowed display resources first.
     std::unique_ptr<seaside_tty_drm, decltype(&seaside_tty_drm_destroy)> drm(
@@ -1001,7 +999,7 @@ std::expected<Outcome, const char *> run_session(seaside::LoadedConfig config,
     if (!(*server)->start(pending_backend.release(), pending_renderer.release())) {
         return std::unexpected("backend-start");
     }
-    if (!session.configure(std::move(config), store, std::move(wallpaper))) {
+    if (!session.configure(std::move(config), store, std::move(wallpaper), runtime)) {
         return std::unexpected("configuration-or-ipc");
     }
     const bool dispatched = (*server)->run().has_value();
@@ -1047,8 +1045,9 @@ int main(int argc, char **) try {
         std::fputs("seaside FAIL: start on the active Linux console as a foreground job\n", stderr);
         return EXIT_FAILURE;
     }
-    const char *runtime = std::getenv("XDG_RUNTIME_DIR");
-    if (!runtime || runtime != "/run/user/" + std::to_string(getuid())) {
+    const std::string runtime = "/run/user/" + std::to_string(getuid());
+    const char *runtime_env = std::getenv("XDG_RUNTIME_DIR");
+    if (!runtime_env || runtime != runtime_env) {
         std::fputs("seaside FAIL: the login has no standard Arch user runtime directory\n", stderr);
         return EXIT_FAILURE;
     }
@@ -1083,7 +1082,8 @@ int main(int argc, char **) try {
             wallpaper = seaside::Wallpaper{};
         }
     }
-    return report_exit(run_session(std::move(config), std::move(*wallpaper), store, paths));
+    return report_exit(
+        run_session(std::move(config), std::move(*wallpaper), store, paths, runtime));
 } catch (const std::exception &error) {
     std::fprintf(stderr, "seaside FAIL: %s\n", error.what());
     return EXIT_FAILURE;
