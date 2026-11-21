@@ -155,6 +155,10 @@ class Session:
     def windows(self):
         return [window for window in self.ctl("windows")["result"]["windows"] if window["mapped"]]
 
+    def focused_output(self):
+        outputs = self.ctl("outputs")["result"]["outputs"]
+        return next(value for value in outputs if value["enabled"] and value["focused"])
+
     def key(self, key):
         event("part6-input", key, key=key)
 
@@ -242,6 +246,7 @@ def run_live(repo, directory, result_dir, state):
     second_autostart = directory / "next-autostart.txt"
     initial = with_autostart(baseline_config, first_autostart)
     repair = with_autostart(repaired_config, second_autostart)
+    moved_config = repair + "\n[monitors]\nposition = [64, 32]\n"
     config.parent.mkdir(parents=True)
     replace(config, initial)
     with Session(repo, directory, result_dir, "live") as session:
@@ -259,8 +264,7 @@ def run_live(repo, directory, result_dir, state):
                     "The default terminal could not enter fullscreen")
             session.wait(lambda: any(w["id"] == first and w["fullscreen"] for w in session.windows()),
                          "the first terminal's fullscreen state")
-            output = next(value for value in session.ctl("outputs")["result"]["outputs"]
-                          if value["enabled"] and value["focused"])
+            output = session.focused_output()
             position = output["position"]
             region = f'{position["x"] + output["mode"]["width"] - 132},{position["y"]} 128x12'
             clean = session.strip(region)
@@ -291,6 +295,25 @@ def run_live(repo, directory, result_dir, state):
             session.wait(lambda: session.strip(region) == clean, "banner removal after repair")
             session.screenshot(result_dir, "recovered")
 
+            replace(config, repair + "\n[monitors]\nresolution = '313x271'\n")
+            mode_rejected = events.expect("config.error")
+            retained = session.focused_output()
+            require(session.config()["error"]["field"] == "monitors.resolution" and
+                    all(retained[key] == output[key] for key in ("id", "mode", "position", "scale", "rotation")) and
+                    snapshot.read_text() == repair, "Unsupported mode changed the realized output or snapshot")
+
+            replace(config, moved_config)
+            moved = events.expect("config.recovered")
+            session.wait(lambda: session.focused_output()["position"] == {"x": 64, "y": 32},
+                         "live output position")
+            actual = session.focused_output()
+            require(actual["id"] == output["id"] and actual["mode"] == output["mode"] and
+                    actual["hardware_cursor"] is True, "A position edit lost output identity, mode or cursor")
+            session.wait(lambda: session.config()["recovery_persisted"], "output recovery snapshot")
+            require(snapshot.read_text() == moved_config, "Valid output edit did not update the snapshot")
+            state["output_edit"] = {"mode": actual["mode"], "before": output["position"],
+                                    "applied": actual["position"]}
+
             session.ctl("workspace", "4")
             workspace = events.expect("workspace.changed", lambda data: data["workspace_id"] == 4 and
                                         data["visible"])
@@ -308,6 +331,7 @@ def run_live(repo, directory, result_dir, state):
                                     remapped["data"]["window_id"])
             state["event_sequence"] = {"subscribed": events.acknowledged, "first_window": mapped["seq"],
                                        "invalid": invalid["seq"], "repaired": recovered["seq"],
+                                       "mode_rejected": mode_rejected["seq"], "position_applied": moved["seq"],
                                        "workspace": workspace["seq"], "remapped": remapped["seq"],
                                        "focused": focused["seq"], "query": events.query_watermark()}
             state["pending_restart"] = accepted["requested_workspace_mode"]
@@ -320,16 +344,16 @@ def run_live(repo, directory, result_dir, state):
         recovered = session.config()
         require(recovered["source"] == "last_good" and recovered["error"] and
                 not recovered["pending_restart"] and recovered["active_workspace_mode"] == "per-monitor" and
-                snapshot.read_text() == repair and config.read_text() == bad_config,
+                snapshot.read_text() == moved_config and config.read_text() == bad_config,
                 "Restart failed to recover the requested workspace mode from last-good TOML")
         require(not session.ctl("night-light", "status")["result"]["enabled"],
                 "Restart restored a transient night-light override")
         session.wait(second_autostart.is_file, "the restart autostart command")
         require(second_autostart.read_text().splitlines() == [str(session.path)],
                 "Recovery did not start the persisted launch command with the current socket")
-        outputs = session.ctl("outputs")["result"]["outputs"]
-        output = next(value for value in outputs if value["enabled"] and value["focused"])
+        output = session.focused_output()
         position = output["position"]
+        require(position == {"x": 64, "y": 32}, "Restart did not restore the applied output position")
         right = position["x"] + output["mode"]["width"] - 132
         top = position["y"]
         session.wait(lambda: session.strip(f"{right},{top} 128x12") !=
