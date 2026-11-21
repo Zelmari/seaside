@@ -1,25 +1,20 @@
 # Seaside
 
 An Arch Linux Wayland compositor using **C++23 and wlroots**, **GCC** as the
-primary compiler and **Meson + Ninja** for builds. The current implementation is
-the **parts 1–2 foundations and Part 3 headless groundwork**: a C++ lifecycle owner with RAII and typed errors,
-a narrow C bridge for wlroots, typed TOML configuration and bindings, bounded
-workers, recovery-file transactions and a logical window/workspace registry.
-The new core owns a live Wayland socket and minimal XDG/scene mechanisms;
-asynchronous sd-bus and PipeWire adapters and a mandatory-service result
-coordinator support later session integration.
-The real-client headless fixture, bounded Python test runner and DRM inspection
-tool remain development infrastructure. Useful clients/probes remain C17.
-The installable compositor session and window manager belong to later parts.
+primary compiler and **Meson + Ninja** for builds. The TTY session owns a live
+Wayland display, enforces hardware cursors, and checks mandatory session
+services before it starts configured commands. Part 4 adds XDG window
+management, workspace navigation and transfer, pointer and keyboard focus,
+and basic placement with maximize, fullscreen, and pin. Dwindle and scrolling
+are scheduled for Part 5.
 
 The product contract is in [the design](Specification/SEASIDE_SPEC.md). Build and
 verification details are in [the part 1 handoff](Specification/PART1.md).
 Configuration/state implementation and checks are recorded in
 [the part 2 handoff](Specification/PART2.md).
-The [Part 3 plan](Specification/PART3_PLAN.md) defines the headless milestone and
-the required first VM checks. Its [handoff](Specification/PART3.md) records
-normal/sanitizer results and the remaining boundary. Full Part 3 session
-qualification remains pending.
+The [Part 3 handoff](Specification/PART3.md) records the TTY and session VM
+trials. The [Part 4 handoff](Specification/PART4.md) records the window and
+workspace checks.
 Future latency investigations are tracked in
 [the performance research notes](Specification/Research/PERFORMANCE.md).
 Approved choices and documentation needs for users and contributors are also
