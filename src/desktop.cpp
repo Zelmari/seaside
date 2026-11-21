@@ -87,6 +87,43 @@ void Desktop::remove_output(wlr_output *output) noexcept try {
     failed_ = true;
 }
 
+bool Desktop::update_output(wlr_output *output, WindowRect bounds) noexcept try {
+    const auto found = outputs_.find(output);
+    if (found == outputs_.end()) {
+        return false;
+    }
+    discard_drag();
+    if (!windows_.update_output(found->second.connector, bounds, bounds) ||
+        !scene_.place_output(output, bounds.x, bounds.y)) {
+        return false;
+    }
+    project();
+    return true;
+} catch (...) {
+    failed_ = true;
+    return false;
+}
+
+void Desktop::apply_initial_config(const Config &config) noexcept {
+    windows_.set_initial_workspace_mode(config.workspaces.mode);
+    apply_config(config);
+}
+
+void Desktop::apply_config(const Config &config) noexcept try {
+    auto bindings = config.keybinds;
+    auto primary = config.monitors.primary;
+    if (bindings != bindings_) {
+        discard_drag();
+        finish_focus_cycle();
+        bindings_.swap(bindings);
+    }
+    primary_ = std::move(primary);
+    windows_.apply_layout_config(config);
+    project();
+} catch (...) {
+    failed_ = true;
+}
+
 wlr_output *Desktop::focused_output_handle() const noexcept {
     const auto focused = windows_.focused_output();
     for (const auto &[handle, output] : outputs_) {
@@ -149,6 +186,9 @@ void Desktop::project(WindowId resize) {
         seaside_tty_input_set_focus(input_, scene_.window_surface(focused));
         seaside_tty_input_refresh_pointer(input_);
     }
+    if (projected_) {
+        projected_();
+    }
 }
 
 bool Desktop::update_size_limits(WindowId id) {
@@ -192,6 +232,9 @@ std::uint64_t Desktop::window_event(const seaside_scene_window_event &event) {
             return 0;
         }
         views_.insert(*id);
+        if (projected_) {
+            projected_();
+        }
         return *id;
     }
     case SEASIDE_WINDOW_INITIAL_COMMIT:
@@ -244,6 +287,12 @@ std::uint64_t Desktop::window_event(const seaside_scene_window_event &event) {
         }
         windows_.set_maximized(event.id, event.enabled);
         break;
+    case SEASIDE_WINDOW_ATTENTION_REQUESTED:
+        if (const auto *window = windows_.state().window(event.id);
+            attention_ && window && window->mapped && windows_.focused_window() != event.id) {
+            attention_(event.id, window->home_workspace);
+        }
+        return 0;
     case SEASIDE_WINDOW_FULLSCREEN_REQUESTED:
         if (drag_ && drag_->window == event.id) {
             discard_drag();
@@ -289,79 +338,163 @@ bool Desktop::resize_by(WindowId id, int dx, int dy) {
         resize_delta(size.height, dy, limits.min_height, limits.max_height));
 }
 
-bool Desktop::action(const Action &action, std::uint8_t modifiers) noexcept try {
+bool Desktop::action(const Action &action, std::uint8_t modifiers) noexcept {
+    if (action.kind == ActionKind::night_light || action.kind == ActionKind::exit ||
+        action.kind == ActionKind::exec) {
+        return false;
+    }
+    (void)dispatch(action, modifiers);
+    return true;
+}
+
+std::expected<bool, DesktopActionError>
+Desktop::dispatch(const Action &action, std::uint8_t modifiers, std::optional<WindowId> target,
+                  std::optional<WorkspaceId> workspace) noexcept try {
+    using Error = DesktopActionError;
+    const auto id = target.value_or(windows_.focused_window().value_or(0));
+    const auto before = windows_.view(id);
+    const auto focused = windows_.focused_window();
+    const auto current_workspace = windows_.focused_workspace();
+    const auto *entry = windows_.state().window(id);
+    auto require_window = [&]() -> std::expected<void, Error> {
+        if (!entry) {
+            return std::unexpected(target ? Error::not_found : Error::no_target);
+        }
+        if (!entry->mapped) {
+            return std::unexpected(Error::invalid_state);
+        }
+        return {};
+    };
+    WindowId resized = 0;
+    bool changed = false;
     if (action.kind != ActionKind::cycle_focus_mru) {
         finish_focus_cycle();
     }
-    const auto id = windows_.focused_window().value_or(0);
-    WindowId resized = 0;
     switch (action.kind) {
     case ActionKind::focus:
-        windows_.focus_direction(action.direction);
+        if (!windows_.focus_direction(action.direction)) {
+            return std::unexpected(Error::no_target);
+        }
+        changed = focused != windows_.focused_window();
         break;
     case ActionKind::cycle_focus_mru:
         cycle_modifiers_ = modifiers;
-        windows_.cycle_focus(modifiers != 0);
+        if (!windows_.cycle_focus(modifiers != 0)) {
+            return std::unexpected(Error::no_target);
+        }
+        changed = focused != windows_.focused_window();
         break;
-    case ActionKind::workspace:
-        discard_drag();
-        windows_.select_workspace(static_cast<WorkspaceId>(action.argument));
+    case ActionKind::workspace: {
+        const auto destination = static_cast<WorkspaceId>(action.argument);
+        if (!current_workspace) {
+            return std::unexpected(Error::no_target);
+        }
+        if (current_workspace != destination) {
+            discard_drag();
+            changed = windows_.select_workspace(destination);
+        }
         break;
-    case ActionKind::move_to_workspace:
-        discard_drag();
-        windows_.move_to_workspace(id, static_cast<WorkspaceId>(action.argument));
-        break;
-    case ActionKind::transfer_workspace:
-        if (auto selector = parse_output_selector(action.text)) {
-            if (auto destination = match(*selector)) {
-                discard_drag();
-                windows_.transfer_workspace(*destination);
+    }
+    case ActionKind::transfer_workspace: {
+        const auto selected = workspace ? workspace : current_workspace;
+        if (!selected || !windows_.state().workspace(*selected)) {
+            return std::unexpected(workspace ? Error::not_found : Error::no_target);
+        }
+        const auto selector = parse_output_selector(action.text);
+        if (!selector) {
+            return std::unexpected(Error::not_found);
+        }
+        std::optional<std::string_view> destination;
+        for (const auto &[handle, output] : outputs_) {
+            const auto &value =
+                selector->kind == SelectorKind::connector ? output.connector : output.identity;
+            if (selector->value == value) {
+                if (destination) {
+                    return std::unexpected(Error::ambiguous_output);
+                }
+                destination = output.connector;
             }
         }
-        break;
-    case ActionKind::toggle_window_pin:
-        discard_drag();
-        windows_.toggle_pin(id);
-        break;
-    case ActionKind::toggle_window_tiling:
-        discard_drag();
-        windows_.toggle_tiling(id);
-        break;
-    case ActionKind::toggle_window_maximize:
-        discard_drag();
-        windows_.set_maximized(id, !windows_.view(id).maximized);
-        break;
-    case ActionKind::toggle_window_fullscreen:
-        discard_drag();
-        windows_.set_fullscreen(id, !windows_.view(id).fullscreen);
-        break;
-    case ActionKind::close_window:
-        scene_.close_window(id);
-        return true;
-    case ActionKind::move_window:
-        discard_drag();
-        windows_.move_window(id, action.direction);
-        break;
-    case ActionKind::resize_window:
-        discard_drag();
-        if (resize(id, action.direction, static_cast<int>(action.argument))) {
-            resized = id;
+        if (!destination) {
+            return std::unexpected(Error::not_found);
+        }
+        if (windows_.workspace_output(*selected) != destination) {
+            discard_drag();
+            changed = windows_.transfer_workspace(*destination, selected);
         }
         break;
-    case ActionKind::swap_window:
-        discard_drag();
-        windows_.swap_window(id, action.direction);
-        break;
+    }
     case ActionKind::night_light:
     case ActionKind::exit:
     case ActionKind::exec:
-        return false;
+        return std::unexpected(Error::invalid_state);
+    default:
+        if (const auto valid = require_window(); !valid) {
+            return std::unexpected(valid.error());
+        }
+        if (action.kind == ActionKind::close_window) {
+            if (!scene_.close_window(id)) {
+                return std::unexpected(Error::invalid_state);
+            }
+            return false;
+        }
+        discard_drag();
+        switch (action.kind) {
+        case ActionKind::move_to_workspace: {
+            const auto destination = static_cast<WorkspaceId>(action.argument);
+            const bool would_change = entry->home_workspace != destination || id != focused ||
+                                      current_workspace != destination;
+            if (!windows_.move_to_workspace(id, destination)) {
+                return std::unexpected(Error::invalid_state);
+            }
+            changed = would_change;
+            break;
+        }
+        case ActionKind::toggle_window_pin:
+            changed = windows_.toggle_pin(id);
+            break;
+        case ActionKind::toggle_window_tiling:
+            changed = windows_.toggle_tiling(id);
+            break;
+        case ActionKind::toggle_window_maximize:
+            changed = windows_.set_maximized(id, !before.maximized);
+            break;
+        case ActionKind::toggle_window_fullscreen:
+            changed = windows_.set_fullscreen(id, !before.fullscreen);
+            break;
+        case ActionKind::move_window:
+            if (!windows_.move_window(id, action.direction)) {
+                return std::unexpected(Error::invalid_state);
+            }
+            changed = before.tile_layout || windows_.view(id).geometry != before.geometry;
+            break;
+        case ActionKind::resize_window:
+            if (!resize(id, action.direction, static_cast<int>(action.argument))) {
+                return std::unexpected(Error::invalid_state);
+            }
+            changed = before.tile_layout || windows_.view(id).geometry != before.geometry;
+            if (changed) {
+                resized = id;
+            }
+            break;
+        case ActionKind::swap_window:
+            changed = windows_.swap_window(id, action.direction);
+            break;
+        default:
+            break;
+        }
+        if (!changed && action.kind != ActionKind::move_to_workspace &&
+            action.kind != ActionKind::move_window && action.kind != ActionKind::resize_window) {
+            project();
+            return std::unexpected(Error::invalid_state);
+        }
+        break;
     }
     project(resized);
-    return true;
+    return changed;
 } catch (...) {
     failed_ = true;
-    return true;
+    return std::unexpected(DesktopActionError::invalid_state);
 }
 
 void Desktop::modifiers_changed(std::uint8_t modifiers) noexcept {

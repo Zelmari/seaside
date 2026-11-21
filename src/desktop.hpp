@@ -4,11 +4,14 @@
 #include "scene.hpp"
 #include "window_manager.hpp"
 
+#include <functional>
 #include <set>
 
 struct seaside_tty_input;
 
 namespace seaside {
+
+enum class DesktopActionError { no_target, not_found, invalid_state, ambiguous_output };
 
 // Connects the event-loop window policy to the production scene and input seat.
 class Desktop final {
@@ -22,9 +25,22 @@ class Desktop final {
     bool add_output(wlr_output *output, std::string_view connector, std::string_view identity,
                     WindowRect bounds) noexcept;
     void remove_output(wlr_output *output) noexcept;
+    bool update_output(wlr_output *output, WindowRect bounds) noexcept;
+    void set_primary_output(std::string_view connector) noexcept {
+        windows_.set_primary_output(connector);
+    }
+    void apply_config(const Config &config) noexcept;
+    void apply_initial_config(const Config &config) noexcept;
+    void on_projection(std::function<void()> notify) { projected_ = std::move(notify); }
+    void on_attention(std::function<void(WindowId, WorkspaceId)> notify) {
+        attention_ = std::move(notify);
+    }
     wlr_output *focused_output_handle() const noexcept;
     WindowRect output_bounds(wlr_output *output) const noexcept;
     bool action(const Action &action, std::uint8_t modifiers = 0) noexcept;
+    std::expected<bool, DesktopActionError>
+    dispatch(const Action &action, std::uint8_t modifiers = 0, std::optional<WindowId> window = {},
+             std::optional<WorkspaceId> workspace = {}) noexcept;
     void modifiers_changed(std::uint8_t modifiers) noexcept;
     void finish_focus_cycle() noexcept;
     bool button(WindowId id, std::uint32_t button, bool pressed, std::uint8_t modifiers, double x,
@@ -59,6 +75,8 @@ class Desktop final {
     Scene &scene_;
     WindowManager windows_;
     BindingMap bindings_;
+    std::function<void()> projected_;
+    std::function<void(WindowId, WorkspaceId)> attention_;
     std::optional<OutputSelector> primary_;
     std::map<wlr_output *, Output> outputs_;
     std::set<WindowId> views_;

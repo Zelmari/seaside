@@ -1,9 +1,8 @@
-#include "config_transaction.hpp"
-#include "desktop.hpp"
 #include "output_capture.h"
 #include "scene.hpp"
 #include "server.hpp"
 #include "session_activation.hpp"
+#include "session_control.hpp"
 #include "session_portal.hpp"
 #include "session_services.hpp"
 #include "session_systemd.hpp"
@@ -36,6 +35,13 @@ extern char **environ;
 namespace {
 using namespace std::chrono_literals;
 using Clock = std::chrono::steady_clock;
+using seaside::Action;
+using seaside::ActionKind;
+using seaside::DesktopActionError;
+using seaside::IpcError;
+using seaside::IpcJson;
+using seaside::IpcResult;
+using seaside::LiveConfig;
 using seaside::ServiceFailure;
 using seaside::ServiceReport;
 using seaside::StartupService;
@@ -43,19 +49,41 @@ using seaside::StartupService;
 constexpr auto appearance_timeout = 5s;
 constexpr auto preflight_timeout = 10s;
 
+std::optional<seaside::LoadedConfig> read_recovery(const seaside::ConfigStore &store,
+                                                   const seaside::ConfigPaths &paths,
+                                                   const seaside::Diagnostic &error) {
+    auto recovery = store.read(paths.recovery, true);
+    if (!recovery || !*recovery) {
+        return std::nullopt;
+    }
+    auto candidate = seaside::parse_config(**recovery, paths.recovery.string());
+    if (!candidate) {
+        return std::nullopt;
+    }
+    return seaside::LoadedConfig{std::move(*candidate), std::move(**recovery),
+                                 seaside::ConfigSource::recovery, error};
+}
+
+seaside::LoadedConfig startup_defaults(seaside::Diagnostic error) {
+    return {seaside::default_config(), std::string(seaside::default_template()),
+            seaside::ConfigSource::defaults, std::move(error)};
+}
+
 class Commands {
   public:
-    explicit Commands(std::string_view socket) {
+    Commands(std::string_view socket, const std::string &control_socket) {
         for (auto **entry = environ; *entry; ++entry) {
             const std::string_view value(*entry);
             if (!value.starts_with("WAYLAND_SOCKET=") && !value.starts_with("WAYLAND_DISPLAY=") &&
-                !value.starts_with("DISPLAY=") && !value.starts_with("XDG_CURRENT_DESKTOP=") &&
+                !value.starts_with("SEASIDE_SOCKET=") && !value.starts_with("DISPLAY=") &&
+                !value.starts_with("XDG_CURRENT_DESKTOP=") &&
                 !value.starts_with("XDG_SESSION_TYPE=") &&
                 !value.starts_with("DBUS_SESSION_BUS_ADDRESS=")) {
                 values_.emplace_back(value);
             }
         }
         values_.push_back("WAYLAND_DISPLAY=" + std::string(socket));
+        values_.push_back("SEASIDE_SOCKET=" + control_socket);
         values_.emplace_back("XDG_CURRENT_DESKTOP=Seaside");
         values_.emplace_back("XDG_SESSION_TYPE=wayland");
         values_.push_back("DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/" +
@@ -151,13 +179,119 @@ struct Outcome {
 class Session {
   public:
     Session(seaside::Server &server, seaside::Scene &scene, seaside_tty_drm *drm,
-            std::string_view socket, seaside::LoadedConfig config, seaside::ConfigStore &store,
-            const seaside::ConfigPaths &paths)
+            std::string_view socket, const seaside::ConfigPaths &paths)
         : server_(server), scene_(scene), drm_(drm), socket_(socket),
-          loop_(wl_display_get_event_loop(server.display())), config_(std::move(config)),
-          store_(store), paths_(paths), commands_(socket), desktop_(scene, config_.config) {}
+          loop_(wl_display_get_event_loop(server.display())), paths_(paths),
+          desktop_(scene, seaside::default_config()), outputs_(drm, desktop_),
+          control_(scene, desktop_, outputs_) {}
 
     ~Session() noexcept { seaside_tty_drm_set_output_callbacks(drm_, nullptr, nullptr); }
+
+    bool configure(seaside::LoadedConfig config, const seaside::ConfigStore &store,
+                   seaside::Wallpaper wallpaper) {
+        if (!seaside_tty_drm_enable_pending(drm_, server_.allocator(), server_.renderer())) {
+            return false;
+        }
+        if (auto applied = outputs_.apply(config.config, false); !applied) {
+            auto diagnostic = config.diagnostic.value_or(std::move(applied.error()));
+            if (diagnostic.path.empty()) {
+                diagnostic.path = paths_.user.string();
+            }
+            std::optional<seaside::LoadedConfig> recovered;
+            if (config.source == seaside::ConfigSource::user) {
+                recovered = read_recovery(store, paths_, diagnostic);
+            }
+            if (recovered) {
+                auto decoded = seaside::decode_wallpaper(recovered->config.wallpaper.path);
+                if (decoded && outputs_.apply(recovered->config, false)) {
+                    config = std::move(*recovered);
+                    wallpaper = std::move(*decoded);
+                } else {
+                    recovered.reset();
+                }
+            }
+            if (!recovered) {
+                config = startup_defaults(std::move(diagnostic));
+                wallpaper = {};
+                if (!outputs_.apply(config.config, false)) {
+                    return false;
+                }
+            }
+        }
+        startup_commands_ = config.config.autostart.commands;
+        desktop_.apply_initial_config(config.config);
+        seaside_tty_input_set_sensitivity(input_, config.config.input.mouse.sensitivity);
+        attaching_startup_ = false;
+        for (const auto &[connector, output] : outputs_.outputs()) {
+            if (output.enabled) {
+                const auto &state = output.status;
+                if (!attach_desktop_output(output.handle, connector, output.identity,
+                                           {state.settings.x, state.settings.y, state.logical_width,
+                                            state.logical_height})) {
+                    return false;
+                }
+            }
+        }
+        outputs_.set_primary();
+
+        auto image = scene_.prepare_wallpaper(std::move(wallpaper));
+        if (!image) {
+            std::fputs("seaside: could not prepare startup wallpaper buffer\n", stderr);
+            return false;
+        }
+        scene_.set_wallpaper(std::move(*image));
+        auto live = LiveConfig::create(
+            loop_, store, paths_, std::move(config),
+            [path = paths_.user.string()](const seaside::Config &candidate,
+                                          const seaside::Config &active)
+                -> std::expected<LiveConfig::Prepared, seaside::Diagnostic> {
+                if (candidate.wallpaper == active.wallpaper) {
+                    return LiveConfig::Prepared{};
+                }
+                auto image = seaside::decode_wallpaper(candidate.wallpaper.path);
+                if (!image) {
+                    auto error = std::move(image.error());
+                    error.message += " (" + error.path + ")";
+                    error.path = path;
+                    return std::unexpected(std::move(error));
+                }
+                return *std::move(image);
+            },
+            [this](const seaside::Config &active, const seaside::Config &candidate,
+                   const LiveConfig::Prepared &prepared) {
+                return apply_config(active, candidate, prepared);
+            },
+            [this](LiveConfig::Change change, const LiveConfig::Prepared &) {
+                config_changed(change);
+            });
+        if (!live) {
+            std::fprintf(stderr, "seaside: configuration watch: %s\n", live.error().c_str());
+            return false;
+        }
+        config_ = std::move(*live);
+        auto ipc = seaside::IpcServer::create(
+            loop_, socket_,
+            [this](std::string_view method, const IpcJson &params) {
+                return request(method, params);
+            },
+            [this] { stop_requested(); });
+        if (!ipc) {
+            std::fprintf(stderr, "seaside: control socket: %s\n", ipc.error().c_str());
+            return false;
+        }
+        ipc_ = std::move(*ipc);
+        control_.set_renderer(seaside_wlr_renderer_name(server_.renderer()));
+        commands_.emplace(socket_, ipc_->path());
+        desktop_.on_projection([this] { publish(); });
+        desktop_.on_attention([this](seaside::WindowId window, seaside::WorkspaceId workspace) {
+            attention(window, workspace);
+        });
+        if (const auto &diagnostic = config_->transaction().diagnostic()) {
+            show_config_error(*diagnostic);
+        }
+        publish();
+        return true;
+    }
 
     bool observe(seaside_tty_input *input) noexcept {
         input_ = input;
@@ -165,6 +299,7 @@ class Session {
         const seaside_tty_drm_output_callbacks callbacks{
             .added = output_added,
             .removed = output_removed,
+            .observed = output_observed,
         };
         seaside_tty_drm_set_output_callbacks(drm_, &callbacks, this);
         timer_.reset(wl_event_loop_add_timer(loop_, on_tick, this));
@@ -185,10 +320,10 @@ class Session {
         }
         seaside_tty_drm_set_output_callbacks(drm_, nullptr, nullptr);
         desktop_.set_input(nullptr);
-        commands_.reap();
-        config_io_.reset();
-        workers_.reset();
-        if (!ready_ && !outcome_.failure_stage && !outcome_.preflight_failure) {
+        commands_->reap();
+        config_.reset();
+        ipc_.reset();
+        if (!clean_exit_ && !ready_ && !outcome_.failure_stage && !outcome_.preflight_failure) {
             outcome_.failure_stage = "interrupted-before-ready";
         }
         return outcome_;
@@ -196,7 +331,7 @@ class Session {
 
     static void pointer_motion(void *data, bool absolute, double x, double y) noexcept {
         auto &session = *static_cast<Session *>(data);
-        if (!session.stopping_) {
+        if (!session.stopping_ && !session.ipc_exiting_) {
             seaside_tty_drm_move(session.drm_, absolute, x, y);
             if (seaside_tty_drm_cursor_position(session.drm_, &x, &y)) {
                 session.desktop_.motion(x, y);
@@ -220,7 +355,7 @@ class Session {
                                std::uint8_t mods) noexcept {
         auto &session = *static_cast<Session *>(data);
         double x, y;
-        return session.ready_ && !session.stopping_ &&
+        return session.ready_ && !session.stopping_ && !session.ipc_exiting_ &&
                seaside_tty_drm_cursor_position(session.drm_, &x, &y) &&
                session.desktop_.button(window, button, pressed, mods, x, y);
     }
@@ -250,7 +385,7 @@ class Session {
 
     static bool shortcut_pressed(void *data, uint8_t mods, uint32_t keysym) noexcept {
         auto &session = *static_cast<Session *>(data);
-        if (session.stopping_) {
+        if (session.stopping_ || session.ipc_exiting_) {
             return false;
         }
         if (keysym >= XKB_KEY_XF86Switch_VT_1 && keysym <= XKB_KEY_XF86Switch_VT_12) {
@@ -263,26 +398,181 @@ class Session {
         if (!session.ready_) {
             return false;
         }
-        const auto &bindings = session.config_.config.keybinds;
+        const auto &bindings = session.config_->transaction().active().keybinds;
         const auto action = bindings.find({mods, seaside::ChordKind::keyboard, keysym});
         if (action == bindings.end()) {
             return false;
         }
-        switch (action->second.kind) {
-        case seaside::ActionKind::exit:
-            session.desktop_.finish_focus_cycle();
-            session.server_.terminate();
-            return true;
-        case seaside::ActionKind::exec:
-            session.desktop_.finish_focus_cycle();
-            session.launch(action->second.text);
-            return true;
-        default:
-            return session.desktop_.action(action->second, mods);
-        }
+        (void)session.act(action->second, mods);
+        return true;
     }
 
   private:
+    std::expected<bool, DesktopActionError>
+    act(const Action &action, std::uint8_t modifiers = 0,
+        std::optional<seaside::WindowId> window = {},
+        std::optional<seaside::WorkspaceId> workspace = {}) noexcept {
+        switch (action.kind) {
+        case ActionKind::exit:
+            desktop_.finish_focus_cycle();
+            stop_requested();
+            return true;
+        case ActionKind::exec:
+            desktop_.finish_focus_cycle();
+            launch(action.text);
+            return true;
+        case ActionKind::night_light: {
+            desktop_.finish_focus_cycle();
+            const auto before = config_->transaction().runtime_night_light();
+            const auto enabled = action.night_light == seaside::NightLightAction::toggle
+                                     ? !before
+                                     : action.night_light == seaside::NightLightAction::on;
+            config_->set_runtime_night_light(enabled);
+            return before != enabled;
+        }
+        default:
+            return desktop_.dispatch(action, modifiers, window, workspace);
+        }
+    }
+
+    void stop_requested() noexcept {
+        clean_exit_ = true;
+        stopping_ = true;
+        server_.terminate();
+    }
+
+    IpcResult request(std::string_view method, const IpcJson &params) {
+        const bool ending = ipc_exiting_ || stopping_;
+        if (method.starts_with("query.")) {
+            auto last_error = last_error_;
+            if (const auto &diagnostic = config_->transaction().diagnostic()) {
+                last_error = seaside::ipc_diagnostic(*diagnostic);
+            }
+            return control_.query(method, *config_, paths_.user.string(),
+                                  ending   ? "stopping"
+                                  : ready_ ? "ready"
+                                           : "starting",
+                                  last_error);
+        }
+        if (method == "action.exit") {
+            const bool changed = !ending;
+            ipc_exiting_ = true;
+            return seaside::ipc_action_result(changed);
+        }
+        if (!ready_ || ending) {
+            return std::unexpected(IpcError{"not_ready", "The session is not accepting actions"});
+        }
+        if (method.starts_with("trace.")) {
+            return std::unexpected(
+                IpcError{"unsupported_capability", "Trace recording is scheduled for Part 9"});
+        }
+        const auto decoded = seaside::decode_ipc_action(method, params);
+        return seaside::desktop_action_result(
+            act(decoded.action, 0, decoded.window, decoded.workspace));
+    }
+
+    std::expected<void, seaside::Diagnostic> apply_config(const seaside::Config &active,
+                                                          const seaside::Config &candidate,
+                                                          const LiveConfig::Prepared &prepared) {
+        auto reject = [this](seaside::Diagnostic error) {
+            if (error.path.empty()) {
+                error.path = paths_.user.string();
+            }
+            return std::unexpected(std::move(error));
+        };
+        std::optional<seaside::SceneImage> wallpaper;
+        if (candidate.wallpaper != active.wallpaper) {
+            auto pending = scene_.prepare_wallpaper(
+                std::static_pointer_cast<const seaside::PixelImage>(prepared));
+            if (!pending) {
+                return reject(
+                    {{}, 0, 0, "wallpaper.path", "Could not allocate the wallpaper buffer"});
+            }
+            wallpaper = std::move(*pending);
+        }
+        if (candidate.monitors != active.monitors || candidate.render != active.render) {
+            applying_config_ = true;
+            try {
+                const auto applied = outputs_.apply(candidate);
+                applying_config_ = false;
+                if (!applied) {
+                    return reject(applied.error());
+                }
+            } catch (...) {
+                applying_config_ = false;
+                throw;
+            }
+            reposition_capture();
+        }
+        if (wallpaper) {
+            scene_.set_wallpaper(std::move(*wallpaper));
+        }
+        seaside_tty_input_set_sensitivity(input_, candidate.input.mouse.sensitivity);
+        return {};
+    }
+
+    void show_config_error(const seaside::Diagnostic &diagnostic) {
+        std::fprintf(stderr, "seaside configuration: %s:%u:%u %s %s\n", diagnostic.path.c_str(),
+                     diagnostic.line, diagnostic.column, diagnostic.field.c_str(),
+                     diagnostic.message.c_str());
+        scene_.set_config_error(diagnostic);
+        ipc_->event("config.error",
+                    {{"path", diagnostic.path},
+                     {"message", diagnostic.message},
+                     {"line", diagnostic.line ? IpcJson(diagnostic.line) : IpcJson(nullptr)}});
+        config_error_visible_ = true;
+    }
+
+    void config_changed(LiveConfig::Change change) {
+        const auto &transaction = config_->transaction();
+        if (change == LiveConfig::Change::committed) {
+            desktop_.apply_config(transaction.active());
+            if (std::exchange(config_error_visible_, false)) {
+                scene_.set_config_error(std::nullopt);
+            }
+            ipc_->event("config.recovered", {{"source", "user"}});
+            publish();
+        } else if (change == LiveConfig::Change::rejected && transaction.diagnostic()) {
+            show_config_error(*transaction.diagnostic());
+            publish();
+        } else if (change == LiveConfig::Change::persistence) {
+            if (const auto &error = transaction.persistence_error()) {
+                seaside::Diagnostic diagnostic{error->path.string(), 0, 0, "",
+                                               error->error.message()};
+                std::fprintf(stderr, "seaside recovery snapshot: %s: %s\n", diagnostic.path.c_str(),
+                             diagnostic.message.c_str());
+                last_error_ = seaside::ipc_diagnostic(diagnostic, "config.persistence");
+            } else {
+                last_error_ = nullptr;
+            }
+        }
+    }
+
+    void attention(seaside::WindowId window, seaside::WorkspaceId workspace) noexcept try {
+        ipc_->event("window.attention", {{"window_id", window}, {"workspace_id", workspace}});
+    } catch (const std::exception &error) {
+        std::fprintf(stderr, "seaside: could not publish attention event: %s\n", error.what());
+    }
+
+    void publish() noexcept try {
+        if (!applying_config_ && ipc_ && !stopping_) {
+            outputs_.sync_fullscreen(config_->transaction().active());
+            outputs_.refresh();
+            control_.publish(*ipc_);
+        }
+    } catch (const std::exception &error) {
+        std::fprintf(stderr, "seaside: could not publish control state: %s\n", error.what());
+    }
+
+    void reposition_capture() noexcept {
+        if (capture_output_) {
+            const auto bounds = desktop_.output_bounds(capture_output_);
+            if (!seaside_output_capture_position(capture_.get(), bounds.x, bounds.y)) {
+                fail("output-capture-position");
+            }
+        }
+    }
+
     void fail(const char *stage) noexcept {
         stopping_ = true;
         outcome_.failure_stage = stage;
@@ -291,7 +581,7 @@ class Session {
 
     void launch(const std::string &command) noexcept {
         try {
-            const auto pid = commands_.launch(command);
+            const auto pid = commands_->launch(command);
             if (!pid) {
                 std::fprintf(stderr, "seaside: command launch failed: %s\n",
                              std::strerror(pid.error()));
@@ -302,33 +592,10 @@ class Session {
         }
     }
 
-    void persist_config() noexcept {
-        if (config_.source != seaside::ConfigSource::user) {
+    void startup_result(seaside::StartupResult result) noexcept {
+        if (ipc_exiting_) {
             return;
         }
-        try {
-            auto queue = seaside::WorkQueue::create(loop_, {.workers = 1});
-            if (queue) {
-                workers_ = std::move(*queue);
-                config_io_.emplace(*workers_, store_);
-                auto saved = config_io_->persist(
-                    paths_.recovery, std::move(config_.text), 0,
-                    [](std::optional<seaside::StorageError> error) {
-                        if (error) {
-                            std::fprintf(stderr, "seaside: recovery file write failed: %s\n",
-                                         error->error.message().c_str());
-                        }
-                    });
-                if (saved) {
-                    return;
-                }
-            }
-        } catch (...) {
-        }
-        std::fputs("seaside: couldn't queue recovery file write\n", stderr);
-    }
-
-    void startup_result(seaside::StartupResult result) noexcept {
         if (result.phase != seaside::StartupPhase::ready) {
             stopping_ = true;
             outcome_.preflight_failure = result;
@@ -341,14 +608,14 @@ class Session {
     void mark_ready(uint32_t cursor_plane) noexcept {
         ready_ = true;
         std::fprintf(stderr, "seaside READY cursor-plane=%" PRIu32 "\n", cursor_plane);
-        persist_config();
-        for (const auto &command : config_.config.autostart.commands) {
+        config_->session_ready();
+        for (const auto &command : startup_commands_) {
             launch(command);
         }
     }
 
     void report(StartupService service, ServiceReport detail) noexcept {
-        if (stopping_) {
+        if (stopping_ || ipc_exiting_) {
             return;
         }
         const auto delivered = gate_->report(service, detail);
@@ -358,7 +625,7 @@ class Session {
     }
 
     void report_external_fault(StartupService service, ServiceReport detail) noexcept {
-        if (stopping_) {
+        if (stopping_ || ipc_exiting_) {
             return;
         }
         if (!ready_) {
@@ -370,9 +637,14 @@ class Session {
             server_.terminate();
             return;
         }
-        std::fprintf(stderr, "seaside service fault service=%s reason=%s(%d)\n",
-                     seaside::startup_service_name(service),
-                     seaside::service_result_name(detail.failure), detail.native_error);
+        const auto name = seaside::startup_service_name(service);
+        const auto reason = seaside::service_result_name(detail.failure);
+        std::fprintf(stderr, "seaside service fault service=%s reason=%s(%d)\n", name, reason,
+                     detail.native_error);
+        try {
+            ipc_->event("integration.failed", {{"name", name}, {"message", reason}});
+        } catch (...) {
+        }
     }
 
     std::chrono::milliseconds remaining() const noexcept {
@@ -411,7 +683,7 @@ class Session {
         auto activation = seaside::PortalActivation::start(
             *bus_, socket_,
             [this](StartupService service, ServiceReport detail) {
-                if (detail.failure == ServiceFailure::none && !stopping_ &&
+                if (detail.failure == ServiceFailure::none && !stopping_ && !ipc_exiting_ &&
                     gate_->result().phase == seaside::StartupPhase::checking) {
                     start_portal_probe();
                 } else if (detail.failure != ServiceFailure::none) {
@@ -446,7 +718,7 @@ class Session {
             *bus_, getuid(),
             [this](ServiceReport detail) {
                 report(StartupService::systemd_user, detail);
-                if (detail.failure == ServiceFailure::none && !stopping_ &&
+                if (detail.failure == ServiceFailure::none && !stopping_ && !ipc_exiting_ &&
                     gate_->result().phase == seaside::StartupPhase::checking) {
                     start_activation();
                 }
@@ -494,22 +766,33 @@ class Session {
         return true;
     }
 
-    static bool output_added(void *data, wlr_output *output, const char *connector,
-                             const char *identity, int x, int y, int width, int height) noexcept {
-        auto &session = *static_cast<Session *>(data);
-        if (!session.desktop_.add_output(output, connector, identity ? identity : "",
-                                         {x, y, width, height})) {
+    bool attach_desktop_output(wlr_output *output, std::string_view connector,
+                               std::string_view identity, seaside::WindowRect bounds) noexcept {
+        if (!desktop_.add_output(output, connector, identity, bounds)) {
             return false;
         }
-        if (!session.capture_output_ && !session.attach_capture(output)) {
-            session.desktop_.remove_output(output);
+        if (!capture_output_ && !attach_capture(output)) {
+            desktop_.remove_output(output);
             return false;
         }
         return true;
     }
 
-    static void output_removed(void *data, wlr_output *output, const char *) noexcept {
+    static bool output_added(void *data, wlr_output *output, const char *connector,
+                             const char *identity, int x, int y, int width, int height) noexcept {
         auto &session = *static_cast<Session *>(data);
+        session.outputs_.enabled(connector, true);
+        if (session.attaching_startup_) {
+            return true;
+        }
+        session.output_config_pending_ = true;
+        return session.attach_desktop_output(output, connector, identity ? identity : "",
+                                             {x, y, width, height});
+    }
+
+    static void output_removed(void *data, wlr_output *output, const char *connector) noexcept {
+        auto &session = *static_cast<Session *>(data);
+        session.outputs_.enabled(connector, false);
         if (session.capture_output_ == output) {
             seaside_output_capture_clear_output(session.capture_.get());
             session.capture_output_ = nullptr;
@@ -523,9 +806,41 @@ class Session {
         }
     }
 
+    static void output_observed(void *data, wlr_output *output, const char *connector,
+                                const char *identity, bool connected, const char *reason) noexcept {
+        auto &session = *static_cast<Session *>(data);
+        try {
+            session.outputs_.observe(output, connector, identity ? identity : "", connected,
+                                     reason);
+            session.publish();
+        } catch (...) {
+            session.fail("output-status");
+        }
+    }
+
+    void apply_detected_outputs() noexcept try {
+        if (!std::exchange(output_config_pending_, false)) {
+            return;
+        }
+        applying_config_ = true;
+        auto result = outputs_.apply(config_->transaction().active());
+        applying_config_ = false;
+        if (!result) {
+            auto error = std::move(result.error());
+            error.path = paths_.user.string();
+            last_error_ = seaside::ipc_diagnostic(error, "output");
+            std::fprintf(stderr, "seaside output settings: %s\n", error.message.c_str());
+        }
+        reposition_capture();
+        publish();
+    } catch (...) {
+        applying_config_ = false;
+        fail("output-settings");
+    }
+
     static int on_tick(void *data) noexcept {
         auto &session = *static_cast<Session *>(data);
-        if (session.stopping_) {
+        if (session.stopping_ || session.ipc_exiting_) {
             return 0;
         }
         auto display = seaside_tty_drm_observation(session.drm_);
@@ -545,6 +860,7 @@ class Session {
             return 0;
         }
         if (display.output_pending) {
+            session.apply_detected_outputs();
             seaside_tty_input_refresh_pointer(session.input_);
         }
         if (!session.gate_) {
@@ -564,7 +880,7 @@ class Session {
             display.cursor_presented) {
             session.mark_ready(display.cursor_plane_id);
         }
-        session.commands_.reap();
+        session.commands_->reap();
         if (!session.stopping_ &&
             wl_event_source_timer_update(session.timer_.get(), session.ready_ ? 100 : 25) < 0) {
             session.fail("observation-timer");
@@ -577,11 +893,15 @@ class Session {
     seaside_tty_drm *drm_;
     std::string_view socket_;
     wl_event_loop *loop_;
-    seaside::LoadedConfig config_;
-    seaside::ConfigStore &store_;
     const seaside::ConfigPaths &paths_;
-    Commands commands_;
+    std::vector<std::string> startup_commands_;
+    std::optional<Commands> commands_;
     seaside::Desktop desktop_;
+    seaside::OutputConfig outputs_;
+    seaside::SessionControl control_;
+    std::unique_ptr<LiveConfig> config_;
+    std::unique_ptr<seaside::IpcServer> ipc_;
+    IpcJson last_error_ = nullptr;
     seaside_tty_input *input_ = nullptr;
     wlr_output *capture_output_ = nullptr;
     std::unique_ptr<wl_event_source, decltype(&wl_event_source_remove)> timer_{
@@ -594,16 +914,21 @@ class Session {
     std::unique_ptr<seaside::PipeWireProbe> pipewire_;
     std::unique_ptr<seaside::PortalActivation> activation_;
     std::unique_ptr<seaside::PortalProbe> portal_;
-    std::unique_ptr<seaside::WorkQueue> workers_;
-    std::optional<seaside::AsyncConfigIo> config_io_;
     Clock::time_point appearance_deadline_, preflight_deadline_;
     Outcome outcome_;
+    bool attaching_startup_ = true;
+    bool applying_config_ = false;
+    bool output_config_pending_ = false;
+    bool config_error_visible_ = false;
+    bool ipc_exiting_ = false;
+    bool clean_exit_ = false;
     bool preflight_passed_ = false;
     bool ready_ = false;
     bool stopping_ = false;
 };
 
 std::expected<Outcome, const char *> run_session(seaside::LoadedConfig config,
+                                                 seaside::Wallpaper wallpaper,
                                                  seaside::ConfigStore &store,
                                                  const seaside::ConfigPaths &paths) {
     // The seat owner outlives Server, which releases the backend and its
@@ -632,7 +957,7 @@ std::expected<Outcome, const char *> run_session(seaside::LoadedConfig config,
     if ((*server)->shutdown_requested()) {
         return std::unexpected("shutdown-during-seat-setup");
     }
-    Session session{**server, **scene, drm.get(), *socket, std::move(config), store, paths};
+    Session session{**server, **scene, drm.get(), *socket, paths};
     const seaside_tty_input_callbacks callbacks{
         .motion = Session::pointer_motion,
         .exit_requested = nullptr,
@@ -650,11 +975,14 @@ std::expected<Outcome, const char *> run_session(seaside::LoadedConfig config,
     if (!input || !seaside_tty_input_enable_keyboard(input.get(), (*server)->display())) {
         return std::unexpected("input-or-wayland-keyboard");
     }
+    if (!session.observe(input.get())) {
+        return std::unexpected("observation-timer");
+    }
     if (!(*server)->start(pending_backend.release(), pending_renderer.release())) {
         return std::unexpected("backend-start");
     }
-    if (!session.observe(input.get())) {
-        return std::unexpected("observation-timer");
+    if (!session.configure(std::move(config), store, std::move(wallpaper))) {
+        return std::unexpected("configuration-or-ipc");
     }
     const bool dispatched = (*server)->run().has_value();
     auto result = session.shut_down();
@@ -715,12 +1043,27 @@ int main(int argc, char **) try {
         xdg_path("XDG_STATE_HOME", home_path / ".local/state") / "seaside/last-good-config.toml"};
     seaside::ConfigStore store;
     auto config = seaside::load_startup_config(store, paths);
-    if (config.diagnostic) {
-        const auto &error = *config.diagnostic;
-        std::fprintf(stderr, "seaside configuration: %s:%u:%u %s\n", error.path.c_str(), error.line,
-                     error.column, error.message.c_str());
+    auto wallpaper = seaside::decode_wallpaper(config.config.wallpaper.path);
+    if (!wallpaper) {
+        auto error = config.diagnostic ? *config.diagnostic : wallpaper.error();
+        if (!config.diagnostic) {
+            error.message += " (" + error.path + ")";
+            error.path = paths.user.string();
+        }
+        if (config.source == seaside::ConfigSource::user) {
+            if (auto recovered = read_recovery(store, paths, error)) {
+                wallpaper = seaside::decode_wallpaper(recovered->config.wallpaper.path);
+                if (wallpaper) {
+                    config = std::move(*recovered);
+                }
+            }
+        }
+        if (!wallpaper) {
+            config = startup_defaults(std::move(error));
+            wallpaper = seaside::Wallpaper{};
+        }
     }
-    return report_exit(run_session(std::move(config), store, paths));
+    return report_exit(run_session(std::move(config), std::move(*wallpaper), store, paths));
 } catch (const std::exception &error) {
     std::fprintf(stderr, "seaside FAIL: %s\n", error.what());
     return EXIT_FAILURE;

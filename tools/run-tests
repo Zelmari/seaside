@@ -814,6 +814,8 @@ def write_report(run_dir: Path, report: dict) -> None:
         lines.append("Part 3 full TTY startup and service preflight require the dedicated Arch VM trial.")
     if 5 in parts:
         lines.append("Part 5 layout behavior at the real TTY requires the dedicated Arch VM trial.")
+    if 6 in parts:
+        lines.append("Part 6 live reload and IPC at the real TTY require the dedicated Arch VM trial.")
     for row in report["commands"]:
         lines.append(f"{row['status'].upper()}: {row['id']} — {shlex.join(row['command'])}")
         if row.get("error") or row.get("cleanup_error"):

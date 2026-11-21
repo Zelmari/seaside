@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "tty_drm.h"
+#include "cursor_layout.h"
 
 #include <drm_fourcc.h>
 #include <errno.h>
@@ -72,10 +73,13 @@ struct tty_output {
     bool cursor_presented;
     bool commit_pending;
     bool movement_verified;
+    bool render_locked;
     uint32_t connector_id;
     uint32_t cursor_plane_id;
     uint32_t commit_seq;
-    int x, width, height;
+    int x, y, width, height;
+    uint64_t committed_frames, presented_frames, discarded_frames, last_presentation_ns;
+    const char *disabled_reason;
     int committed_x;
     int committed_y;
     int presented_x;
@@ -184,9 +188,25 @@ static void on_backend_destroy(struct wl_listener *listener, void *data) {
     drm->backend = NULL;
 }
 
+static char *output_identity(const struct wlr_output *output);
+
+static void observe_output(const struct tty_output *view, bool connected) {
+    const struct seaside_tty_drm *drm = view->owner;
+    if (drm->callbacks.observed) {
+        char *identity = output_identity(view->output);
+        drm->callbacks.observed(drm->callback_data, view->output, view->output->name, identity,
+                                connected, view->disabled_reason);
+        free(identity);
+    }
+}
+
 static void remove_usable_output(struct tty_output *view) {
     struct seaside_tty_drm *drm = view->owner;
     const bool notify = view->usable;
+    if (view->render_locked) {
+        wlr_output_lock_attach_render(view->output, false);
+        view->render_locked = false;
+    }
     view->usable = false;
     if (drm->pointer_output == view) {
         drm->pointer_output = NULL;
@@ -209,6 +229,8 @@ static void on_output_destroy(struct wl_listener *listener, void *data) {
     (void)data;
     struct tty_output *view = wl_container_of(listener, view, destroy);
     /* wlroots destroys the cursor after emitting the output destroy event. */
+    remove_usable_output(view);
+    observe_output(view, false);
     destroy_output_view(view);
 }
 
@@ -238,6 +260,7 @@ static void on_new_output(struct wl_listener *listener, void *data) {
     wl_list_init(&view->present.link);
     wl_list_insert(drm->outputs.prev, &view->link);
     wl_signal_add(&output->events.destroy, &view->destroy);
+    observe_output(view, true);
 }
 
 static bool is_cursor_plane(int fd, uint32_t plane_id) {
@@ -329,6 +352,7 @@ static void reject_output(struct tty_output *view, const char *reason) {
      * the output commit until outside input and page-flip callbacks. */
     wlr_output_cursor_destroy(view->cursor);
     view->cursor = NULL;
+    view->disabled_reason = reason;
     view->rejected = true;
     view->cursor_presented = false;
     view->commit_pending = false;
@@ -346,6 +370,7 @@ static void on_output_commit(struct wl_listener *listener, void *data) {
         reject_output(view, "hardware cursor was lost during frame commit");
         return;
     }
+    ++view->committed_frames;
     view->commit_seq = view->output->commit_seq;
     view->committed_x = (int)view->cursor->x;
     view->committed_y = (int)view->cursor->y;
@@ -356,6 +381,15 @@ static void on_output_present(struct wl_listener *listener, void *data) {
     struct tty_output *view = wl_container_of(listener, view, present);
     struct seaside_tty_drm *drm = view->owner;
     const struct wlr_output_event_present *event = data;
+    if (event->presented) {
+        ++view->presented_frames;
+        if (event->when.tv_sec >= 0 && event->when.tv_nsec >= 0) {
+            view->last_presentation_ns =
+                (uint64_t)event->when.tv_sec * 1000000000 + (uint64_t)event->when.tv_nsec;
+        }
+    } else {
+        ++view->discarded_frames;
+    }
     if (!view->commit_pending || event->commit_seq != view->commit_seq) {
         return;
     }
@@ -707,6 +741,7 @@ static void disable_output(struct tty_output *view) {
     if (view->output->enabled && !set_output_enabled(view->output, false, NULL)) {
         fprintf(stderr, "TTY DRM: could not disable output %s\n", view->output->name);
     }
+    observe_output(view, true);
 }
 
 static bool prepare_cursor_buffers(struct seaside_tty_drm *drm) {
@@ -787,12 +822,14 @@ static bool enable_output(struct tty_output *view, struct wlr_allocator *allocat
         drm->pointer_output = view;
     }
     view->usable = true;
+    view->disabled_reason = NULL;
     wl_signal_add(&output->events.commit, &view->commit);
     wl_signal_add(&output->events.present, &view->present);
     if (drm->callbacks.added) {
         char *identity = output_identity(output);
-        const bool attached = drm->callbacks.added(drm->callback_data, output, output->name,
-                                                   identity, view->x, 0, view->width, view->height);
+        const bool attached =
+            drm->callbacks.added(drm->callback_data, output, output->name, identity, view->x,
+                                 view->y, view->width, view->height);
         free(identity);
         if (!attached) {
             fail(drm, "could not attach an enabled DRM output");
@@ -808,30 +845,32 @@ static bool available(const struct tty_output *view) {
     return view && view->usable && !view->rejected;
 }
 
+static struct seaside_cursor_box cursor_box(const struct tty_output *view) {
+    return (struct seaside_cursor_box){view->x, view->y, view->width, view->height};
+}
+
 static struct tty_output *nearest_output(const struct seaside_tty_drm *drm, double x, double y,
                                          double *result_x, double *result_y) {
     struct tty_output *selected = NULL;
-    double best_x = 0;
-    double best_y = 0;
+    double best_distance = 0;
     struct tty_output *view;
     wl_list_for_each(view, &drm->outputs, link) {
         if (!available(view)) {
             continue;
         }
-        /* The logical boxes are half-open. Preserve subpixel motion through
-         * the last pixel so repeated small deltas can reach the next output. */
-        const double inside_x = clamp(x, view->x, view->x + view->width - 0.000001);
-        const double inside_y = clamp(y, 0, view->height - 0.000001);
-        /* Outputs are arranged in one horizontal row. Choose by the
-         * horizontal interval so a shorter neighbor remains reachable. */
-        const double dx = fabs(x - inside_x);
-        const double dy = fabs(y - inside_y);
-        if (!selected || dx < best_x || (dx == best_x && dy < best_y)) {
-            best_x = dx;
-            best_y = dy;
+        const struct seaside_cursor_point inside =
+            seaside_cursor_clamp(cursor_box(view), (struct seaside_cursor_point){x, y});
+        const double dx = x - inside.x;
+        const double dy = y - inside.y;
+        const double distance = dx * dx + dy * dy;
+        if (!selected || distance < best_distance) {
+            best_distance = distance;
             selected = view;
-            *result_x = inside_x;
-            *result_y = inside_y;
+            *result_x = inside.x;
+            *result_y = inside.y;
+            if (distance == 0) {
+                break;
+            }
         }
     }
     return selected;
@@ -850,10 +889,11 @@ static bool move_cursor(struct seaside_tty_drm *drm, double x, double y, bool co
     }
     drm->pointer_output = target;
     const double local_x = next_x - target->x;
+    const double local_y = next_y - target->y;
     const double scale = target->output->scale;
     const bool pixel_changed = (int)(local_x * scale) != (int)target->cursor->x ||
-                               (int)(next_y * scale) != (int)target->cursor->y;
-    if ((pixel_changed && !wlr_output_cursor_move(target->cursor, local_x, next_y)) ||
+                               (int)(local_y * scale) != (int)target->cursor->y;
+    if ((pixel_changed && !wlr_output_cursor_move(target->cursor, local_x, local_y)) ||
         !has_hardware_cursor(target) ||
         (target->cursor_visible != drm->cursor_visible &&
          !load_cursor_image(target, drm->cursor_visible))) {
@@ -866,6 +906,130 @@ static bool move_cursor(struct seaside_tty_drm *drm, double x, double y, bool co
     drm->cursor_x = next_x;
     drm->cursor_y = next_y;
     return true;
+}
+
+static struct tty_output *find_output(struct seaside_tty_drm *drm, struct wlr_output *output) {
+    struct tty_output *view;
+    wl_list_for_each(view, &drm->outputs, link) {
+        if (view->output == output) {
+            return view;
+        }
+    }
+    return NULL;
+}
+
+bool seaside_tty_drm_output_status(struct seaside_tty_drm *drm, struct wlr_output *output,
+                                   struct seaside_drm_output_status *status) {
+    struct tty_output *view = find_output(drm, output);
+    if (!view) {
+        return false;
+    }
+    *status = (struct seaside_drm_output_status){
+        .settings = {output->current_mode, output->width, output->height, output->refresh, view->x,
+                     view->y, 90 * (int)output->transform, output->scale,
+                     output->adaptive_sync_status == WLR_OUTPUT_ADAPTIVE_SYNC_ENABLED},
+        .logical_width = view->width,
+        .logical_height = view->height,
+        .cursor = has_hardware_cursor(view),
+        .adaptive_sync = output->adaptive_sync_status == WLR_OUTPUT_ADAPTIVE_SYNC_ENABLED,
+        .frame_pending = view->commit_pending,
+        .committed_frames = view->committed_frames,
+        .presented_frames = view->presented_frames,
+        .discarded_frames = view->discarded_frames,
+        .last_presentation_ns = view->last_presentation_ns,
+    };
+    return true;
+}
+
+bool seaside_tty_drm_select_mode(struct wlr_output *output,
+                                 struct seaside_drm_output_settings *settings) {
+    const struct wlr_output_mode *preferred = wlr_output_preferred_mode(output);
+    if (!preferred) {
+        return false;
+    }
+    const int width = settings->width ? settings->width : preferred->width;
+    const int height = settings->height ? settings->height : preferred->height;
+    struct wlr_output_mode *mode, *selected = NULL;
+    wl_list_for_each(mode, &output->modes, link) {
+        if (mode->width == width && mode->height == height &&
+            (!settings->refresh_millihz || mode->refresh == settings->refresh_millihz) &&
+            (!selected || selected->refresh < mode->refresh)) {
+            selected = mode;
+        }
+    }
+    if (!selected) {
+        return false;
+    }
+    settings->mode = selected;
+    settings->width = width;
+    settings->height = height;
+    settings->refresh_millihz = selected->refresh;
+    return true;
+}
+
+static bool configure_output(struct wlr_output *output,
+                             const struct seaside_drm_output_settings *settings, bool test) {
+    struct wlr_output_state state;
+    wlr_output_state_init(&state);
+    if (output->current_mode != settings->mode) {
+        wlr_output_state_set_mode(&state, settings->mode);
+    }
+    if (output->scale != settings->scale) {
+        wlr_output_state_set_scale(&state, settings->scale);
+    }
+    const enum wl_output_transform transform = settings->rotation / 90;
+    if (output->transform != transform) {
+        wlr_output_state_set_transform(&state, transform);
+    }
+    if ((output->adaptive_sync_status == WLR_OUTPUT_ADAPTIVE_SYNC_ENABLED) !=
+        settings->adaptive_sync) {
+        wlr_output_state_set_adaptive_sync_enabled(&state, settings->adaptive_sync);
+    }
+    const bool ok = !state.committed || (test ? wlr_output_test_state(output, &state)
+                                              : wlr_output_commit_state(output, &state));
+    wlr_output_state_finish(&state);
+    return ok;
+}
+
+bool seaside_tty_drm_check_settings(struct wlr_output *output,
+                                    const struct seaside_drm_output_settings *settings) {
+    return configure_output(output, settings, true);
+}
+
+bool seaside_tty_drm_apply_settings(struct seaside_tty_drm *drm, struct wlr_output *output,
+                                    const struct seaside_drm_output_settings *settings) {
+    struct tty_output *view = find_output(drm, output);
+    if (!available(view) || !configure_output(output, settings, false)) {
+        return false;
+    }
+    view->x = settings->x;
+    view->y = settings->y;
+    wlr_output_effective_resolution(output, &view->width, &view->height);
+    wlr_output_schedule_frame(output);
+    return true;
+}
+
+void seaside_tty_drm_set_direct_scanout(struct seaside_tty_drm *drm, struct wlr_output *output,
+                                        bool enabled) {
+    struct tty_output *view = find_output(drm, output);
+    if (available(view) && view->render_locked == enabled) {
+        wlr_output_lock_attach_render(output, !enabled);
+        view->render_locked = !enabled;
+        wlr_output_schedule_frame(output);
+    }
+}
+
+void seaside_tty_drm_reject_unrestorable(struct seaside_tty_drm *drm, struct wlr_output *output) {
+    struct tty_output *view = find_output(drm, output);
+    if (available(view)) {
+        reject_output(view, "could not restore output state after a failed config change");
+    }
+}
+
+void seaside_tty_drm_reconcile_cursor(struct seaside_tty_drm *drm) {
+    if (drm->evidence.active) {
+        move_cursor(drm, drm->cursor_x, drm->cursor_y, false);
+    }
 }
 
 bool seaside_tty_drm_enable_pending(struct seaside_tty_drm *drm, struct wlr_allocator *allocator,
@@ -938,8 +1102,9 @@ bool seaside_tty_drm_absolute_delta(const struct seaside_tty_drm *drm, double x,
         return false;
     }
     int left = INT_MAX;
-    int right = 0;
-    int height = 0;
+    int right = INT_MIN;
+    int top = INT_MAX;
+    int bottom = INT_MIN;
     struct tty_output *view;
     wl_list_for_each(view, &drm->outputs, link) {
         if (!available(view)) {
@@ -951,12 +1116,15 @@ bool seaside_tty_drm_absolute_delta(const struct seaside_tty_drm *drm, double x,
         if (view->x + view->width > right) {
             right = view->x + view->width;
         }
-        if (view->height > height) {
-            height = view->height;
+        if (view->y < top) {
+            top = view->y;
+        }
+        if (view->y + view->height > bottom) {
+            bottom = view->y + view->height;
         }
     }
-    *dx = left + clamp(x, 0, 1) * (right - left) - drm->cursor_x;
-    *dy = clamp(y, 0, 1) * height - drm->cursor_y;
+    *dx = left + clamp(x, 0, 1) * ((double)right - left) - drm->cursor_x;
+    *dy = top + clamp(y, 0, 1) * ((double)bottom - top) - drm->cursor_y;
     return true;
 }
 
@@ -974,35 +1142,26 @@ bool seaside_tty_drm_set_cursor_visible(struct seaside_tty_drm *drm, bool visibl
     return true;
 }
 
-/* Cross horizontal gaps left by a disconnected output without requiring a
- * single input event large enough to jump the gap. */
-static double cross_output_gap(const struct seaside_tty_drm *drm, double x) {
-    const struct tty_output *current = drm->pointer_output;
-    const bool right = x >= current->x + current->width;
-    if (!right && x >= current->x) {
-        return x;
+static struct seaside_cursor_point cross_output_gap(const struct seaside_tty_drm *drm,
+                                                    struct seaside_cursor_point target) {
+    const struct seaside_cursor_box current = cursor_box(drm->pointer_output);
+    if (seaside_cursor_contains(current, target)) {
+        return target;
     }
-    const struct tty_output *next = NULL;
-    struct tty_output *view;
+    const struct seaside_cursor_point origin = {drm->cursor_x, drm->cursor_y};
+    struct seaside_cursor_gap best = {0};
+    const struct tty_output *view;
     wl_list_for_each(view, &drm->outputs, link) {
-        if (!available(view)) {
+        if (!available(view) || view == drm->pointer_output) {
             continue;
         }
-        if (right ? (view->x > current->x && (!next || view->x < next->x))
-                  : (view->x < current->x && (!next || view->x > next->x))) {
-            next = view;
+        const struct seaside_cursor_box destination = cursor_box(view);
+        if (seaside_cursor_contains(destination, target)) {
+            return target;
         }
+        seaside_cursor_consider_gap(current, destination, origin, target, &best);
     }
-    if (!next) {
-        return x;
-    }
-    if (right && x < next->x) {
-        return x + next->x - (current->x + current->width);
-    }
-    if (!right && x >= next->x + next->width) {
-        return x - (current->x - next->x - next->width);
-    }
-    return x;
+    return best.found ? best.point : target;
 }
 
 bool seaside_tty_drm_move(struct seaside_tty_drm *drm, bool absolute, double x, double y) {
@@ -1013,9 +1172,12 @@ bool seaside_tty_drm_move(struct seaside_tty_drm *drm, bool absolute, double x, 
     if (absolute && !seaside_tty_drm_absolute_delta(drm, x, y, &x, &y)) {
         return false;
     }
-    const double target_x = drm->cursor_x + clamp(x, -INT_MAX, INT_MAX);
-    const double target_y = drm->cursor_y + clamp(y, -INT_MAX, INT_MAX);
-    return move_cursor(drm, absolute ? target_x : cross_output_gap(drm, target_x), target_y, true);
+    struct seaside_cursor_point target = {drm->cursor_x + clamp(x, -INT_MAX, INT_MAX),
+                                          drm->cursor_y + clamp(y, -INT_MAX, INT_MAX)};
+    if (!absolute) {
+        target = cross_output_gap(drm, target);
+    }
+    return move_cursor(drm, target.x, target.y, true);
 }
 
 bool seaside_tty_drm_change_vt(struct seaside_tty_drm *drm, unsigned vt) {

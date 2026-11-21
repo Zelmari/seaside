@@ -387,6 +387,23 @@ bool WindowManager::focus_on_output(std::string_view id) {
     return true;
 }
 
+void WindowManager::set_primary_output(std::string_view id) noexcept {
+    const auto found = outputs_.find(id);
+    if (found != outputs_.end() && found->second.connected) {
+        primary_output_ = found->first;
+    }
+}
+
+void WindowManager::set_initial_workspace_mode(WorkspaceMode mode) noexcept {
+    if (outputs_.empty() && workspaces_.empty() && windows_.empty()) {
+        mode_ = mode;
+    }
+}
+
+bool WindowManager::has_fullscreen(std::string_view id) const {
+    return fullscreen_on(id).has_value();
+}
+
 bool WindowManager::focus_output(std::string_view id) {
     finish_focus_cycle();
     return focus_on_output(id);
@@ -420,6 +437,18 @@ std::optional<std::string_view> WindowManager::window_output(WindowId id) const 
     return window ? workspace_output(window->home_workspace) : std::nullopt;
 }
 
+std::optional<std::string_view> WindowManager::workspace_owner(WorkspaceId id) const noexcept {
+    const auto entry = workspaces_.find(id);
+    if (entry != workspaces_.end() && entry->second.migration) {
+        return entry->second.migration->origin;
+    }
+    const auto *workspace = state_.workspace(id);
+    if (workspace && workspace->owner_or_last_output) {
+        return *workspace->owner_or_last_output;
+    }
+    return {};
+}
+
 bool WindowManager::select_workspace(WorkspaceId id) {
     if (!focused_output_) {
         return false;
@@ -445,16 +474,20 @@ bool WindowManager::select_workspace(WorkspaceId id) {
     return true;
 }
 
-bool WindowManager::transfer_workspace(std::string_view destination) {
-    auto workspace = focused_workspace();
-    if (!workspace || destination == focused_output_ || !state_.output(destination)) {
+bool WindowManager::transfer_workspace(std::string_view destination,
+                                       std::optional<WorkspaceId> target) {
+    const auto workspace = target ? target : focused_workspace();
+    const auto source = workspace ? workspace_output(*workspace) : std::nullopt;
+    const auto *source_state = source ? state_.output(*source) : nullptr;
+    const bool was_visible = source_state && source_state->shown == workspace;
+    if (!workspace || !state_.workspace(*workspace) || destination == source ||
+        !state_.output(destination)) {
         return false;
     }
     cancel_tile_move();
     finish_focus_cycle();
-    const auto source = *focused_output_;
     if (!state_.assign_workspace(*workspace, destination) ||
-        !show_workspace(destination, *workspace) || !show_fallback(source)) {
+        !show_workspace(destination, *workspace) || (was_visible && !show_fallback(*source))) {
         return false;
     }
     workspaces_.at(*workspace).migration.reset();

@@ -73,6 +73,8 @@ class State final {
     const WindowState *window(WindowId id) const noexcept;
     const WorkspaceState *workspace(WorkspaceId id) const noexcept;
     const OutputState *output(std::string_view id) const noexcept;
+    const auto &windows() const noexcept { return windows_; }
+    const auto &workspaces() const noexcept { return workspaces_; }
     std::expected<std::vector<WindowId>, StateError> mapped_windows(WorkspaceId id) const noexcept;
     bool valid() const noexcept;
     std::size_t output_count() const noexcept { return outputs_.size(); }

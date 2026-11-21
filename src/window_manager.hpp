@@ -32,10 +32,14 @@ class WindowManager final {
     bool remove_output(std::string_view id);
     bool update_output(std::string_view id, WindowRect bounds, WindowRect usable);
     bool focus_output(std::string_view id);
+    void set_primary_output(std::string_view id) noexcept;
+    bool has_fullscreen(std::string_view id) const;
     bool focus_output_at(double x, double y);
     std::optional<std::string_view> focused_output() const noexcept;
     std::optional<WindowRect> output_bounds(std::string_view id) const noexcept;
     std::optional<WorkspaceId> focused_workspace() const noexcept;
+    std::optional<std::string_view> workspace_output(WorkspaceId id) const noexcept;
+    std::optional<std::string_view> workspace_owner(WorkspaceId id) const noexcept;
     std::optional<std::string_view> window_output(WindowId id) const noexcept;
 
     std::optional<WindowId> create_window(std::optional<WindowId> parent = {});
@@ -56,7 +60,8 @@ class WindowManager final {
 
     bool select_workspace(WorkspaceId id);
     bool move_to_workspace(WindowId id, WorkspaceId destination);
-    bool transfer_workspace(std::string_view destination);
+    bool transfer_workspace(std::string_view destination,
+                            std::optional<WorkspaceId> target = std::nullopt);
 
     bool set_maximized(WindowId id, bool enabled);
     bool set_fullscreen(WindowId id, bool enabled);
@@ -74,6 +79,7 @@ class WindowManager final {
 
     const State &state() const noexcept { return state_; }
     WorkspaceMode workspace_mode() const noexcept { return mode_; }
+    void set_initial_workspace_mode(WorkspaceMode mode) noexcept;
 
   private:
     struct Output {
@@ -129,7 +135,6 @@ class WindowManager final {
     std::optional<WorkspaceId> fresh_workspace();
     bool show_workspace(std::string_view output, WorkspaceId workspace);
     bool show_fallback(std::string_view output);
-    std::optional<std::string_view> workspace_output(WorkspaceId workspace) const noexcept;
     bool focus_on_output(std::string_view id);
     bool relocate_window(WindowId id, WorkspaceId workspace);
     void remember_focus(WindowId id);

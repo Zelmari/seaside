@@ -1,12 +1,14 @@
 #define _POSIX_C_SOURCE 200809L
 #include "tty_input.h"
 
+#include <libinput.h>
 #include <limits.h>
 #include <linux/input-event-codes.h>
 #include <math.h>
 #include <stdlib.h>
 #include <time.h>
 #include <wlr/backend.h>
+#include <wlr/backend/libinput.h>
 #include <wlr/interfaces/wlr_keyboard.h>
 #include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_data_device.h>
@@ -42,6 +44,7 @@ struct seaside_tty_input {
     struct wl_listener group_leave;
     bool consumed[KEY_CNT];
     uint8_t modifiers;
+    double sensitivity;
     struct tty_device *gesture_device;
     uint32_t gesture_button;
     bool gesture_released;
@@ -70,6 +73,7 @@ struct tty_device {
     struct wl_listener axis;
     struct wl_listener frame;
     struct wlr_keyboard *keyboard;
+    struct libinput_device *pointer_device;
     bool consumed_buttons[KEY_CNT];
     bool direct_key;
 };
@@ -734,6 +738,25 @@ static void handle_group_leave(struct wl_listener *listener, void *data) {
     deliver_modifiers(input, &input->group->keyboard.modifiers);
 }
 
+static void configure_pointer(struct libinput_device *device, double sensitivity) {
+    if (device && libinput_device_config_accel_is_available(device) &&
+        (libinput_device_config_accel_get_profiles(device) & LIBINPUT_CONFIG_ACCEL_PROFILE_FLAT)) {
+        libinput_device_config_accel_set_profile(device, LIBINPUT_CONFIG_ACCEL_PROFILE_FLAT);
+        libinput_device_config_accel_set_speed(device, sensitivity);
+    }
+}
+
+void seaside_tty_input_set_sensitivity(struct seaside_tty_input *input, double sensitivity) {
+    if (!input) {
+        return;
+    }
+    input->sensitivity = sensitivity;
+    struct tty_device *device;
+    wl_list_for_each(device, &input->devices, link) {
+        configure_pointer(device->pointer_device, sensitivity);
+    }
+}
+
 static void handle_new_input(struct wl_listener *listener, void *data) {
     struct seaside_tty_input *input = wl_container_of(listener, input, new_input);
     struct wlr_input_device *base = data;
@@ -761,6 +784,10 @@ static void handle_new_input(struct wl_listener *listener, void *data) {
 
     if (base->type == WLR_INPUT_DEVICE_POINTER) {
         struct wlr_pointer *pointer = wlr_pointer_from_input_device(base);
+        if (wlr_input_device_is_libinput(base)) {
+            device->pointer_device = wlr_libinput_get_device_handle(base);
+            configure_pointer(device->pointer_device, input->sensitivity);
+        }
         device->event.notify = handle_relative_motion;
         device->absolute_motion.notify = handle_absolute_motion;
         device->button.notify = handle_pointer_button;

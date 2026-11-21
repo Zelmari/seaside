@@ -8,6 +8,7 @@ struct wl_display;
 struct wlr_allocator;
 struct wlr_backend;
 struct wlr_output;
+struct wlr_output_mode;
 struct wlr_renderer;
 struct seaside_tty_drm;
 
@@ -15,6 +16,25 @@ struct seaside_tty_drm_output_callbacks {
     bool (*added)(void *data, struct wlr_output *output, const char *name, const char *identity,
                   int x, int y, int width, int height);
     void (*removed)(void *data, struct wlr_output *output, const char *name);
+    void (*observed)(void *data, struct wlr_output *output, const char *name, const char *identity,
+                     bool connected, const char *disabled_reason);
+};
+
+struct seaside_drm_output_settings {
+    struct wlr_output_mode *mode;
+    int width, height, refresh_millihz;
+    int x, y, rotation;
+    float scale;
+    bool adaptive_sync;
+};
+
+struct seaside_drm_output_status {
+    struct seaside_drm_output_settings settings;
+    int logical_width, logical_height;
+    bool cursor;
+    bool adaptive_sync;
+    bool frame_pending;
+    uint64_t committed_frames, presented_frames, discarded_frames, last_presentation_ns;
 };
 
 struct seaside_tty_drm_observation {
@@ -58,6 +78,20 @@ void seaside_tty_drm_set_output_callbacks(struct seaside_tty_drm *drm,
  * individually. Other outputs and the server can keep running. */
 bool seaside_tty_drm_enable_pending(struct seaside_tty_drm *drm, struct wlr_allocator *allocator,
                                     struct wlr_renderer *renderer);
+
+/* These handles and the selected mode are borrowed for one loop turn. */
+bool seaside_tty_drm_output_status(struct seaside_tty_drm *drm, struct wlr_output *output,
+                                   struct seaside_drm_output_status *status);
+bool seaside_tty_drm_select_mode(struct wlr_output *output,
+                                 struct seaside_drm_output_settings *settings);
+bool seaside_tty_drm_check_settings(struct wlr_output *output,
+                                    const struct seaside_drm_output_settings *settings);
+bool seaside_tty_drm_apply_settings(struct seaside_tty_drm *drm, struct wlr_output *output,
+                                    const struct seaside_drm_output_settings *settings);
+void seaside_tty_drm_set_direct_scanout(struct seaside_tty_drm *drm, struct wlr_output *output,
+                                        bool enabled);
+void seaside_tty_drm_reject_unrestorable(struct seaside_tty_drm *drm, struct wlr_output *output);
+void seaside_tty_drm_reconcile_cursor(struct seaside_tty_drm *drm);
 
 /* First-output qualification fixture. The result is borrowed. */
 struct wlr_output *seaside_tty_drm_enable(struct seaside_tty_drm *drm,

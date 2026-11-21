@@ -21,13 +21,19 @@ wayland_client = dependency('wayland-client')
 wayland_protocols = dependency('wayland-protocols')
 pixman = dependency('pixman-1')
 libdrm = dependency('libdrm')
+libinput = dependency('libinput')
 threads = dependency('threads')
 python = import('python').find_installation('python3')
 gtest = dependency('gtest_main', version: '>=1.14.0', method: 'pkg-config')
 tomlplusplus = dependency('tomlplusplus', version: ['>=3.4.0', '<3.5.0'], method: 'pkg-config')
+nlohmann_json = dependency('nlohmann_json', version: '>=3.11.0', method: 'pkg-config')
 xkbcommon = dependency('xkbcommon', method: 'pkg-config')
 systemd = dependency('libsystemd', method: 'pkg-config')
 pipewire = dependency('libpipewire-0.3', method: 'pkg-config', include_type: 'system')
+libpng = dependency('libpng')
+turbojpeg = dependency('libturbojpeg', version: '>=3.0.0')
+libwebp = dependency('libwebp')
+pangocairo = dependency('pangocairo', include_type: 'system')
 find_program('dbus-daemon')
 find_program('pipewire')
 wayland_scanner = find_program('wayland-scanner')
@@ -38,6 +44,15 @@ xdg_shell_client_header = custom_target(
 )
 xdg_shell_private_code = custom_target(
   'xdg-shell-private-code', input: xdg_shell_xml, output: 'xdg-shell-protocol.c',
+  command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'],
+)
+activation_xml = wayland_protocols.get_variable(pkgconfig: 'pkgdatadir') / 'staging/xdg-activation/xdg-activation-v1.xml'
+activation_client_header = custom_target(
+  'xdg-activation-client-header', input: activation_xml, output: 'xdg-activation-v1-client-protocol.h',
+  command: [wayland_scanner, 'client-header', '@INPUT@', '@OUTPUT@'],
+)
+activation_private_code = custom_target(
+  'xdg-activation-private-code', input: activation_xml, output: 'xdg-activation-v1-protocol.c',
   command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'],
 )
 pointer_protocols = []
@@ -128,19 +143,36 @@ if not cpp.compiles('''
   error('Seaside requires C++23 std::expected and std::jthread support.')
 endif
 
+work_foundation = static_library(
+  'seaside-work-foundation', 'src/work_queue.cpp',
+  include_directories: include_directories('src'),
+  dependencies: [wayland_server, threads], install: false,
+)
+
 core = static_library(
   'seaside-core',
   ['src/server.cpp', 'src/server_c.cpp', 'src/wlroots_bridge.c',
-   'src/scene.cpp', 'src/scene_bridge.c'],
+   'src/scene.cpp', 'src/scene_bridge.c', 'src/render_assets.cpp'],
   include_directories: include_directories('src'),
-  dependencies: [wlroots, wayland_server, pixman, threads],
+  dependencies: [wlroots, wayland_server, pixman, threads, libdrm, libpng, turbojpeg, libwebp, pangocairo],
+  link_with: work_foundation,
   install: false,
 )
 
 tty_foundation = static_library(
-  'seaside-tty-foundation', ['src/tty_drm.c', 'src/tty_input.c'],
+  'seaside-tty-foundation', ['src/tty_drm.c', 'src/tty_input.c', 'src/cursor_layout.c'],
   include_directories: include_directories('src'),
-  dependencies: [wlroots, wayland_server, pixman, libdrm, xkbcommon], install: false,
+  dependencies: [wlroots, wayland_server, pixman, libdrm, libinput, xkbcommon,
+                 meson.get_compiler('c').find_library('m')], install: false,
+)
+
+cursor_layout_tests = executable(
+  'seaside-cursor-layout-tests', 'tests/unit/cursor_layout_test.cpp',
+  include_directories: include_directories('src'),
+  dependencies: gtest, link_with: tty_foundation, install: false,
+)
+test('part6-cursor-layout', cursor_layout_tests, suite: ['unit', 'part6'], timeout: 10,
+  env: {'SEASIDE_GTEST': '1', 'SEASIDE_TEST_PART': '6', 'SEASIDE_REQUIREMENTS': '5.2,6.2,12.2b'},
 )
 
 tty_fixture = executable(
@@ -179,10 +211,11 @@ test('part3-tty-terminal-child', tty_terminal_test, suite: ['unit', 'part3'], ti
 config_foundation = static_library(
   'seaside-config-foundation',
   ['src/config.cpp', 'src/bindings.cpp', 'src/config_store.cpp',
-   'src/config_transaction.cpp', 'src/work_queue.cpp', 'src/state.cpp'],
+   'src/config_transaction.cpp', 'src/live_config.cpp', 'src/state.cpp'],
   include_directories: include_directories('src'),
   dependencies: [tomlplusplus, xkbcommon, wayland_server, threads],
   cpp_args: ['-DTOML_ENABLE_UNRELEASED_FEATURES=0'],
+  link_with: work_foundation,
   install: false,
 )
 
@@ -293,15 +326,40 @@ test('part3-session-activation', session_activation_tests, suite: ['unit', 'part
   env: {'SEASIDE_GTEST': '1', 'SEASIDE_TEST_PART': '3', 'SEASIDE_REQUIREMENTS': '3.1,12.2b'},
 )
 
-seaside = executable(
-  'seaside', 'src/session_entry.cpp',
+ipc_foundation = static_library(
+  'seaside-ipc-foundation', ['src/ipc.cpp', 'src/ipc_protocol.cpp'],
   include_directories: include_directories('src'),
-  dependencies: [wlroots, wayland_server, pixman, libdrm, systemd, pipewire, xkbcommon, threads],
+  dependencies: [nlohmann_json, wayland_server],
+  link_with: config_foundation, install: false,
+)
+seasidectl = executable(
+  'seasidectl', 'src/seasidectl.cpp',
+  include_directories: include_directories('src'),
+  dependencies: nlohmann_json, link_with: ipc_foundation, install: true,
+)
+ipc_tests = executable(
+  'seaside-ipc-tests', 'tests/unit/ipc_test.cpp',
+  include_directories: include_directories('src', 'tests/unit'),
+  dependencies: [gtest, nlohmann_json, wayland_server], link_with: ipc_foundation, install: false,
+)
+test('part6-ipc', ipc_tests, suite: ['unit', 'part6'], timeout: 20,
+  env: {'SEASIDE_GTEST': '1', 'SEASIDE_TEST_PART': '6', 'SEASIDE_REQUIREMENTS': '10,12.2b'},
+)
+test('part6-cli', python, args: [files('tests/integration/test_seasidectl.py'), seasidectl],
+  suite: ['integration', 'part6'], timeout: 30,
+  env: {'SEASIDE_TEST_PART': '6', 'SEASIDE_REQUIREMENTS': '10,12.2b'},
+)
+
+seaside = executable(
+  'seaside', ['src/session_entry.cpp', 'src/session_control.cpp', 'src/output_config.cpp'],
+  include_directories: include_directories('src'),
+  dependencies: [wlroots, wayland_server, pixman, libdrm, systemd, pipewire, xkbcommon, threads, nlohmann_json],
   link_with: [core, tty_foundation, config_foundation, capture_foundation, session_foundation,
-              desktop_foundation],
+              desktop_foundation, ipc_foundation],
   install: true,
 )
 install_data('packaging/seaside-portals.conf', install_dir: get_option('datadir') / 'xdg-desktop-portal')
+install_data('packaging/black.png', install_dir: get_option('datadir') / 'seaside' / 'wallpapers')
 test('part3-session-entry-guard', python,
   args: [files('tests/integration/test_session_entry.py'), seaside],
   suite: ['integration', 'part3'], timeout: 15,
@@ -329,10 +387,22 @@ test('part3-headless-session', part3_fixture, suite: ['integration', 'part3'], t
   env: {'SEASIDE_TEST_PART': '3', 'SEASIDE_REQUIREMENTS': '2.1,2.2,3,12.2b'},
 )
 
+appearance_tests = executable(
+  'seaside-appearance-tests',
+  ['tests/unit/render_assets_test.cpp', 'tests/integration/part6_appearance.cpp',
+   'tests/integration/part3_bridge.c'],
+  include_directories: include_directories('src', 'tests/unit', 'tests/integration'),
+  dependencies: [gtest, wlroots, wayland_server, pixman, libdrm, libpng, turbojpeg, libwebp],
+  link_with: core, install: false,
+)
+test('part6-scene-appearance', appearance_tests, suite: ['integration', 'part6'], timeout: 20,
+  env: {'SEASIDE_GTEST': '1', 'SEASIDE_TEST_PART': '6', 'SEASIDE_REQUIREMENTS': '2,8.1,12.2b'},
+)
+
 part4_fixture = executable(
   'seaside-part4-fixture',
   ['tests/integration/part4.cpp', 'tests/integration/part3_bridge.c',
-   xdg_shell_client_header, xdg_shell_private_code],
+   xdg_shell_client_header, xdg_shell_private_code, activation_client_header, activation_private_code],
   include_directories: include_directories('src', 'tests/integration'),
   dependencies: [wlroots, wayland_server, wayland_client, pixman, libdrm, xkbcommon, threads],
   link_with: [desktop_foundation, core, tty_foundation, config_foundation], install: false,
@@ -345,6 +415,9 @@ test('part5-headless-dwindle', part4_fixture, args: ['dwindle'], suite: ['integr
 )
 test('part5-headless-scrolling', part4_fixture, args: ['scrolling'], suite: ['integration', 'part5'],
   timeout: 30, env: {'SEASIDE_TEST_PART': '5', 'SEASIDE_REQUIREMENTS': '4.3,4.4,5,6.2,12.2b'},
+)
+test('part6-headless-attention', part4_fixture, args: ['attention'], suite: ['integration', 'part6'],
+  timeout: 30, env: {'SEASIDE_TEST_PART': '6', 'SEASIDE_REQUIREMENTS': '6.1,8.1,10.4,12.2b'},
 )
 
 portal_smoke = executable(
@@ -421,6 +494,15 @@ config_tests = executable(
 test('part2-config', config_tests, suite: ['unit', 'part2'], timeout: 60,
   env: {'SEASIDE_GTEST': '1', 'SEASIDE_TEST_PART': '2', 'SEASIDE_REQUIREMENTS': '8.1,8.2,8.3,9'},
 )
+live_config_tests = executable(
+  'seaside-live-config-tests', 'tests/unit/live_config_test.cpp',
+  include_directories: include_directories('src', 'tests/unit'),
+  dependencies: [tomlplusplus, xkbcommon, wayland_server, threads, gtest],
+  link_with: config_foundation, install: false,
+)
+test('part6-live-config', live_config_tests, suite: ['unit', 'part6'], timeout: 30,
+  env: {'SEASIDE_GTEST': '1', 'SEASIDE_TEST_PART': '6', 'SEASIDE_REQUIREMENTS': '8.1,8.2,8.3,9'},
+)
 state_tests = executable(
   'seaside-state-tests',
   ['tests/unit/work_queue_test.cpp', 'tests/unit/state_test.cpp'],
@@ -468,10 +550,13 @@ summary({
   'Protocol XML package': wayland_protocols.version(),
   'libdrm': libdrm.version(),
   'Fixture renderer': 'pixman, offscreen tests only',
-  'Installed product targets': 'seaside TTY session',
+  'Installed product targets': 'seaside TTY session, seasidectl',
   'C++ standard': 'C++23',
   'GoogleTest': gtest.version(),
   'TOML parser (strict 1.0)': tomlplusplus.version(),
+  'JSONL IPC library': nlohmann_json.version(),
+  'Wallpaper codecs': [libpng.version(), turbojpeg.version(), libwebp.version()],
+  'Configuration banner PangoCairo': pangocairo.version(),
   'XKB keysyms': xkbcommon.version(),
   'D-Bus client API': systemd.version(),
   'PipeWire client API': pipewire.version(),

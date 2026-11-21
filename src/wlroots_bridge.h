@@ -23,6 +23,7 @@ struct wlr_compositor *seaside_wlr_compositor_create(struct wl_display *display,
 bool seaside_wlr_backend_start(struct wlr_backend *backend);
 void seaside_wlr_backend_destroy(struct wlr_backend *backend);
 void seaside_wlr_allocator_destroy(struct wlr_allocator *allocator);
+const char *seaside_wlr_renderer_name(struct wlr_renderer *renderer);
 void seaside_wlr_renderer_destroy(struct wlr_renderer *renderer);
 
 #ifdef __cplusplus
