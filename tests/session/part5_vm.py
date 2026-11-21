@@ -2,6 +2,7 @@
 """Exercise Part 5 on the dedicated Arch guest through the Council VM runner."""
 
 import argparse
+from contextlib import contextmanager
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 import re
@@ -92,17 +93,20 @@ def load_runner():
     return runner
 
 
-def run(args, revision, bundle):
+def run(args, revision, bundle, *, scenario="part5", captures=None, send_input=route,
+        settings=""):
     runner = load_runner()
-    runner.ARTIFACTS.update(CAPTURES | {"dwindle.log", "scrolling.log"})
+    if captures is None:
+        captures = CAPTURES | {"dwindle.log", "scrolling.log"}
+    runner.ARTIFACTS.update(captures)
     standard_worker = COUNCIL.with_name("guest_trial.py").read_text()
-    scenarios = Path(__file__).with_name("part5_vm_guest.py").read_text()
+    scenarios = Path(__file__).with_name(f"{scenario}_vm_guest.py").read_text()
     worker = ("standard = {'__name__': 'seaside_vm_guest'}\n"
               f"exec(compile({standard_worker!r}, 'guest_trial.py', 'exec'), standard)\n"
-              + scenarios).encode()
+              + settings + scenarios).encode()
     parent = runner.RunBridge
 
-    class Part5Bridge(parent):
+    class ScenarioBridge(parent):
         def __init__(self, directory, token):
             super().__init__(directory, token)
             queue = self.events
@@ -113,9 +117,9 @@ def run(args, revision, bundle):
                 def get(self, timeout):
                     deadline = time.monotonic() + timeout
                     message = queue.get(timeout=timeout)
-                    while message["phase"] == "part5-input":
+                    while message["phase"] == f"{scenario}-input":
                         runner.save_event(directory, message)
-                        route(runner, args.vm, message)
+                        send_input(runner, args.vm, message)
                         message = queue.get(timeout=max(0, deadline - time.monotonic()))
                     return message
 
@@ -136,8 +140,23 @@ def run(args, revision, bundle):
 
             return BundleHandler
 
-    runner.RunBridge = Part5Bridge
+    runner.RunBridge = ScenarioBridge
     return runner.run(args.vm, "tty" if args.tty_only else "run", revision, args.state)
+
+
+@contextmanager
+def revision_bundle():
+    revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True,
+                                       timeout=5).strip()
+    if not re.fullmatch("[0-9a-f]{40}", revision):
+        raise RuntimeError("Expected an exact Git revision")
+    with tempfile.TemporaryDirectory(prefix="seaside-vm-bundle-") as name:
+        archive = Path(name) / "revision.bundle"
+        subprocess.run(["git", "bundle", "create", str(archive), "HEAD"], cwd=ROOT, check=True,
+                       timeout=30)
+        if archive.stat().st_size > BUNDLE_LIMIT:
+            raise RuntimeError("The revision bundle exceeds the test limit")
+        yield revision, archive.read_bytes()
 
 
 def main():
@@ -148,17 +167,8 @@ def main():
     parser.add_argument("--state", type=Path, default=Path.home() / ".local/state/seaside-vm")
     parser.add_argument("--tty-only", action="store_true")
     args = parser.parse_args()
-    revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True,
-                                       timeout=5).strip()
-    if not re.fullmatch("[0-9a-f]{40}", revision):
-        raise RuntimeError("Expected an exact Git revision")
-    with tempfile.TemporaryDirectory(prefix="seaside-part5-bundle-") as name:
-        archive = Path(name) / "revision.bundle"
-        subprocess.run(["git", "bundle", "create", str(archive), "HEAD"], cwd=ROOT, check=True,
-                       timeout=30)
-        if archive.stat().st_size > BUNDLE_LIMIT:
-            raise RuntimeError("The revision bundle exceeds the test limit")
-        return run(args, revision, archive.read_bytes())
+    with revision_bundle() as (revision, bundle):
+        return run(args, revision, bundle)
 
 
 if __name__ == "__main__":
