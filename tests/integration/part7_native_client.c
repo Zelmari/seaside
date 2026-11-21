@@ -24,6 +24,7 @@ struct client {
     int32_t height;
     uint32_t pixel;
     bool dirty;
+    bool fixed_size;
     bool configured;
     bool stop;
     bool failed;
@@ -132,7 +133,7 @@ static void toplevel_configured(void *data, struct xdg_toplevel *toplevel, int32
     (void)toplevel;
     (void)states;
     struct client *client = data;
-    if (width > 0 && height > 0 && width <= 4096 && height <= 4096 &&
+    if (!client->fixed_size && width > 0 && height > 0 && width <= 4096 && height <= 4096 &&
         (width != client->width || height != client->height)) {
         client->width = width;
         client->height = height;
@@ -260,8 +261,11 @@ static void destroy_client(struct client *client, struct wl_registry *registry) 
 
 int main(int argc, char **argv) {
     struct client client = {.width = 264, .height = 176, .dirty = true};
-    if (argc != 3 || !parse_pixel(argv[2], &client.pixel)) {
-        fputs("Usage: seaside-part7-native-client TITLE RRGGBB\n", stderr);
+    if (argc == 4 && strcmp(argv[3], "--fixed-size") == 0) {
+        client.fixed_size = true;
+    }
+    if ((argc != 3 && !client.fixed_size) || !parse_pixel(argv[2], &client.pixel)) {
+        fputs("Usage: seaside-part7-native-client TITLE RRGGBB [--fixed-size]\n", stderr);
         return EXIT_FAILURE;
     }
     setvbuf(stdout, NULL, _IOLBF, 0);
