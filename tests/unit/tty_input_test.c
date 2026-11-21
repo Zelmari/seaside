@@ -202,7 +202,7 @@ struct keyboard_client {
     unsigned key_events;
     uint32_t key;
     uint32_t key_state;
-    uint32_t key_serial, button_serial, pointer_enter_serial;
+    uint32_t key_serial, button_serial;
     uint32_t depressed;
     bool data_device_manager;
     uint32_t data_manager_name, primary_manager_name;
@@ -301,10 +301,10 @@ static const struct wl_keyboard_listener keyboard_listener = {
 static void pointer_enter(void *data, struct wl_pointer *pointer, uint32_t serial,
                           struct wl_surface *surface, wl_fixed_t sx, wl_fixed_t sy) {
     (void)pointer;
+    (void)serial;
     (void)surface;
     struct keyboard_client *client = data;
     ++client->pointer_enters;
-    client->pointer_enter_serial = serial;
     client->pointer_x = wl_fixed_to_double(sx);
     client->pointer_y = wl_fixed_to_double(sy);
 }
@@ -1124,6 +1124,17 @@ static void primary_source_cancelled(void *data, struct zwp_primary_selection_so
     ++((struct test_source *)data)->cancelled;
 }
 
+static struct zwp_primary_selection_source_v1 *
+create_primary_source(struct data_client *client, struct test_source *observation) {
+    static const struct zwp_primary_selection_source_v1_listener listener = {
+        .send = primary_source_send, .cancelled = primary_source_cancelled};
+    struct zwp_primary_selection_source_v1 *source =
+        zwp_primary_selection_device_manager_v1_create_source(client->primary_manager);
+    zwp_primary_selection_source_v1_add_listener(source, &listener, observation);
+    zwp_primary_selection_source_v1_offer(source, mime);
+    return source;
+}
+
 static void data_offer_type(void *data, struct wl_data_offer *offer, const char *type) {
     (void)offer;
     check(strcmp(type, mime) == 0, "unexpected data offer MIME type");
@@ -1332,13 +1343,7 @@ static void exercise_data_device(void) {
     struct test_source clipboard = {.payload = "clipboard"};
     struct test_source primary = {.payload = "primary"};
     struct wl_data_source *clipboard_source = create_data_source(&left, &clipboard);
-    struct zwp_primary_selection_source_v1 *primary_source =
-        zwp_primary_selection_device_manager_v1_create_source(left.primary_manager);
-    static const struct zwp_primary_selection_source_v1_listener primary_source_listener = {
-        .send = primary_source_send, .cancelled = primary_source_cancelled};
-    zwp_primary_selection_source_v1_add_listener(primary_source, &primary_source_listener,
-                                                 &primary);
-    zwp_primary_selection_source_v1_offer(primary_source, mime);
+    struct zwp_primary_selection_source_v1 *primary_source = create_primary_source(&left, &primary);
     wl_data_device_set_selection(left.device, clipboard_source, left_serial);
     zwp_primary_selection_device_v1_set_selection(left.primary_device, primary_source, left_serial);
     round_trip(server, sender);
@@ -1346,6 +1351,7 @@ static void exercise_data_device(void) {
     check(left.selection && left.primary && !right.selection && !right.primary,
           "unfocused client received a clipboard or primary offer");
 
+    const uint32_t delayed_serial = data_key_serial(server, &left, &keyboard);
     seaside_tty_input_set_focus(scene.input, scene.surfaces[1]);
     data_key_serial(server, &right, &keyboard);
     check(right.clipboard_mimes == 1 && right.primary_mimes == 1,
@@ -1355,23 +1361,38 @@ static void exercise_data_device(void) {
     round_trip(server, receiver);
     check(right.selection && right.primary, "foreign serial cleared a focused selection");
 
-    // Hovering creates a valid pointer serial without transferring keyboard focus.
-    seaside_tty_input_refresh_pointer(scene.input);
-    round_trip(server, sender);
-    const uint32_t hover_serial = left.pointer.events.pointer_enter_serial;
-    check(hover_serial != 0 && hover_serial != left_serial, "background client did not see hover");
-    wl_data_device_set_selection(left.device, NULL, hover_serial);
-    zwp_primary_selection_device_v1_set_selection(left.primary_device, NULL, hover_serial);
-    round_trip(server, sender);
     expect_payload(server, &left, &right, right.selection, NULL, clipboard.payload);
     expect_payload(server, &left, &right, NULL, right.primary, primary.payload);
     check(clipboard.sends == 1 && primary.sends == 1, "selection sources were not each read once");
+
+    // X11 MIME negotiation can finish after the user already changed focus.
+    struct test_source later_clipboard = {.payload = "delayed clipboard"};
+    struct test_source later_primary = {.payload = "delayed primary"};
+    struct wl_data_source *delayed_clipboard = create_data_source(&left, &later_clipboard);
+    struct zwp_primary_selection_source_v1 *delayed_primary =
+        create_primary_source(&left, &later_primary);
+    wl_data_device_set_selection(left.device, delayed_clipboard, delayed_serial);
+    zwp_primary_selection_device_v1_set_selection(left.primary_device, delayed_primary,
+                                                  delayed_serial);
+    wl_data_device_set_selection(left.device, NULL, left_serial);
+    zwp_primary_selection_device_v1_set_selection(left.primary_device, NULL, left_serial);
+    round_trip(server, sender);
+    round_trip(server, receiver);
+    check(seat->keyboard_state.focused_surface == scene.surfaces[1] && clipboard.cancelled == 1 &&
+              primary.cancelled == 1,
+          "delayed selection did not replace its predecessor with focus preserved");
+    expect_payload(server, &left, &right, right.selection, NULL, later_clipboard.payload);
+    expect_payload(server, &left, &right, NULL, right.primary, later_primary.payload);
+
     wl_data_source_destroy(clipboard_source);
     zwp_primary_selection_source_v1_destroy(primary_source);
+    wl_data_source_destroy(delayed_clipboard);
+    zwp_primary_selection_source_v1_destroy(delayed_primary);
     round_trip(server, sender);
     round_trip(server, receiver);
     check(!right.selection && !right.primary, "source teardown left a cached selection");
 
+    seaside_tty_input_refresh_pointer(scene.input);
     struct test_source drag = {.payload = "dropped"};
     struct wl_data_source *drag_source = create_data_source(&left, &drag);
     const uint32_t copy = WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY;

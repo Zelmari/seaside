@@ -442,19 +442,13 @@ static void handle_keyboard_grab_end(struct wl_listener *listener, void *data) {
     refresh_focus(input);
 }
 
-static bool focused_selection_serial(struct wlr_seat *seat, uint32_t serial) {
-    /* wlroots already checked the serial against the requesting client. The
-     * focused client's serials also rule out writes using background input. */
-    struct wlr_seat_client *focused = seat->keyboard_state.focused_client;
-    return focused && wlr_seat_client_validate_event_serial(focused, serial);
-}
-
 static void handle_selection(struct wl_listener *listener, void *data) {
     struct seaside_tty_input *input = wl_container_of(listener, input, request_selection);
     const struct wlr_seat_request_set_selection_event *event = data;
     struct wlr_seat *seat = input->seat;
-    if (focused_selection_serial(seat, event->serial) &&
-        (!event->source || event->source != seat->drag_source)) {
+    /* wlroots has validated the serial against the requesting seat client.
+     * Satellite may finish negotiating X11 MIME types after focus moves. */
+    if (!event->source || event->source != seat->drag_source) {
         wlr_seat_set_selection(seat, event->source, event->serial);
     }
 }
@@ -462,9 +456,7 @@ static void handle_selection(struct wl_listener *listener, void *data) {
 static void handle_primary_selection(struct wl_listener *listener, void *data) {
     struct seaside_tty_input *input = wl_container_of(listener, input, request_primary_selection);
     const struct wlr_seat_request_set_primary_selection_event *event = data;
-    if (focused_selection_serial(input->seat, event->serial)) {
-        wlr_seat_set_primary_selection(input->seat, event->source, event->serial);
-    }
+    wlr_seat_set_primary_selection(input->seat, event->source, event->serial);
 }
 
 static void handle_drag_destroy(struct wl_listener *listener, void *data) {

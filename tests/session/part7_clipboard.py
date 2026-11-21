@@ -28,6 +28,7 @@ def client(title):
     window = bind(gtk, "gtk_window_new", ptr, num)(0)
     bind(gtk, "gtk_window_set_title", None, ptr, word)(window, title.encode())
     bind(gtk, "gtk_window_set_default_size", None, ptr, num, num)(window, 240, 120)
+    bind(gtk, "gtk_window_set_decorated", None, ptr, num)(window, 0)
     bind(gtk, "gtk_widget_show_all", None, ptr)(window)
     clipboard_get = bind(gtk, "gtk_clipboard_get", ptr, ptr)
     intern = bind(gdk, "gdk_atom_intern_static_string", ptr, word)
