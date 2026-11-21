@@ -4,13 +4,16 @@
 #include "wlroots_bridge.h"
 #include "xdg-shell-client-protocol.h"
 
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <linux/input-event-codes.h>
 #include <memory>
 #include <poll.h>
+#include <string_view>
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -21,17 +24,23 @@ namespace {
 
 using seaside::Action;
 using seaside::ActionKind;
+using seaside::Direction;
 using seaside::WindowId;
 using seaside::WindowRect;
 
 constexpr WindowRect output_bounds{0, 0, 160, 90};
 constexpr int ordinary_width = 48;
 constexpr int ordinary_height = 32;
+constexpr std::uint8_t super = 1;
+constexpr unsigned all_tiled_edges = 0xf;
+constexpr std::uint32_t red = 0xa03030;
+constexpr std::uint32_t green = 0x30a030;
+constexpr std::uint32_t blue = 0x3030a0;
 
 #define REQUIRE(condition)                                                                         \
     do {                                                                                           \
         if (!(condition)) {                                                                        \
-            std::fprintf(stderr, "Part 4 fixture failed at %s:%d: %s\n", __FILE__, __LINE__,       \
+            std::fprintf(stderr, "Desktop fixture failed at %s:%d: %s\n", __FILE__, __LINE__,      \
                          #condition);                                                              \
             return false;                                                                          \
         }                                                                                          \
@@ -43,6 +52,8 @@ struct Configure {
     bool activated = false;
     bool maximized = false;
     bool fullscreen = false;
+    bool resizing = false;
+    unsigned tiled_edges = 0;
 };
 
 struct Client {
@@ -157,6 +168,11 @@ void toplevel_configure(void *data, xdg_toplevel *, std::int32_t width, std::int
         client.pending.activated |= state[i] == XDG_TOPLEVEL_STATE_ACTIVATED;
         client.pending.maximized |= state[i] == XDG_TOPLEVEL_STATE_MAXIMIZED;
         client.pending.fullscreen |= state[i] == XDG_TOPLEVEL_STATE_FULLSCREEN;
+        client.pending.resizing |= state[i] == XDG_TOPLEVEL_STATE_RESIZING;
+        if (state[i] >= XDG_TOPLEVEL_STATE_TILED_LEFT &&
+            state[i] <= XDG_TOPLEVEL_STATE_TILED_BOTTOM) {
+            client.pending.tiled_edges |= 1u << (state[i] - XDG_TOPLEVEL_STATE_TILED_LEFT);
+        }
     }
 }
 void toplevel_close(void *data, xdg_toplevel *) {
@@ -205,18 +221,18 @@ class Connection {
     bool connect(Client &client) {
         int sockets[2];
         if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sockets) < 0) {
-            std::perror("Part 4 socketpair");
+            std::perror("desktop socketpair");
             return false;
         }
         if (!wl_client_create(server_, sockets[0])) {
-            std::perror("Part 4 wl_client_create");
+            std::perror("desktop wl_client_create");
             close(sockets[0]);
             close(sockets[1]);
             return false;
         }
         client.display = wl_display_connect_to_fd(sockets[1]);
         if (!client.display) {
-            std::perror("Part 4 wl_display_connect_to_fd");
+            std::perror("desktop wl_display_connect_to_fd");
             return false;
         }
         client.registry = wl_display_get_registry(client.display);
@@ -265,18 +281,26 @@ class Connection {
         return complete;
     }
 
-    bool open(Client &client) {
+    bool open(Client &client, int minimum_width = 0) {
         client.surface = wl_compositor_create_surface(client.compositor);
         client.xdg = xdg_wm_base_get_xdg_surface(client.shell, client.surface);
         xdg_surface_add_listener(client.xdg, &surface_listener, &client);
         client.toplevel = xdg_surface_get_toplevel(client.xdg);
         xdg_toplevel_add_listener(client.toplevel, &toplevel_listener, &client);
+        if (minimum_width) {
+            xdg_toplevel_set_min_size(client.toplevel, minimum_width, 0);
+        }
         wl_surface_commit(client.surface);
         return wait(client, [&] { return client.configures > 0; });
     }
 
-    bool attach(Client &client, int width, int height, bool ack = true) {
-        return attach(client, client.surface, client.xdg, ack ? client.serial : 0, width, height);
+    bool attach(Client &client, int width, int height, bool ack = true, std::uint32_t rgb = 0) {
+        return attach(client, client.surface, client.xdg, ack ? client.serial : 0, width, height,
+                      rgb);
+    }
+
+    bool attach_configured(Client &client, std::uint32_t rgb = 0) {
+        return attach(client, client.configured.width, client.configured.height, true, rgb);
     }
 
     bool open_popup(Client &client, Popup &popup) {
@@ -299,16 +323,29 @@ class Connection {
 
   private:
     bool attach(Client &client, wl_surface *surface, xdg_surface *xdg, std::uint32_t serial,
-                int width, int height) {
+                int width, int height, std::uint32_t rgb = 0) {
+        if (width <= 0 || height <= 0 || width > 4096 || height > 4096) {
+            return false;
+        }
         const int stride = width * 4;
         const int length = stride * height;
-        const int fd = memfd_create("seaside-part4-client", MFD_CLOEXEC);
+        const int fd = memfd_create("seaside-desktop-client", MFD_CLOEXEC);
         if (fd < 0) {
             return false;
         }
         if (ftruncate(fd, length) < 0) {
             close(fd);
             return false;
+        }
+        if (rgb) {
+            void *data =
+                mmap(nullptr, static_cast<std::size_t>(length), PROT_WRITE, MAP_SHARED, fd, 0);
+            if (data == MAP_FAILED) {
+                close(fd);
+                return false;
+            }
+            std::fill_n(static_cast<std::uint32_t *>(data), width * height, rgb);
+            munmap(data, static_cast<std::size_t>(length));
         }
         auto *pool = wl_shm_create_pool(client.shm, fd, length);
         auto *buffer =
@@ -341,7 +378,29 @@ Action action(ActionKind kind, std::int64_t argument = 0) {
     return result;
 }
 
-bool run() {
+Action directional_action(ActionKind kind, Direction direction, int distance = 0) {
+    auto result = action(kind, distance);
+    result.direction = direction;
+    return result;
+}
+
+using Output = std::unique_ptr<part3_output, decltype(&part3_output_destroy)>;
+
+struct Fixture {
+    wl_display *display;
+    seaside::Scene &scene;
+    seaside::Desktop &desktop;
+    wlr_backend *backend;
+    wlr_allocator *allocator;
+    wlr_renderer *renderer;
+
+    Output output() const {
+        return Output(part3_output_create(display, backend, allocator, renderer),
+                      part3_output_destroy);
+    }
+};
+
+bool run_fixture(const seaside::Config &config, bool (*scenario)(const Fixture &)) {
     auto server = seaside::Server::create();
     REQUIRE(server);
     auto *display = (*server)->display();
@@ -359,14 +418,14 @@ bool run() {
         return false;
     }
     REQUIRE((*server)->start(backend, renderer));
-    seaside::Config config;
-    config.window.tiling = false;
     seaside::Desktop desktop(**scene, config);
-    const auto create_output = [&] {
-        return part3_output_create(display, backend, (*server)->allocator(), renderer);
-    };
-    std::unique_ptr<part3_output, decltype(&part3_output_destroy)> output(create_output(),
-                                                                          part3_output_destroy);
+    return scenario({display, **scene, desktop, backend, (*server)->allocator(), renderer});
+}
+
+bool run_part4(const Fixture &fixture) {
+    auto &scene = fixture.scene;
+    auto &desktop = fixture.desktop;
+    auto output = fixture.output();
     REQUIRE(output);
     REQUIRE(desktop.add_output(part3_output_handle(output.get()), "headless", "stable-headless",
                                output_bounds));
@@ -374,7 +433,7 @@ bool run() {
     const auto original_workspace = windows.focused_workspace();
     REQUIRE(original_workspace);
 
-    Connection connection(display);
+    Connection connection(fixture.display);
     Client first;
     REQUIRE(connection.connect(first));
     REQUIRE(connection.open(first));
@@ -385,7 +444,7 @@ bool run() {
     const auto a = windows.focused_window();
     REQUIRE(a);
     const auto first_geometry = windows.view(*a).geometry;
-    REQUIRE(hit(**scene, first_geometry, *a));
+    REQUIRE(hit(scene, first_geometry, *a));
 
     Client second;
     REQUIRE(connection.connect(second));
@@ -397,7 +456,7 @@ bool run() {
     REQUIRE(b && b != a);
     const auto ordinary = windows.view(*b).geometry;
     REQUIRE(ordinary.width == ordinary_width && ordinary.height == ordinary_height);
-    REQUIRE(hit(**scene, ordinary, *b));
+    REQUIRE(hit(scene, ordinary, *b));
 
     xdg_toplevel_set_maximized(second.toplevel);
     REQUIRE(connection.wait(second, [&] { return second.configured.maximized; }));
@@ -428,7 +487,7 @@ bool run() {
     REQUIRE(connection.wait(first, [&] { return first.configured.activated; }));
     REQUIRE(connection.wait(second, [&] { return !second.configured.activated; }));
     REQUIRE(windows.focused_window() == a && !windows.view(*b).visible);
-    REQUIRE(hit(**scene, first_geometry, *a));
+    REQUIRE(hit(scene, first_geometry, *a));
 
     {
         Popup popup;
@@ -437,8 +496,8 @@ bool run() {
         seaside_scene_target target{};
         const double x = first_geometry.x + popup.geometry.x + 2;
         const double y = first_geometry.y + popup.geometry.y + 2;
-        REQUIRE((*scene)->window_at(x, y, target));
-        REQUIRE(target.id == a && target.surface != (*scene)->window_surface(*a));
+        REQUIRE(scene.window_at(x, y, target));
+        REQUIRE(target.id == a && target.surface != scene.window_surface(*a));
         REQUIRE(target.sx == 2.0 && target.sy == 2.0);
         REQUIRE(desktop.action(action(ActionKind::workspace, 42)));
         REQUIRE(connection.wait(first, [&] { return popup.dismissed; }));
@@ -458,13 +517,13 @@ bool run() {
     REQUIRE(windows.state().window(*a)->mapped && windows.state().window(*b)->mapped);
     REQUIRE(connection.roundtrip(first) && connection.roundtrip(second));
 
-    output.reset(create_output());
+    output = fixture.output();
     REQUIRE(output);
     REQUIRE(desktop.add_output(part3_output_handle(output.get()), "headless", "stable-headless",
                                output_bounds));
     REQUIRE(windows.focused_workspace() == 42 && windows.focused_window() == b);
     REQUIRE(windows.view(*a).visible && windows.view(*b).visible);
-    REQUIRE(hit(**scene, ordinary, *b));
+    REQUIRE(hit(scene, ordinary, *b));
     auto *frame = wl_surface_frame(second.surface);
     wl_callback_add_listener(frame, &frame_listener, &second);
     wl_surface_damage_buffer(second.surface, 0, 0, ordinary.width, ordinary.height);
@@ -494,13 +553,229 @@ bool run() {
     REQUIRE(connection.roundtrip(first));
     REQUIRE(windows.state().window_count() == 0);
     REQUIRE(!windows.focused_window() && windows.state().valid());
-    REQUIRE(!desktop.failed() && !(*scene)->snapshot().failed);
+    REQUIRE(!desktop.failed() && !scene.snapshot().failed);
     desktop.remove_output(part3_output_handle(output.get()));
+    return true;
+}
+
+bool wait_tiled(Connection &connection, Client &client, int width, int height) {
+    return connection.wait(client, [&] {
+        return client.configured.tiled_edges == all_tiled_edges &&
+               client.configured.width == width && client.configured.height == height;
+    });
+}
+
+bool map_tiled(const Fixture &fixture, Connection &connection, Client &client, WindowId &id,
+               int width, int height, int minimum_width = 0, std::uint32_t rgb = 0) {
+    REQUIRE(connection.connect(client));
+    REQUIRE(connection.open(client, minimum_width));
+    REQUIRE(client.configured.width == 0 && client.configured.height == 0);
+    REQUIRE(!client.configured.tiled_edges);
+    REQUIRE(connection.attach(client, std::max(ordinary_width, minimum_width), ordinary_height));
+    id = fixture.desktop.windows().focused_window().value_or(0);
+    REQUIRE(id);
+    REQUIRE(wait_tiled(connection, client, width, height));
+    REQUIRE(client.configured.activated);
+    REQUIRE(connection.attach_configured(client, rgb));
+    return true;
+}
+
+bool begin_drag(const Fixture &fixture, WindowId id, std::uint32_t button, double x, double y) {
+    seaside_scene_target target{};
+    REQUIRE(fixture.scene.window_at(x, y, target) && target.id == id);
+    return fixture.desktop.button(target.id, button, true, super, x, y);
+}
+
+bool wait_pixel(Connection &connection, Client &client, part3_output *output, unsigned x,
+                unsigned y, std::uint32_t expected) {
+    REQUIRE(part3_output_sample_pixel(output, x, y));
+    const bool ready = connection.wait(client, [&] {
+        const auto pixel = part3_output_get_pixel(output);
+        return pixel.frames && pixel.rgb == expected;
+    });
+    if (!ready) {
+        const auto pixel = part3_output_get_pixel(output);
+        std::fprintf(stderr, "Pixel at (%u, %u) expected %06x, got %06x after %u frames\n", x, y,
+                     expected, pixel.rgb, pixel.frames);
+    }
+    return ready;
+}
+
+bool run_dwindle(const Fixture &fixture) {
+    auto &desktop = fixture.desktop;
+    auto output = fixture.output();
+    REQUIRE(output);
+    REQUIRE(desktop.add_output(part3_output_handle(output.get()), "main", "main", output_bounds));
+    const auto &windows = desktop.windows();
+    Connection connection(fixture.display);
+    Client first, second;
+    WindowId a{}, b{};
+    constexpr WindowRect full{6, 6, 148, 78};
+    REQUIRE(map_tiled(fixture, connection, first, a, full.width, full.height, 0, red));
+    REQUIRE(windows.view(a).geometry == full);
+    REQUIRE(map_tiled(fixture, connection, second, b, 69, 78, 0, green));
+    REQUIRE(b != a);
+    REQUIRE(windows.view(a).geometry == (WindowRect{6, 6, 69, 78}));
+    REQUIRE(windows.view(b).geometry == (WindowRect{85, 6, 69, 78}));
+
+    REQUIRE(wait_tiled(connection, first, 69, 78));
+    // The previous acknowledged size remains legal until the new configure is
+    // acknowledged. A late commit cannot resize the allocated tile.
+    REQUIRE(connection.attach(first, full.width, full.height, false, red));
+    REQUIRE(windows.view(a).geometry == (WindowRect{6, 6, 69, 78}));
+    REQUIRE(wait_pixel(connection, first, output.get(), 74, 45, red));
+    REQUIRE(wait_pixel(connection, first, output.get(), 80, 45, 0));
+    REQUIRE(wait_pixel(connection, first, output.get(), 100, 45, green));
+    seaside_scene_target border{};
+    REQUIRE(fixture.scene.window_at(75, 45, border) && border.id == a && !border.surface);
+    REQUIRE(connection.attach_configured(first));
+
+    REQUIRE(begin_drag(fixture, b, BTN_RIGHT, 119, 45));
+    desktop.motion(131, 45);
+    const auto resized_a = windows.view(a).geometry;
+    const auto resized_b = windows.view(b).geometry;
+    REQUIRE(resized_a.width != 69 && resized_a.width + resized_b.width == 138);
+    REQUIRE(wait_tiled(connection, first, resized_a.width, 78));
+    REQUIRE(wait_tiled(connection, second, resized_b.width, 78));
+    REQUIRE(second.configured.resizing);
+    REQUIRE(connection.attach_configured(first) && connection.attach_configured(second));
+    desktop.button(0, BTN_RIGHT, false, super, 131, 45);
+    REQUIRE(connection.wait(second, [&] { return !second.configured.resizing; }));
+
+    REQUIRE(begin_drag(fixture, b, BTN_LEFT, resized_b.x + 3, 45));
+    REQUIRE(windows.view(b).tile_layout);
+    desktop.button(0, BTN_LEFT, false, super, resized_b.x + 3, 45);
+    REQUIRE(windows.view(a).geometry == resized_a && windows.view(b).geometry == resized_b);
+
+    REQUIRE(begin_drag(fixture, b, BTN_LEFT, resized_b.x + 3, 45));
+    desktop.motion(14, 45);
+    REQUIRE(windows.view(a).geometry == full);
+    desktop.button(0, BTN_LEFT, false, super, 14, 45);
+    const auto reinserted_a = windows.view(a).geometry;
+    const auto reinserted_b = windows.view(b).geometry;
+    REQUIRE(reinserted_b.x < reinserted_a.x);
+    REQUIRE(wait_tiled(connection, first, reinserted_a.width, 78));
+    REQUIRE(wait_tiled(connection, second, reinserted_b.width, 78));
+    REQUIRE(connection.attach_configured(first) && connection.attach_configured(second));
+
+    REQUIRE(begin_drag(fixture, b, BTN_LEFT, reinserted_b.x + 3, 45));
+    desktop.motion(200, 110);
+    REQUIRE(connection.wait(second, [&] { return !second.configured.tiled_edges; }));
+    desktop.button(0, BTN_LEFT, false, super, 200, 110);
+    REQUIRE(windows.view(a).geometry == reinserted_a);
+    REQUIRE(windows.view(b).geometry == reinserted_b);
+    REQUIRE(wait_tiled(connection, second, reinserted_b.width, 78));
+    REQUIRE(connection.attach_configured(second));
+
+    REQUIRE(begin_drag(fixture, b, BTN_LEFT, reinserted_b.x + 3, 45));
+    desktop.motion(reinserted_b.x + 6, 45);
+    second.destroy_window();
+    REQUIRE(connection.roundtrip(second));
+    desktop.button(0, BTN_LEFT, false, super, 14, 45);
+    REQUIRE(!windows.state().window(b) && windows.focused_window() == a);
+    REQUIRE(windows.view(a).geometry == full);
+    REQUIRE(wait_tiled(connection, first, full.width, full.height));
+    REQUIRE(connection.attach_configured(first));
+
+    REQUIRE(desktop.action(action(ActionKind::toggle_window_tiling)));
+    REQUIRE(connection.wait(first, [&] { return !first.configured.tiled_edges; }));
+    REQUIRE(first.configured.width == ordinary_width && first.configured.height == ordinary_height);
+    REQUIRE(connection.attach(first, full.width, full.height, false));
+    REQUIRE(windows.view(a).geometry.width == ordinary_width);
+    REQUIRE(windows.view(a).geometry.height == ordinary_height);
+    REQUIRE(connection.attach_configured(first));
+    REQUIRE(hit(fixture.scene, windows.view(a).geometry, a));
+    REQUIRE(!desktop.failed() && !fixture.scene.snapshot().failed);
+    return true;
+}
+
+bool run_scrolling(const Fixture &fixture) {
+    auto &desktop = fixture.desktop;
+    auto &scene = fixture.scene;
+    auto primary = fixture.output();
+    auto neighbor = fixture.output();
+    REQUIRE(primary && neighbor);
+    REQUIRE(desktop.add_output(part3_output_handle(primary.get()), "main", "main", output_bounds));
+    constexpr WindowRect adjacent{160, 0, 160, 90};
+    REQUIRE(
+        desktop.add_output(part3_output_handle(neighbor.get()), "adjacent", "adjacent", adjacent));
+    const auto &windows = desktop.windows();
+    const auto workspace = windows.focused_workspace();
+    REQUIRE(workspace);
+    Connection connection(fixture.display);
+    Client first, second, third;
+    WindowId a{}, b{}, c{};
+    REQUIRE(map_tiled(fixture, connection, first, a, 80, 90, 0, red));
+    REQUIRE(windows.view(a).geometry == (WindowRect{0, 0, 80, 90}));
+    REQUIRE(map_tiled(fixture, connection, second, b, 100, 90, 100, green));
+    REQUIRE(windows.view(a).geometry.x == -20);
+    REQUIRE(windows.view(b).geometry == (WindowRect{60, 0, 100, 90}));
+    seaside_scene_target clipped{};
+    REQUIRE(scene.window_at(5, 45, clipped) && clipped.id == a && clipped.sx == 25.0);
+    seaside_scene_target grabbed{};
+    grabbed.surface = clipped.surface;
+    REQUIRE(scene.window_at(170, 45, grabbed) && grabbed.id == a && grabbed.sx == 190.0);
+    REQUIRE(map_tiled(fixture, connection, third, c, 80, 90, 0, blue));
+    REQUIRE(a != b && b != c && c != a);
+    REQUIRE(windows.view(c).geometry == (WindowRect{80, 0, 80, 90}));
+
+    REQUIRE(desktop.action(directional_action(ActionKind::focus, Direction::right)));
+    REQUIRE(windows.focused_window() == a);
+    REQUIRE(windows.view(a).geometry == (WindowRect{0, 0, 80, 90}));
+    REQUIRE(windows.view(b).geometry == (WindowRect{80, 0, 100, 90}));
+    REQUIRE(windows.view(c).geometry == (WindowRect{180, 0, 80, 90}));
+    seaside_scene_target inside{};
+    seaside_scene_target across{};
+    REQUIRE(scene.window_at(150, 45, inside) && inside.id == b && inside.sx == 70.0);
+    REQUIRE(!scene.window_at(165, 45, across));
+    REQUIRE(wait_pixel(connection, first, primary.get(), 150, 45, green));
+    REQUIRE(wait_pixel(connection, first, neighbor.get(), 5, 45, 0));
+
+    REQUIRE(desktop.action(directional_action(ActionKind::focus, Direction::right)));
+    REQUIRE(windows.focused_window() == b);
+    REQUIRE(windows.view(b).geometry.x == 60);
+    REQUIRE(desktop.action(directional_action(ActionKind::resize_window, Direction::right, 20)));
+    REQUIRE(wait_tiled(connection, second, 120, 90));
+    REQUIRE(connection.attach_configured(second, green));
+    const auto width_a = windows.view(a).geometry.width;
+    const auto width_c = windows.view(c).geometry.width;
+    const auto custom_column = windows.view(b).geometry;
+    REQUIRE(width_a == 80 && width_c == 80 && custom_column.width == 120);
+
+    REQUIRE(desktop.action(action(ActionKind::workspace, 42)));
+    REQUIRE(!windows.view(a).visible && !windows.view(b).visible && !windows.view(c).visible);
+    REQUIRE(desktop.action(action(ActionKind::workspace, *workspace)));
+    REQUIRE(windows.focused_window() == b && windows.view(b).geometry == custom_column);
+    second.destroy_window();
+    REQUIRE(connection.roundtrip(second));
+    REQUIRE(!windows.state().window(b) && windows.focused_window() == c);
+    REQUIRE(windows.view(a).geometry.width == width_a && windows.view(c).geometry.width == width_c);
+    REQUIRE(windows.view(a).geometry.x + width_a == windows.view(c).geometry.x);
+    REQUIRE(!desktop.failed() && !scene.snapshot().failed);
     return true;
 }
 
 } // namespace
 
-int main() {
-    return run() ? EXIT_SUCCESS : EXIT_FAILURE;
+int main(int argc, char **argv) {
+    auto config = seaside::default_config();
+    if (argc == 1) {
+        config.window.tiling = false;
+        return run_fixture(config, run_part4) ? EXIT_SUCCESS : EXIT_FAILURE;
+    }
+    const std::string_view scenario = argv[1];
+    if (argc == 2 && scenario == "dwindle") {
+        config.window.gaps_outer = 4;
+        config.window.gaps_inner = 6;
+        return run_fixture(config, run_dwindle) ? EXIT_SUCCESS : EXIT_FAILURE;
+    }
+    if (argc == 2 && scenario == "scrolling") {
+        config.window.layout = seaside::Layout::scrolling;
+        config.window.gaps_outer = 0;
+        config.window.gaps_inner = 0;
+        config.window.border_width = 0;
+        return run_fixture(config, run_scrolling) ? EXIT_SUCCESS : EXIT_FAILURE;
+    }
+    std::fprintf(stderr, "Unknown desktop fixture scenario: %s\n", argv[1]);
+    return EXIT_FAILURE;
 }

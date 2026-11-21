@@ -17,6 +17,11 @@ struct part3_output_snapshot {
     unsigned invalid_frames;
 };
 
+struct part3_output_pixel {
+    unsigned frames;
+    uint32_t rgb;
+};
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -28,6 +33,8 @@ struct part3_output *part3_output_create(struct wl_display *display, struct wlr_
                                          struct wlr_renderer *renderer);
 struct wlr_output *part3_output_handle(struct part3_output *output);
 struct part3_output_snapshot part3_output_get_snapshot(struct part3_output *output);
+bool part3_output_sample_pixel(struct part3_output *output, unsigned x, unsigned y);
+struct part3_output_pixel part3_output_get_pixel(struct part3_output *output);
 void part3_output_destroy(struct part3_output *output);
 
 #ifdef __cplusplus

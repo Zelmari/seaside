@@ -5,6 +5,7 @@
 #include <cmath>
 #include <limits>
 #include <linux/input-event-codes.h>
+#include <utility>
 
 namespace seaside {
 namespace {
@@ -33,8 +34,8 @@ int resize_delta(int size, int delta, int minimum, int maximum) noexcept {
 } // namespace
 
 Desktop::Desktop(Scene &scene, const Config &config)
-    : scene_(scene), windows_(config.workspaces.mode, config.window.tiling),
-      bindings_(config.keybinds), primary_(config.monitors.primary) {
+    : scene_(scene), windows_(config), bindings_(config.keybinds),
+      primary_(config.monitors.primary) {
     scene_.set_window_handler(on_window, this);
 }
 
@@ -62,8 +63,10 @@ bool Desktop::add_output(wlr_output *output, std::string_view connector, std::st
     if (!windows_.add_output(connector, bounds, bounds, primary)) {
         scene_.remove_output(output);
         outputs_.erase(record);
+        cancel_drag();
         return false;
     }
+    discard_drag();
     project();
     return true;
 } catch (...) {
@@ -74,6 +77,7 @@ bool Desktop::add_output(wlr_output *output, std::string_view connector, std::st
 void Desktop::remove_output(wlr_output *output) noexcept try {
     auto record = outputs_.find(output);
     if (record != outputs_.end()) {
+        discard_drag();
         scene_.remove_output(output);
         windows_.remove_output(record->second.connector);
         outputs_.erase(record);
@@ -116,6 +120,9 @@ std::optional<std::string_view> Desktop::match(const OutputSelector &selector) c
 }
 
 void Desktop::project(WindowId resize) {
+    if (drag_ && !windows_.view(drag_->window).visible) {
+        discard_drag();
+    }
     const WindowId focused = windows_.focused_window().value_or(0);
     for (const auto id : views_) {
         const auto view = windows_.view(id);
@@ -126,21 +133,44 @@ void Desktop::project(WindowId resize) {
                 .geometry = to_scene(view.geometry),
                 .output = output ? to_scene(windows_.output_bounds(*output).value_or(WindowRect{}))
                                  : seaside_scene_rect{},
+                .clip = to_scene(view.clip),
                 .stacking = view.stacking,
+                .border_width = view.border_width,
                 .visible = view.visible,
                 .activated = focused == id,
                 .maximized = view.maximized,
                 .fullscreen = view.fullscreen,
+                .tiled = view.tile_layout,
                 .resize = id == resize,
+                .resizing = drag_ && drag_->started && drag_->resize && drag_->window == id,
             });
-    }
-    if (drag_ && !windows_.view(drag_->window).visible) {
-        drag_.reset();
     }
     if (input_) {
         seaside_tty_input_set_focus(input_, scene_.window_surface(focused));
         seaside_tty_input_refresh_pointer(input_);
     }
+}
+
+bool Desktop::update_size_limits(WindowId id) {
+    const auto limits = scene_.window_size_limits(id);
+    return windows_.set_size_limits(id, limits.min_width, limits.min_height, limits.max_width,
+                                    limits.max_height);
+}
+
+void Desktop::discard_drag() {
+    if (const auto drag = std::exchange(drag_, std::nullopt);
+        drag && drag->started && !drag->resize) {
+        windows_.cancel_move(drag->window);
+    }
+}
+
+void Desktop::cancel_drag() noexcept try {
+    if (drag_) {
+        discard_drag();
+        project();
+    }
+} catch (...) {
+    failed_ = true;
 }
 
 std::uint64_t Desktop::on_window(void *self, const seaside_scene_window_event *event) noexcept {
@@ -165,35 +195,59 @@ std::uint64_t Desktop::window_event(const seaside_scene_window_event &event) {
         return *id;
     }
     case SEASIDE_WINDOW_INITIAL_COMMIT:
+        update_size_limits(event.id);
         windows_.initialize_window(event.id);
         break;
     case SEASIDE_WINDOW_MAPPED:
+        update_size_limits(event.id);
         windows_.map_window(event.id, from_scene(event.geometry));
         break;
     case SEASIDE_WINDOW_UNMAPPED:
+        if (drag_ && drag_->window == event.id) {
+            discard_drag();
+        }
         windows_.unmap_window(event.id);
         break;
     case SEASIDE_WINDOW_DESTROYED:
+        if (drag_ && drag_->window == event.id) {
+            discard_drag();
+        }
         views_.erase(event.id);
         windows_.destroy_window(event.id);
         break;
     case SEASIDE_WINDOW_COMMITTED: {
+        const bool limits_changed = update_size_limits(event.id);
         const auto current = windows_.view(event.id);
-        if (!event.ordinary_commit || current.maximized || current.fullscreen ||
+        if (!event.ordinary_commit || current.tile_layout || current.maximized ||
+            current.fullscreen ||
+            (current.tiled && drag_ && drag_->started && !drag_->resize &&
+             drag_->window == event.id) ||
             (current.geometry.width == event.geometry.width &&
              current.geometry.height == event.geometry.height)) {
+            if (limits_changed) {
+                project();
+            }
             return 0;
         }
         windows_.commit_geometry(event.id, from_scene(event.geometry));
         break;
     }
     case SEASIDE_WINDOW_PARENT_CHANGED:
+        if (drag_ && drag_->window == event.id) {
+            discard_drag();
+        }
         windows_.set_parent(event.id, parent);
         break;
     case SEASIDE_WINDOW_MAXIMIZE_REQUESTED:
+        if (drag_ && drag_->window == event.id) {
+            discard_drag();
+        }
         windows_.set_maximized(event.id, event.enabled);
         break;
     case SEASIDE_WINDOW_FULLSCREEN_REQUESTED:
+        if (drag_ && drag_->window == event.id) {
+            discard_drag();
+        }
         windows_.set_fullscreen(event.id, event.enabled);
         break;
     }
@@ -204,6 +258,9 @@ std::uint64_t Desktop::window_event(const seaside_scene_window_event &event) {
 bool Desktop::resize(WindowId id, Direction direction, int distance) {
     if (distance <= 0) {
         return false;
+    }
+    if (windows_.view(id).tile_layout) {
+        return windows_.resize_window(id, direction, distance);
     }
     switch (direction) {
     case Direction::left:
@@ -221,7 +278,11 @@ bool Desktop::resize(WindowId id, Direction direction, int distance) {
 }
 
 bool Desktop::resize_by(WindowId id, int dx, int dy) {
-    const auto size = windows_.view(id).geometry;
+    const auto view = windows_.view(id);
+    if (view.tile_layout) {
+        return windows_.resize_window_by(id, dx, dy);
+    }
+    const auto size = view.geometry;
     const auto limits = scene_.window_size_limits(id);
     return windows_.resize_window_by(
         id, resize_delta(size.width, dx, limits.min_width, limits.max_width),
@@ -243,42 +304,54 @@ bool Desktop::action(const Action &action, std::uint8_t modifiers) noexcept try 
         windows_.cycle_focus(modifiers != 0);
         break;
     case ActionKind::workspace:
+        discard_drag();
         windows_.select_workspace(static_cast<WorkspaceId>(action.argument));
         break;
     case ActionKind::move_to_workspace:
+        discard_drag();
         windows_.move_to_workspace(id, static_cast<WorkspaceId>(action.argument));
         break;
     case ActionKind::transfer_workspace:
         if (auto selector = parse_output_selector(action.text)) {
             if (auto destination = match(*selector)) {
+                discard_drag();
                 windows_.transfer_workspace(*destination);
             }
         }
         break;
     case ActionKind::toggle_window_pin:
+        discard_drag();
         windows_.toggle_pin(id);
         break;
     case ActionKind::toggle_window_tiling:
+        discard_drag();
         windows_.toggle_tiling(id);
         break;
     case ActionKind::toggle_window_maximize:
+        discard_drag();
         windows_.set_maximized(id, !windows_.view(id).maximized);
         break;
     case ActionKind::toggle_window_fullscreen:
+        discard_drag();
         windows_.set_fullscreen(id, !windows_.view(id).fullscreen);
         break;
     case ActionKind::close_window:
         scene_.close_window(id);
         return true;
     case ActionKind::move_window:
+        discard_drag();
         windows_.move_window(id, action.direction);
         break;
     case ActionKind::resize_window:
+        discard_drag();
         if (resize(id, action.direction, static_cast<int>(action.argument))) {
             resized = id;
         }
         break;
     case ActionKind::swap_window:
+        discard_drag();
+        windows_.swap_window(id, action.direction);
+        break;
     case ActionKind::night_light:
     case ActionKind::exit:
     case ActionKind::exec:
@@ -308,8 +381,18 @@ bool Desktop::button(WindowId id, std::uint32_t button, bool pressed, std::uint8
                      double x, double y) noexcept try {
     if (!pressed) {
         if (drag_ && drag_->button == button) {
+            const auto drag = *drag_;
             drag_.reset();
+            if (drag.started && !drag.resize) {
+                windows_.finish_move(drag.window, x, y);
+            }
+            if (drag.started) {
+                project();
+            }
         }
+        return false;
+    }
+    if (drag_) {
         return false;
     }
     if (id) {
@@ -317,19 +400,21 @@ bool Desktop::button(WindowId id, std::uint32_t button, bool pressed, std::uint8
     } else {
         windows_.focus_output_at(x, y);
     }
-    project();
-    if (!id || drag_ || (button != BTN_LEFT && button != BTN_RIGHT)) {
+    if (!id || (button != BTN_LEFT && button != BTN_RIGHT) || !std::isfinite(x) ||
+        !std::isfinite(y)) {
+        project();
         return false;
     }
     const auto chord =
         button == BTN_LEFT ? ChordKind::mouse_left_drag : ChordKind::mouse_right_drag;
     const auto binding = bindings_.find({modifiers, chord, 0});
     const auto view = windows_.view(id);
-    if (binding == bindings_.end() || !view.visible || view.tiled || view.maximized ||
-        view.fullscreen) {
+    if (binding == bindings_.end() || !view.visible || view.maximized || view.fullscreen) {
+        project();
         return false;
     }
     drag_ = Drag{id, button, binding->second.kind == ActionKind::resize_window, x, y};
+    project();
     return true;
 } catch (...) {
     failed_ = true;
@@ -350,10 +435,20 @@ void Desktop::motion(double x, double y) noexcept try {
     const WindowId id = drag_->window;
     if (drag_->resize) {
         if (resize_by(id, dx, dy)) {
+            drag_->started = true;
             project(id);
         }
-    } else if (windows_.move_window_by(id, dx, dy)) {
-        project();
+    } else {
+        if (!drag_->started) {
+            if (!windows_.begin_move(id)) {
+                discard_drag();
+                return;
+            }
+            drag_->started = true;
+        }
+        if (windows_.move_window_by(id, dx, dy)) {
+            project();
+        }
     }
 } catch (...) {
     failed_ = true;

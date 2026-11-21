@@ -634,7 +634,7 @@ struct pointer_scene {
     struct seaside_tty_input *input;
     struct wlr_surface *surfaces[2];
     double x, y;
-    unsigned move_calls, clicks, consumed_releases;
+    unsigned move_calls, clicks, consumed_releases, cancelled;
     bool locked;
 };
 
@@ -691,6 +691,10 @@ static bool scene_button(void *data, uint64_t window, uint32_t button, bool pres
 
 static void scene_locked(void *data, bool locked) {
     ((struct pointer_scene *)data)->locked = locked;
+}
+
+static void scene_cancelled(void *data) {
+    ++((struct pointer_scene *)data)->cancelled;
 }
 
 struct pointer_client {
@@ -852,6 +856,7 @@ static void exercise_wayland_pointer(void) {
         .pointer_button = scene_button,
         .pointer_locked = scene_locked,
         .pointer_absolute_delta = scene_absolute_delta,
+        .pointer_cancelled = scene_cancelled,
     };
     scene.input = seaside_tty_input_create(&backend, &seat_callbacks, &scene);
     check(scene.input && seaside_tty_input_enable_keyboard(scene.input, server) &&
@@ -971,10 +976,27 @@ static void exercise_wayland_pointer(void) {
     round_trip(server, left.display);
     check(left.events.pointer_enters == 3, "destroying constraint left pointer focus stuck");
 
+    // Losing the initiating pointer cancels a gesture even if a second
+    // pointer is still connected and coincidentally holding the same button.
+    struct wlr_pointer second = {0};
+    wlr_pointer_init(&second, &pointer_impl, "remaining pointer");
+    wl_signal_emit_mutable(&backend.events.new_input, &second.base);
+    key(&keyboard, KEY_LEFTMETA, WL_KEYBOARD_KEY_STATE_PRESSED);
+    button(&pointer, BTN_RIGHT, true);
+    button(&second, BTN_RIGHT, false);
+    button(&second, BTN_RIGHT, true);
     wlr_pointer_finish(&pointer);
+    button(&second, BTN_RIGHT, false);
+    key(&keyboard, KEY_LEFTMETA, WL_KEYBOARD_KEY_STATE_RELEASED);
+    axis(&second);
+    round_trip(server, left.display);
+    check(scene.cancelled == 1 && scene.consumed_releases == 1 &&
+              left.events.pointer_buttons == 0 && left.events.pointer_axes == 1,
+          "device removal left its gesture active or leaked a consumed button pair");
+    wlr_pointer_finish(&second);
     round_trip(server, left.display);
     check(left.events.capabilities == WL_SEAT_CAPABILITY_KEYBOARD &&
-              left.events.pointer_leaves == 3,
+              left.events.pointer_leaves == 4,
           "pointer unplug did not clear hover and retire pointer capability");
     disconnect_pointer_client(server, &left);
     disconnect_pointer_client(server, &right);

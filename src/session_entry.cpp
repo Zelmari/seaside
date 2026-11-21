@@ -236,6 +236,13 @@ class Session {
         seaside_tty_drm_set_cursor_visible(session.drm_, !locked);
     }
 
+    static void pointer_cancelled(void *data) noexcept {
+        auto &session = *static_cast<Session *>(data);
+        if (!session.stopping_) {
+            session.desktop_.cancel_drag();
+        }
+    }
+
     static void modifiers_changed(void *data, std::uint8_t modifiers) noexcept {
         auto &session = *static_cast<Session *>(data);
         session.desktop_.modifiers_changed(modifiers);
@@ -247,6 +254,7 @@ class Session {
             return false;
         }
         if (keysym >= XKB_KEY_XF86Switch_VT_1 && keysym <= XKB_KEY_XF86Switch_VT_12) {
+            session.desktop_.cancel_drag();
             if (!seaside_tty_drm_change_vt(session.drm_, keysym - XKB_KEY_XF86Switch_VT_1 + 1)) {
                 std::fprintf(stderr, "seaside: VT switch rejected\n");
             }
@@ -521,6 +529,9 @@ class Session {
             return 0;
         }
         auto display = seaside_tty_drm_observation(session.drm_);
+        if (!display.active) {
+            session.desktop_.cancel_drag();
+        }
         const auto input = seaside_tty_input_get_snapshot(session.input_);
         if (display.failed || input.failed || session.scene_.snapshot().failed ||
             session.desktop_.failed()) {
@@ -632,6 +643,7 @@ std::expected<Outcome, const char *> run_session(seaside::LoadedConfig config,
         .pointer_button = Session::pointer_button,
         .pointer_absolute_delta = Session::pointer_absolute_delta,
         .pointer_locked = Session::pointer_locked,
+        .pointer_cancelled = Session::pointer_cancelled,
     };
     std::unique_ptr<seaside_tty_input, decltype(&seaside_tty_input_destroy)> input(
         seaside_tty_input_create(backend, &callbacks, &session), seaside_tty_input_destroy);

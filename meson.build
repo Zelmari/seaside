@@ -187,7 +187,7 @@ config_foundation = static_library(
 )
 
 desktop_foundation = static_library(
-  'seaside-desktop-foundation', ['src/desktop.cpp', 'src/window_manager.cpp'],
+  'seaside-desktop-foundation', ['src/desktop.cpp', 'src/layout.cpp', 'src/window_manager.cpp'],
   include_directories: include_directories('src'), install: false,
 )
 
@@ -198,6 +198,24 @@ window_manager_tests = executable(
 )
 test('part4-window-policy', window_manager_tests, suite: ['unit', 'part4'], timeout: 30,
   env: {'SEASIDE_GTEST': '1', 'SEASIDE_TEST_PART': '4', 'SEASIDE_REQUIREMENTS': '2.2,4,5,12.2b'},
+)
+
+layout_tests = executable(
+  'seaside-layout-tests', 'tests/unit/layout_test.cpp',
+  include_directories: include_directories('src'),
+  dependencies: gtest, link_with: [desktop_foundation, config_foundation], install: false,
+)
+test('part5-layout-engines', layout_tests, suite: ['unit', 'part5'], timeout: 30,
+  env: {'SEASIDE_GTEST': '1', 'SEASIDE_TEST_PART': '5', 'SEASIDE_REQUIREMENTS': '4.2,4.3,4.5,12.2b'},
+)
+
+layout_policy_tests = executable(
+  'seaside-layout-policy-tests', 'tests/unit/part5_window_manager_test.cpp',
+  include_directories: include_directories('src'),
+  dependencies: gtest, link_with: [desktop_foundation, config_foundation], install: false,
+)
+test('part5-layout-policy', layout_policy_tests, suite: ['unit', 'part5'], timeout: 30,
+  env: {'SEASIDE_GTEST': '1', 'SEASIDE_TEST_PART': '5', 'SEASIDE_REQUIREMENTS': '4.1,4.5,5,8.2,12.2b'},
 )
 
 session_foundation = static_library(
@@ -321,6 +339,12 @@ part4_fixture = executable(
 )
 test('part4-headless-desktop', part4_fixture, suite: ['integration', 'part4'], timeout: 30,
   env: {'SEASIDE_TEST_PART': '4', 'SEASIDE_REQUIREMENTS': '2.2,4,5,12.2b'},
+)
+test('part5-headless-dwindle', part4_fixture, args: ['dwindle'], suite: ['integration', 'part5'],
+  timeout: 30, env: {'SEASIDE_TEST_PART': '5', 'SEASIDE_REQUIREMENTS': '4.1,4.2,4.5,6.2,12.2b'},
+)
+test('part5-headless-scrolling', part4_fixture, args: ['scrolling'], suite: ['integration', 'part5'],
+  timeout: 30, env: {'SEASIDE_TEST_PART': '5', 'SEASIDE_REQUIREMENTS': '4.3,4.4,5,6.2,12.2b'},
 )
 
 portal_smoke = executable(

@@ -38,6 +38,8 @@ struct seaside_tty_input_callbacks {
     /* Convert normalized hardware coordinates for pointer confinement. */
     bool (*pointer_absolute_delta)(void *data, double x, double y, double *dx, double *dy);
     void (*pointer_locked)(void *data, bool locked);
+    /* The initiating device disappeared before its consumed button release. */
+    void (*pointer_cancelled)(void *data);
 };
 
 struct seaside_tty_input_snapshot {

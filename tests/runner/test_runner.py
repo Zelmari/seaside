@@ -533,6 +533,21 @@ class ResultEvidenceTests(unittest.TestCase):
                          "headless_milestone_only_pending_arch_vm_tty_seat_display_input_and_service_preflight")
         self.assertIn("Part 3 full TTY startup", (self.root / "summary.txt").read_text())
 
+    def test_part5_layout_suite_retains_requirements_and_vm_qualification_boundary(self):
+        declaration = self.declaration(name="configuration", part="5", suite="part5")
+        declaration["env"]["SEASIDE_REQUIREMENTS"] = "4.2,4.3,12.2b"
+        previous = self.declaration(name="part4-window-policy", part="4", suite="part4")
+        self.metadata = self.manifest([previous, declaration], ["part5"])
+        self.assertEqual(len(self.metadata), 1)
+        self.assertEqual(self.metadata[0]["requirement_sections"], ["4.2", "4.3", "12.2b"])
+        report = self.report(self.parse(self.xml([self.case()])))
+        self.assertEqual(report["parts"], [5])
+        self.assertEqual(report["part_results"]["5"]["software_status"], "pass")
+        self.assertEqual(report["part_results"]["5"]["qualification"],
+                         "headless_layout_checks_pending_arch_vm_tty_layout_trial")
+        self.assertIn("Part 5 layout behavior at the real TTY",
+                      (self.root / "summary.txt").read_text())
+
     def parse(self, xml, aggregate="OK", rows=None, log_limit=1024):
         if xml is not None:
             path = self.gtest_dir / "config-tests.xml"

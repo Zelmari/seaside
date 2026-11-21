@@ -42,7 +42,9 @@ struct seaside_tty_input {
     struct wl_listener group_leave;
     bool consumed[KEY_CNT];
     uint8_t modifiers;
-    size_t consumed_buttons[KEY_CNT];
+    struct tty_device *gesture_device;
+    uint32_t gesture_button;
+    bool gesture_released;
     size_t consumed_button_count;
     struct wlr_relative_pointer_manager_v1 *relative_pointer;
     struct wlr_pointer_constraints_v1 *constraints;
@@ -68,6 +70,7 @@ struct tty_device {
     struct wl_listener axis;
     struct wl_listener frame;
     struct wlr_keyboard *keyboard;
+    bool consumed_buttons[KEY_CNT];
     bool direct_key;
 };
 
@@ -292,10 +295,26 @@ static void remove_device(struct tty_device *device) {
         wl_list_remove(&device->button.link);
         wl_list_remove(&device->axis.link);
         wl_list_remove(&device->frame.link);
+        const size_t old_consumed = input->consumed_button_count;
+        for (size_t button = 0; button < KEY_CNT; ++button) {
+            if (device->consumed_buttons[button]) {
+                --input->consumed_button_count;
+            }
+        }
         if (--input->snapshot.pointers == 0 && input->seat) {
             leave_constraint(input, true);
             wlr_seat_pointer_notify_clear_focus(input->seat);
             refresh_capabilities(input);
+        }
+        if (input->gesture_device == device) {
+            input->gesture_device = NULL;
+            input->gesture_released = false;
+            if (input->callbacks.pointer_cancelled) {
+                input->callbacks.pointer_cancelled(input->data);
+            }
+        }
+        if (old_consumed > 0 && input->consumed_button_count == 0) {
+            seaside_tty_input_refresh_pointer(input);
         }
     } else {
         if (device->direct_key) {
@@ -440,13 +459,24 @@ static void handle_pointer_button(struct wl_listener *listener, void *data) {
     }
     const uint32_t button = event->button;
     const bool pressed = event->state == WL_POINTER_BUTTON_STATE_PRESSED;
-    if (button < KEY_CNT && input->consumed_buttons[button] > 0) {
-        if (pressed) {
-            ++input->consumed_buttons[button];
-        } else if (--input->consumed_buttons[button] == 0) {
+    if (button < KEY_CNT && device->consumed_buttons[button]) {
+        if (!pressed) {
+            if (input->gesture_device == device && input->gesture_button == button) {
+                /* wlroots emits unframed releases while destroying a pointer.
+                 * A real release is followed by a frame from the backend. */
+                input->gesture_released = true;
+                return;
+            }
+            device->consumed_buttons[button] = false;
             --input->consumed_button_count;
-            input->callbacks.pointer_button(input->data, 0, button, false, input->modifiers);
             update_pointer_target(input, event->time_msec);
+        }
+        return;
+    }
+    if (input->consumed_button_count > 0) {
+        if (pressed && button < KEY_CNT) {
+            device->consumed_buttons[button] = true;
+            ++input->consumed_button_count;
         }
         return;
     }
@@ -455,7 +485,9 @@ static void handle_pointer_button(struct wl_listener *listener, void *data) {
         (seat->pointer_state.button_count == 0 || !pressed) &&
         input->callbacks.pointer_button(input->data, window, button, pressed, input->modifiers) &&
         pressed && button < KEY_CNT) {
-        input->consumed_buttons[button] = 1;
+        input->gesture_device = device;
+        input->gesture_button = button;
+        device->consumed_buttons[button] = true;
         ++input->consumed_button_count;
         wlr_seat_pointer_notify_clear_focus(seat);
         return;
@@ -481,8 +513,18 @@ static void handle_pointer_axis(struct wl_listener *listener, void *data) {
 static void handle_pointer_frame(struct wl_listener *listener, void *data) {
     (void)data;
     struct tty_device *device = wl_container_of(listener, device, frame);
-    if (device->input->seat) {
-        wlr_seat_pointer_notify_frame(device->input->seat);
+    struct seaside_tty_input *input = device->input;
+    if (input->seat) {
+        if (input->gesture_device == device && input->gesture_released) {
+            const uint32_t button = input->gesture_button;
+            device->consumed_buttons[button] = false;
+            --input->consumed_button_count;
+            input->gesture_device = NULL;
+            input->gesture_released = false;
+            input->callbacks.pointer_button(input->data, 0, button, false, input->modifiers);
+            update_pointer_target(input, monotonic_msec());
+        }
+        wlr_seat_pointer_notify_frame(input->seat);
     }
 }
 

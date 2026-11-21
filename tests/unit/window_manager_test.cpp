@@ -139,7 +139,7 @@ TEST(WindowManager, KeepsHeldMruStableAndSkipsUnmappedWindows) {
 }
 
 TEST(WindowManager, DirectionalFocusWrapsInTheCurrentWorkspace) {
-    WindowManager manager(WorkspaceMode::global);
+    WindowManager manager(WorkspaceMode::global, false);
     ASSERT_TRUE(manager.add_output("left", left, left, true));
     const auto a = open_window(manager);
     const auto b = open_window(manager);

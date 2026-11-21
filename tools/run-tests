@@ -30,6 +30,11 @@ FORBIDDEN_GTEST_ENV = frozenset({
     "TESTBRIDGE_TEST_ONLY", "TEST_TOTAL_SHARDS", "TEST_SHARD_INDEX",
     "TEST_SHARD_STATUS_FILE", "XML_OUTPUT_FILE", "TEST_PREMATURE_EXIT_FILE",
 })
+PART_QUALIFICATION = {
+    1: "pending_arch_vm_drm_and_interactive_checks",
+    3: "headless_milestone_only_pending_arch_vm_tty_seat_display_input_and_service_preflight",
+    5: "headless_layout_checks_pending_arch_vm_tty_layout_trial",
+}
 
 
 def gtest_environment_override(key: str) -> bool:
@@ -782,10 +787,8 @@ def write_report(run_dir: Path, report: dict) -> None:
         report["part_results"][str(part)] = {
             "software_status": software,
             "counts": dict(Counter(row["status"] for row in rows)),
-            "qualification": "pending_arch_vm_drm_and_interactive_checks" if part == 1 else
-                             "headless_milestone_only_pending_arch_vm_tty_seat_display_input_and_service_preflight"
-                             if part == 3 else
-                             "software_evidence_only_designated_vm_qualification_not_established",
+            "qualification": PART_QUALIFICATION.get(
+                part, "software_evidence_only_designated_vm_qualification_not_established"),
         }
     report["part1_qualification"] = "pending_arch_vm_drm_and_interactive_checks"
     report["pending_checks"] = [
@@ -809,6 +812,8 @@ def write_report(run_dir: Path, report: dict) -> None:
     ]
     if 3 in parts:
         lines.append("Part 3 full TTY startup and service preflight require the dedicated Arch VM trial.")
+    if 5 in parts:
+        lines.append("Part 5 layout behavior at the real TTY requires the dedicated Arch VM trial.")
     for row in report["commands"]:
         lines.append(f"{row['status'].upper()}: {row['id']} — {shlex.join(row['command'])}")
         if row.get("error") or row.get("cleanup_error"):

@@ -30,6 +30,7 @@ class Desktop final {
     bool button(WindowId id, std::uint32_t button, bool pressed, std::uint8_t modifiers, double x,
                 double y) noexcept;
     void motion(double x, double y) noexcept;
+    void cancel_drag() noexcept;
 
     const WindowManager &windows() const noexcept { return windows_; }
     bool failed() const noexcept { return failed_; }
@@ -43,11 +44,14 @@ class Desktop final {
         std::uint32_t button;
         bool resize;
         double x, y;
+        bool started = false;
     };
 
     static std::uint64_t on_window(void *self, const seaside_scene_window_event *event) noexcept;
     std::uint64_t window_event(const seaside_scene_window_event &event);
     void project(WindowId resize = 0);
+    bool update_size_limits(WindowId id);
+    void discard_drag();
     std::optional<std::string_view> match(const OutputSelector &selector) const noexcept;
     bool resize(WindowId id, Direction direction, int distance);
     bool resize_by(WindowId id, int dx, int dy);

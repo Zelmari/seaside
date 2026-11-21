@@ -42,9 +42,10 @@ typedef uint64_t (*seaside_scene_window_fn)(void *data,
                                             const struct seaside_scene_window_event *event);
 
 struct seaside_scene_window_placement {
-    struct seaside_scene_rect geometry, output;
+    struct seaside_scene_rect geometry, output, clip;
     uint64_t stacking;
-    bool visible, activated, maximized, fullscreen, resize;
+    int border_width;
+    bool visible, activated, maximized, fullscreen, tiled, resize, resizing;
 };
 
 struct seaside_scene_target {

@@ -17,6 +17,9 @@ struct part3_output {
     struct wl_listener commit;
     struct wl_listener destroy;
     struct part3_output_snapshot snapshot;
+    struct part3_output_pixel sample;
+    unsigned sample_x, sample_y;
+    bool sample_pixel;
     bool listening;
     bool render_locked;
 };
@@ -50,6 +53,10 @@ static void output_commit(struct wl_listener *listener, void *data) {
                 memcpy(&pixel, (const unsigned char *)pixels + y * stride + x * sizeof(pixel),
                        sizeof(pixel));
                 pixel &= 0xFFFFFF;
+                if (observer->sample_pixel && x == observer->sample_x && y == observer->sample_y) {
+                    observer->sample.frames++;
+                    observer->sample.rgb = pixel;
+                }
                 black = black && pixel == 0;
                 const uint32_t expected = x < CLIENT_WIDTH && y < CLIENT_HEIGHT ? CLIENT_RGB : 0;
                 client = client && pixel == expected;
@@ -129,6 +136,22 @@ struct wlr_output *part3_output_handle(struct part3_output *output) {
 
 struct part3_output_snapshot part3_output_get_snapshot(struct part3_output *output) {
     return output ? output->snapshot : (struct part3_output_snapshot){0};
+}
+
+bool part3_output_sample_pixel(struct part3_output *output, unsigned x, unsigned y) {
+    if (!output || !output->output || x >= OUTPUT_WIDTH || y >= OUTPUT_HEIGHT) {
+        return false;
+    }
+    output->sample_x = x;
+    output->sample_y = y;
+    output->sample = (struct part3_output_pixel){0};
+    output->sample_pixel = true;
+    wlr_output_schedule_frame(output->output);
+    return true;
+}
+
+struct part3_output_pixel part3_output_get_pixel(struct part3_output *output) {
+    return output ? output->sample : (struct part3_output_pixel){0};
 }
 
 void part3_output_destroy(struct part3_output *output) {
