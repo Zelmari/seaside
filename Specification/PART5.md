@@ -86,3 +86,19 @@ reports under `~/Projects/seaside/test-results/vm-776cd892cda0/`. The VM
 exposed one usable connector. Adjacent-output clipping was checked in the
 headless fixture. Native multi-monitor and GPU qualification remain Part 8
 work.
+
+## Scrolling edge navigation verification
+
+The headless fixture at `3d5c0fc` checked that focus and viewport geometry
+stay in place at both strip ends. The unit, integration, and runner suites
+passed 25 entries and all 207 GoogleTest cases. The real portal test was
+skipped in WSL2. The Part 5 sanitizer run passed four entries and 23
+GoogleTest cases. Reports are under `test-results/20261121T155543Z-ebdd1d62/`
+and `test-results/20261121T155543Z-f174ec3b/`.
+
+The focused Arch TTY trial at the same revision opened three scrolling
+terminals. `Super+Right` at the third and `Super+Left` at the first kept
+their respective shell PIDs focused. Two intervening left presses visited
+the middle and first terminals in order. The trial also passed the existing
+resize, workspace, and VT checks. Its guest report, input events, and captures
+are under `test-results/part5-vm/20261121T155635Z-e0f8260d/`.
