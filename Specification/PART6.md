@@ -14,14 +14,15 @@ from `WAYLAND_DISPLAY` in the running session.
 
 ## Manual checks in the Arch VM
 
-At the guest's logged-in TTY, run `./build/seaside` from `~/Projects/seaside`.
+At the VirtualBox guest's logged-in TTY, run
+`WLR_RENDERER=pixman ./build/seaside` from `~/Projects/seaside`.
 To make temporary edits away from the normal config, launch with separate XDG
 config and state directories. Open `foot` with `Super+Return`, then edit the
 generated `$XDG_CONFIG_HOME/seaside/config.toml` from there.
 
 ```sh
 trial=$(mktemp -d)
-XDG_CONFIG_HOME="$trial/config" XDG_STATE_HOME="$trial/state" ./build/seaside
+WLR_RENDERER=pixman XDG_CONFIG_HOME="$trial/config" XDG_STATE_HOME="$trial/state" ./build/seaside
 ```
 
 | Check | Shortcut or command |
@@ -63,6 +64,23 @@ XDG_CONFIG_HOME="$trial/config" XDG_STATE_HOME="$trial/state" ./build/seaside
   `1.58.2`, libpng `1.6.59`, TurboJPEG `3.2.1`, and libwebp `1.6.0`. The VM
   build used the signed Arch `nlohmann-json` package in a user-local build
   directory because installing a system package required interactive sudo.
+
+The expanded Arch VM trial at `6c6061e49b10` passed 34 Meson checks and 240
+GoogleTest cases. Its real TTY session applied a live wallpaper and showed
+the expected pixels after switching between Dwindle and scrolling. Rejected
+wallpaper and layout edits preserved the active scene and recovery snapshot.
+The VirtualBox output accepted live 125% scaling with the hardware cursor
+and the expected logical capture size. IPC returned `not_ready` for mutations
+during preflight while queries, subscriptions, and clean exit worked. Closing
+a real client made its window ID return `not_found`.
+
+Headless fixtures in the same guest run injected a failure after the first
+of two output commits and checked rollback and snapshot preservation. They
+also exercised the rollback failure path, queried output and workspace
+state over a Unix socket across loss and return of the last headless output,
+and verified a TOML binding reload canceled an active drag. All 15 Part 4–6
+Meson checks passed under ASan/UBSan on the host. The expanded guest reports
+are in `test-results/vm-e22c5125dcd4`.
 
 ## Remaining qualification
 
