@@ -289,6 +289,12 @@ static void on_output_destroy(struct wl_listener *listener, void *data) {
     detach_output(capture);
 }
 
+void seaside_output_capture_clear_output(struct seaside_output_capture *capture) {
+    if (capture) {
+        detach_output(capture);
+    }
+}
+
 bool seaside_output_capture_set_output(struct seaside_output_capture *capture,
                                        struct wlr_output *output) {
     if (!capture || !capture->display || !capture->layout || !output || !output->enabled ||
@@ -310,6 +316,11 @@ bool seaside_output_capture_set_output(struct seaside_output_capture *capture,
         return false;
     }
     return true;
+}
+
+bool seaside_output_capture_position(struct seaside_output_capture *capture, int x, int y) {
+    return capture && capture->output &&
+           wlr_output_layout_add(capture->layout, capture->output, x, y);
 }
 
 static void handle_create_source(struct wl_client *client, struct wl_resource *resource,

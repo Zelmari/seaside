@@ -1,4 +1,5 @@
 #include "config_transaction.hpp"
+#include "desktop.hpp"
 #include "output_capture.h"
 #include "scene.hpp"
 #include "server.hpp"
@@ -66,9 +67,8 @@ class Commands {
     }
 
     std::expected<pid_t, int> launch(const std::string &command) {
-        // Reserve the reaper slot before a child can start. The shell still
-        // interprets the configured command; exec keeps the default terminal's
-        // PID stable so its first Wayland surface can receive keyboard focus.
+        // Reserve the reaper slot before a child can start. Launching the
+        // default terminal with exec keeps its lifetime tied to that slot.
         children_.push_back(0);
         char *const argv[]{const_cast<char *>("sh"), const_cast<char *>("-c"),
                            const_cast<char *>(command == "foot" ? "exec foot" : command.c_str()),
@@ -120,21 +120,8 @@ class Commands {
         return children_.back();
     }
 
-    void reap(seaside::Scene &scene, pid_t &watched) noexcept {
+    void reap() noexcept {
         for (auto child = children_.begin(); child != children_.end();) {
-            if (*child == watched) {
-                siginfo_t state{};
-                const int result =
-                    waitid(P_PID, static_cast<id_t>(watched), &state, WEXITED | WNOHANG | WNOWAIT);
-                if (result < 0 && errno == EINTR) {
-                    ++child;
-                    continue;
-                }
-                if (result < 0 || state.si_pid != 0) {
-                    scene.clear_client_watch();
-                    watched = 0;
-                }
-            }
             int status = 0;
             const auto reaped = waitpid(*child, &status, WNOHANG);
             if (reaped == *child || (reaped < 0 && errno == ECHILD)) {
@@ -168,10 +155,18 @@ class Session {
             const seaside::ConfigPaths &paths)
         : server_(server), scene_(scene), drm_(drm), socket_(socket),
           loop_(wl_display_get_event_loop(server.display())), config_(std::move(config)),
-          store_(store), paths_(paths), commands_(socket) {}
+          store_(store), paths_(paths), commands_(socket), desktop_(scene, config_.config) {}
+
+    ~Session() noexcept { seaside_tty_drm_set_output_callbacks(drm_, nullptr, nullptr); }
 
     bool observe(seaside_tty_input *input) noexcept {
         input_ = input;
+        desktop_.set_input(input);
+        const seaside_tty_drm_output_callbacks callbacks{
+            .added = output_added,
+            .removed = output_removed,
+        };
+        seaside_tty_drm_set_output_callbacks(drm_, &callbacks, this);
         timer_.reset(wl_event_loop_add_timer(loop_, on_tick, this));
         appearance_deadline_ = Clock::now() + appearance_timeout;
         return timer_ && wl_event_source_timer_update(timer_.get(), 1) == 0;
@@ -188,9 +183,9 @@ class Session {
             outcome_.cleanup_failed = !activation_->stop();
             activation_.reset();
         }
-        scene_.clear_client_watch();
-        watched_ = 0;
-        commands_.reap(scene_, watched_);
+        seaside_tty_drm_set_output_callbacks(drm_, nullptr, nullptr);
+        desktop_.set_input(nullptr);
+        commands_.reap();
         config_io_.reset();
         workers_.reset();
         if (!ready_ && !outcome_.failure_stage && !outcome_.preflight_failure) {
@@ -203,7 +198,47 @@ class Session {
         auto &session = *static_cast<Session *>(data);
         if (!session.stopping_) {
             seaside_tty_drm_move(session.drm_, absolute, x, y);
+            if (seaside_tty_drm_cursor_position(session.drm_, &x, &y)) {
+                session.desktop_.motion(x, y);
+            }
         }
+    }
+
+    static bool pointer_target(void *data, seaside_tty_pointer_target *target) noexcept {
+        auto &session = *static_cast<Session *>(data);
+        double x, y;
+        seaside_scene_target hit{.surface = target->surface, .id = 0, .sx = 0, .sy = 0};
+        if (session.stopping_ || !seaside_tty_drm_cursor_position(session.drm_, &x, &y) ||
+            !session.scene_.window_at(x, y, hit)) {
+            return false;
+        }
+        *target = {hit.surface, hit.sx, hit.sy, hit.id};
+        return true;
+    }
+
+    static bool pointer_button(void *data, std::uint64_t window, std::uint32_t button, bool pressed,
+                               std::uint8_t mods) noexcept {
+        auto &session = *static_cast<Session *>(data);
+        double x, y;
+        return session.ready_ && !session.stopping_ &&
+               seaside_tty_drm_cursor_position(session.drm_, &x, &y) &&
+               session.desktop_.button(window, button, pressed, mods, x, y);
+    }
+
+    static bool pointer_absolute_delta(void *data, double x, double y, double *dx,
+                                       double *dy) noexcept {
+        auto &session = *static_cast<Session *>(data);
+        return seaside_tty_drm_absolute_delta(session.drm_, x, y, dx, dy);
+    }
+
+    static void pointer_locked(void *data, bool locked) noexcept {
+        auto &session = *static_cast<Session *>(data);
+        seaside_tty_drm_set_cursor_visible(session.drm_, !locked);
+    }
+
+    static void modifiers_changed(void *data, std::uint8_t modifiers) noexcept {
+        auto &session = *static_cast<Session *>(data);
+        session.desktop_.modifiers_changed(modifiers);
     }
 
     static bool shortcut_pressed(void *data, uint8_t mods, uint32_t keysym) noexcept {
@@ -227,13 +262,15 @@ class Session {
         }
         switch (action->second.kind) {
         case seaside::ActionKind::exit:
+            session.desktop_.finish_focus_cycle();
             session.server_.terminate();
             return true;
         case seaside::ActionKind::exec:
+            session.desktop_.finish_focus_cycle();
             session.launch(action->second.text);
             return true;
         default:
-            return false;
+            return session.desktop_.action(action->second, mods);
         }
     }
 
@@ -244,11 +281,6 @@ class Session {
         server_.terminate();
     }
 
-    static void focus_terminal(void *data, wlr_surface *surface) noexcept {
-        auto &session = *static_cast<Session *>(data);
-        seaside_tty_input_set_focus(session.input_, surface);
-    }
-
     void launch(const std::string &command) noexcept {
         try {
             const auto pid = commands_.launch(command);
@@ -256,10 +288,6 @@ class Session {
                 std::fprintf(stderr, "seaside: command launch failed: %s\n",
                              std::strerror(pid.error()));
                 return;
-            }
-            if (command == "foot") {
-                scene_.clear_client_watch();
-                watched_ = scene_.watch_client(*pid, focus_terminal, this) ? *pid : 0;
             }
         } catch (...) {
             std::fputs("seaside: couldn't prepare command launch\n", stderr);
@@ -438,16 +466,53 @@ class Session {
         }
     }
 
-    bool attach_output() noexcept {
-        auto *output = seaside_tty_drm_enable(drm_, server_.allocator(), server_.renderer());
-        if (!output || !scene_.add_output(output)) {
+    bool attach_capture(wlr_output *output) noexcept {
+        if (capture_) {
+            if (!seaside_output_capture_set_output(capture_.get(), output)) {
+                return false;
+            }
+        } else {
+            capture_.reset(seaside_output_capture_create(server_.display(), output));
+            if (!capture_) {
+                return false;
+            }
+        }
+        const auto bounds = desktop_.output_bounds(output);
+        if (!seaside_output_capture_position(capture_.get(), bounds.x, bounds.y)) {
+            seaside_output_capture_clear_output(capture_.get());
             return false;
         }
-        if (capture_) {
-            return seaside_output_capture_set_output(capture_.get(), output);
+        capture_output_ = output;
+        return true;
+    }
+
+    static bool output_added(void *data, wlr_output *output, const char *connector,
+                             const char *identity, int x, int y, int width, int height) noexcept {
+        auto &session = *static_cast<Session *>(data);
+        if (!session.desktop_.add_output(output, connector, identity ? identity : "",
+                                         {x, y, width, height})) {
+            return false;
         }
-        capture_.reset(seaside_output_capture_create(server_.display(), output));
-        return capture_ != nullptr;
+        if (!session.capture_output_ && !session.attach_capture(output)) {
+            session.desktop_.remove_output(output);
+            return false;
+        }
+        return true;
+    }
+
+    static void output_removed(void *data, wlr_output *output, const char *) noexcept {
+        auto &session = *static_cast<Session *>(data);
+        if (session.capture_output_ == output) {
+            seaside_output_capture_clear_output(session.capture_.get());
+            session.capture_output_ = nullptr;
+        }
+        session.desktop_.remove_output(output);
+        if (!session.capture_output_) {
+            if (auto *fallback = session.desktop_.focused_output_handle();
+                fallback && !session.attach_capture(fallback)) {
+                session.fail("output-capture-reattachment");
+            }
+        }
     }
 
     static int on_tick(void *data) noexcept {
@@ -457,13 +522,19 @@ class Session {
         }
         auto display = seaside_tty_drm_observation(session.drm_);
         const auto input = seaside_tty_input_get_snapshot(session.input_);
-        if (display.failed || input.failed || session.scene_.snapshot().failed) {
+        if (display.failed || input.failed || session.scene_.snapshot().failed ||
+            session.desktop_.failed()) {
             session.fail("output-cursor-or-input");
             return 0;
         }
-        if (display.output_pending && !session.attach_output()) {
+        if (display.output_pending &&
+            !seaside_tty_drm_enable_pending(session.drm_, session.server_.allocator(),
+                                            session.server_.renderer())) {
             session.fail("output-cursor-capture-setup");
             return 0;
+        }
+        if (display.output_pending) {
+            seaside_tty_input_refresh_pointer(session.input_);
         }
         if (!session.gate_) {
             if (Clock::now() >= session.appearance_deadline_) {
@@ -482,7 +553,7 @@ class Session {
             display.cursor_presented) {
             session.mark_ready(display.cursor_plane_id);
         }
-        session.commands_.reap(session.scene_, session.watched_);
+        session.commands_.reap();
         if (!session.stopping_ &&
             wl_event_source_timer_update(session.timer_.get(), session.ready_ ? 100 : 25) < 0) {
             session.fail("observation-timer");
@@ -499,7 +570,9 @@ class Session {
     seaside::ConfigStore &store_;
     const seaside::ConfigPaths &paths_;
     Commands commands_;
+    seaside::Desktop desktop_;
     seaside_tty_input *input_ = nullptr;
+    wlr_output *capture_output_ = nullptr;
     std::unique_ptr<wl_event_source, decltype(&wl_event_source_remove)> timer_{
         nullptr, wl_event_source_remove};
     std::unique_ptr<seaside_output_capture, decltype(&seaside_output_capture_destroy)> capture_{
@@ -513,7 +586,6 @@ class Session {
     std::unique_ptr<seaside::WorkQueue> workers_;
     std::optional<seaside::AsyncConfigIo> config_io_;
     Clock::time_point appearance_deadline_, preflight_deadline_;
-    pid_t watched_ = 0;
     Outcome outcome_;
     bool preflight_passed_ = false;
     bool ready_ = false;
@@ -555,6 +627,11 @@ std::expected<Outcome, const char *> run_session(seaside::LoadedConfig config,
         .exit_requested = nullptr,
         .launch_requested = nullptr,
         .shortcut_pressed = Session::shortcut_pressed,
+        .modifiers_changed = Session::modifiers_changed,
+        .pointer_target = Session::pointer_target,
+        .pointer_button = Session::pointer_button,
+        .pointer_absolute_delta = Session::pointer_absolute_delta,
+        .pointer_locked = Session::pointer_locked,
     };
     std::unique_ptr<seaside_tty_input, decltype(&seaside_tty_input_destroy)> input(
         seaside_tty_input_create(backend, &callbacks, &session), seaside_tty_input_destroy);

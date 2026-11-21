@@ -22,6 +22,8 @@ void seaside_output_capture_destroy(struct seaside_output_capture *capture);
  * newly enabled output before accepting new capture sessions. */
 bool seaside_output_capture_set_output(struct seaside_output_capture *capture,
                                        struct wlr_output *output);
+bool seaside_output_capture_position(struct seaside_output_capture *capture, int x, int y);
+void seaside_output_capture_clear_output(struct seaside_output_capture *capture);
 
 /* Require one live client with the peer credentials and the relevant bound
  * resources on this display. This is a portal readiness check. */

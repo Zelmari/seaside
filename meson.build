@@ -40,6 +40,18 @@ xdg_shell_private_code = custom_target(
   'xdg-shell-private-code', input: xdg_shell_xml, output: 'xdg-shell-protocol.c',
   command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'],
 )
+pointer_protocols = []
+foreach name : ['pointer-constraints', 'relative-pointer']
+  xml = wayland_protocols.get_variable(pkgconfig: 'pkgdatadir') / 'unstable' / name / (name + '-unstable-v1.xml')
+  pointer_protocols += custom_target(
+    name + '-client-header', input: xml, output: name + '-client-protocol.h',
+    command: [wayland_scanner, 'client-header', '@INPUT@', '@OUTPUT@'],
+  )
+  pointer_protocols += custom_target(
+    name + '-private-code', input: xml, output: name + '-protocol.c',
+    command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'],
+  )
+endforeach
 
 capture_source_xml = wayland_protocols.get_variable(pkgconfig: 'pkgdatadir') / 'staging/ext-image-capture-source/ext-image-capture-source-v1.xml'
 capture_source_server = custom_target(
@@ -128,7 +140,7 @@ core = static_library(
 tty_foundation = static_library(
   'seaside-tty-foundation', ['src/tty_drm.c', 'src/tty_input.c'],
   include_directories: include_directories('src'),
-  dependencies: [wlroots, wayland_server, libdrm, xkbcommon], install: false,
+  dependencies: [wlroots, wayland_server, pixman, libdrm, xkbcommon], install: false,
 )
 
 tty_fixture = executable(
@@ -143,13 +155,16 @@ test('part3-tty-guard', python, args: [files('tests/integration/test_tty_guard.p
 )
 
 tty_input_test = executable(
-  'seaside-tty-input-test', 'tests/unit/tty_input_test.c',
+  'seaside-tty-input-test', ['tests/unit/tty_input_test.c', pointer_protocols],
   include_directories: include_directories('src'),
-  dependencies: [wlroots, wayland_server, wayland_client, xkbcommon],
+  dependencies: [wlroots, wayland_server, wayland_client, pixman, xkbcommon],
   link_with: tty_foundation, install: false,
 )
-test('part3-tty-input', tty_input_test, suite: ['unit', 'part3'], timeout: 10,
+test('part3-tty-input', tty_input_test, args: ['keyboard'], suite: ['unit', 'part3'], timeout: 10,
   env: {'SEASIDE_TEST_PART': '3', 'SEASIDE_REQUIREMENTS': '3,12.2b'},
+)
+test('part4-pointer-seat', tty_input_test, args: ['pointer'], suite: ['integration', 'part4'], timeout: 10,
+  env: {'SEASIDE_TEST_PART': '4', 'SEASIDE_REQUIREMENTS': '4.4,6.2,12.2b'},
 )
 
 tty_terminal_test = executable(
@@ -169,6 +184,20 @@ config_foundation = static_library(
   dependencies: [tomlplusplus, xkbcommon, wayland_server, threads],
   cpp_args: ['-DTOML_ENABLE_UNRELEASED_FEATURES=0'],
   install: false,
+)
+
+desktop_foundation = static_library(
+  'seaside-desktop-foundation', ['src/desktop.cpp', 'src/window_manager.cpp'],
+  include_directories: include_directories('src'), install: false,
+)
+
+window_manager_tests = executable(
+  'seaside-window-manager-tests', 'tests/unit/window_manager_test.cpp',
+  include_directories: include_directories('src'),
+  dependencies: gtest, link_with: [desktop_foundation, config_foundation], install: false,
+)
+test('part4-window-policy', window_manager_tests, suite: ['unit', 'part4'], timeout: 30,
+  env: {'SEASIDE_GTEST': '1', 'SEASIDE_TEST_PART': '4', 'SEASIDE_REQUIREMENTS': '2.2,4,5,12.2b'},
 )
 
 session_foundation = static_library(
@@ -250,7 +279,8 @@ seaside = executable(
   'seaside', 'src/session_entry.cpp',
   include_directories: include_directories('src'),
   dependencies: [wlroots, wayland_server, pixman, libdrm, systemd, pipewire, xkbcommon, threads],
-  link_with: [core, tty_foundation, config_foundation, capture_foundation, session_foundation],
+  link_with: [core, tty_foundation, config_foundation, capture_foundation, session_foundation,
+              desktop_foundation],
   install: true,
 )
 install_data('packaging/seaside-portals.conf', install_dir: get_option('datadir') / 'xdg-desktop-portal')
@@ -279,6 +309,18 @@ part3_fixture = executable(
 )
 test('part3-headless-session', part3_fixture, suite: ['integration', 'part3'], timeout: 30,
   env: {'SEASIDE_TEST_PART': '3', 'SEASIDE_REQUIREMENTS': '2.1,2.2,3,12.2b'},
+)
+
+part4_fixture = executable(
+  'seaside-part4-fixture',
+  ['tests/integration/part4.cpp', 'tests/integration/part3_bridge.c',
+   xdg_shell_client_header, xdg_shell_private_code],
+  include_directories: include_directories('src', 'tests/integration'),
+  dependencies: [wlroots, wayland_server, wayland_client, pixman, libdrm, xkbcommon, threads],
+  link_with: [desktop_foundation, core, tty_foundation, config_foundation], install: false,
+)
+test('part4-headless-desktop', part4_fixture, suite: ['integration', 'part4'], timeout: 30,
+  env: {'SEASIDE_TEST_PART': '4', 'SEASIDE_REQUIREMENTS': '2.2,4,5,12.2b'},
 )
 
 portal_smoke = executable(

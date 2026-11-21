@@ -1,10 +1,15 @@
-#define _POSIX_C_SOURCE 200809L
+#define _GNU_SOURCE
 #include "tty_input.h"
 
+#include "pointer-constraints-client-protocol.h"
+#include "relative-pointer-client-protocol.h"
+
+#include <drm_fourcc.h>
 #include <linux/input-event-codes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #include <wayland-client.h>
@@ -12,6 +17,7 @@
 #include <wlr/interfaces/wlr_keyboard.h>
 #include <wlr/interfaces/wlr_pointer.h>
 #include <wlr/types/wlr_compositor.h>
+#include <wlr/types/wlr_shm.h>
 #include <xkbcommon/xkbcommon-keysyms.h>
 
 static void check(bool condition, const char *message) {
@@ -27,6 +33,8 @@ struct observation {
     unsigned launches;
     unsigned configured_shortcuts;
     unsigned vt_switches;
+    unsigned modifier_changes;
+    uint8_t modifiers;
     bool absolute;
     double x, y;
 };
@@ -60,6 +68,12 @@ static bool record_shortcut(void *data, uint8_t modifiers, uint32_t keysym) {
         return true;
     }
     return false;
+}
+
+static void record_modifiers(void *data, uint8_t modifiers) {
+    struct observation *observation = data;
+    ++observation->modifier_changes;
+    observation->modifiers = modifiers;
 }
 
 static const struct wlr_backend_impl backend_impl = {0};
@@ -142,6 +156,10 @@ struct keyboard_client {
     struct wl_compositor *compositor;
     struct wl_seat *seat;
     struct wl_keyboard *keyboard;
+    struct wl_pointer *pointer;
+    struct wl_shm *shm;
+    struct zwp_pointer_constraints_v1 *constraints;
+    struct zwp_relative_pointer_manager_v1 *relative_pointer_manager;
     uint32_t capabilities;
     unsigned keymaps;
     unsigned repeat_info;
@@ -153,6 +171,19 @@ struct keyboard_client {
     bool data_device_manager;
     bool escaped;
     bool entered_with_return;
+    unsigned pointer_enters;
+    unsigned pointer_leaves;
+    unsigned pointer_motions;
+    unsigned pointer_buttons;
+    unsigned pointer_axes;
+    unsigned pointer_frames;
+    unsigned relative_motions;
+    unsigned locks;
+    unsigned unlocks;
+    unsigned confines;
+    unsigned unconfines;
+    double relative_dx, unaccelerated_dx;
+    double pointer_x, pointer_y;
 };
 
 static void client_keymap(void *data, struct wl_keyboard *keyboard, uint32_t format, int fd,
@@ -229,12 +260,105 @@ static const struct wl_keyboard_listener keyboard_listener = {
     .repeat_info = client_repeat,
 };
 
+static void pointer_enter(void *data, struct wl_pointer *pointer, uint32_t serial,
+                          struct wl_surface *surface, wl_fixed_t sx, wl_fixed_t sy) {
+    (void)pointer;
+    (void)serial;
+    (void)surface;
+    struct keyboard_client *client = data;
+    ++client->pointer_enters;
+    client->pointer_x = wl_fixed_to_double(sx);
+    client->pointer_y = wl_fixed_to_double(sy);
+}
+
+static void pointer_leave(void *data, struct wl_pointer *pointer, uint32_t serial,
+                          struct wl_surface *surface) {
+    (void)pointer;
+    (void)serial;
+    (void)surface;
+    ++((struct keyboard_client *)data)->pointer_leaves;
+}
+
+static void pointer_motion(void *data, struct wl_pointer *pointer, uint32_t time, wl_fixed_t sx,
+                           wl_fixed_t sy) {
+    (void)pointer;
+    (void)time;
+    struct keyboard_client *client = data;
+    ++client->pointer_motions;
+    client->pointer_x = wl_fixed_to_double(sx);
+    client->pointer_y = wl_fixed_to_double(sy);
+}
+
+static void pointer_button(void *data, struct wl_pointer *pointer, uint32_t serial, uint32_t time,
+                           uint32_t button, uint32_t state) {
+    (void)pointer;
+    (void)serial;
+    (void)time;
+    (void)button;
+    (void)state;
+    ++((struct keyboard_client *)data)->pointer_buttons;
+}
+
+static void pointer_axis(void *data, struct wl_pointer *pointer, uint32_t time, uint32_t axis,
+                         wl_fixed_t value) {
+    (void)pointer;
+    (void)time;
+    check(axis == WL_POINTER_AXIS_VERTICAL_SCROLL && wl_fixed_to_double(value) == 3,
+          "axis event was changed in the input bridge");
+    ++((struct keyboard_client *)data)->pointer_axes;
+}
+
+static void pointer_frame(void *data, struct wl_pointer *pointer) {
+    (void)pointer;
+    ++((struct keyboard_client *)data)->pointer_frames;
+}
+
+static void pointer_axis_source(void *data, struct wl_pointer *pointer, uint32_t source) {
+    (void)data;
+    (void)pointer;
+    check(source == WL_POINTER_AXIS_SOURCE_FINGER, "wrong axis source");
+}
+
+static void pointer_axis_stop(void *data, struct wl_pointer *pointer, uint32_t time,
+                              uint32_t axis) {
+    (void)data;
+    (void)pointer;
+    (void)time;
+    (void)axis;
+    check(false, "unexpected axis stop");
+}
+
+static void pointer_axis_discrete(void *data, struct wl_pointer *pointer, uint32_t axis,
+                                  int32_t discrete) {
+    (void)data;
+    (void)pointer;
+    (void)axis;
+    (void)discrete;
+    check(false, "unexpected discrete axis event for finger source");
+}
+
+static const struct wl_pointer_listener pointer_listener = {
+    .enter = pointer_enter,
+    .leave = pointer_leave,
+    .motion = pointer_motion,
+    .button = pointer_button,
+    .axis = pointer_axis,
+    .frame = pointer_frame,
+    .axis_source = pointer_axis_source,
+    .axis_stop = pointer_axis_stop,
+    .axis_discrete = pointer_axis_discrete,
+};
+
 static void seat_capabilities(void *data, struct wl_seat *seat, uint32_t capabilities) {
     struct keyboard_client *client = data;
     client->capabilities = capabilities;
     if (capabilities & WL_SEAT_CAPABILITY_KEYBOARD && !client->keyboard) {
         client->keyboard = wl_seat_get_keyboard(seat);
         wl_keyboard_add_listener(client->keyboard, &keyboard_listener, client);
+    }
+    if (capabilities & WL_SEAT_CAPABILITY_POINTER && !client->pointer) {
+        client->pointer = wl_seat_get_pointer(seat);
+        wl_pointer_add_listener(client->pointer, &pointer_listener, client);
     }
 }
 
@@ -249,6 +373,14 @@ static const struct wl_seat_listener seat_listener = {
     .name = seat_name,
 };
 
+static void shm_format(void *data, struct wl_shm *shm, uint32_t format) {
+    (void)data;
+    (void)shm;
+    (void)format;
+}
+
+static const struct wl_shm_listener shm_listener = {.format = shm_format};
+
 static void registry_global(void *data, struct wl_registry *registry, uint32_t name,
                             const char *interface, uint32_t version) {
     struct keyboard_client *client = data;
@@ -259,6 +391,15 @@ static void registry_global(void *data, struct wl_registry *registry, uint32_t n
         wl_seat_add_listener(client->seat, &seat_listener, client);
     } else if (strcmp(interface, wl_data_device_manager_interface.name) == 0) {
         client->data_device_manager = version >= 3;
+    } else if (strcmp(interface, wl_shm_interface.name) == 0) {
+        client->shm = wl_registry_bind(registry, name, &wl_shm_interface, 1);
+        wl_shm_add_listener(client->shm, &shm_listener, client);
+    } else if (strcmp(interface, zwp_pointer_constraints_v1_interface.name) == 0) {
+        client->constraints =
+            wl_registry_bind(registry, name, &zwp_pointer_constraints_v1_interface, 1);
+    } else if (strcmp(interface, zwp_relative_pointer_manager_v1_interface.name) == 0) {
+        client->relative_pointer_manager =
+            wl_registry_bind(registry, name, &zwp_relative_pointer_manager_v1_interface, 1);
     }
 }
 
@@ -316,6 +457,7 @@ static void exercise_wayland_keyboard(void) {
     const struct seaside_tty_input_callbacks terminal_callbacks = {
         .launch_requested = record_launch,
         .shortcut_pressed = record_shortcut,
+        .modifiers_changed = record_modifiers,
     };
     struct seaside_tty_input *input =
         seaside_tty_input_create(&backend, &terminal_callbacks, &observation);
@@ -408,6 +550,8 @@ static void exercise_wayland_keyboard(void) {
     key(&second, KEY_LEFTCTRL, WL_KEYBOARD_KEY_STATE_RELEASED);
     check(observation.configured_shortcuts == 1 && observation.vt_switches == 1,
           "configured Ctrl+Return or standard VT keysym did not reach the compositor");
+    check(observation.modifier_changes == 8 && observation.modifiers == 0,
+          "compositor modifier tracking missed release or unplug transitions");
 
     wl_keyboard_release(keyboard_client.keyboard);
     wl_seat_release(keyboard_client.seat);
@@ -421,9 +565,373 @@ static void exercise_wayland_keyboard(void) {
     wlr_keyboard_finish(&second);
 }
 
-int main(void) {
-    exercise(true);
-    exercise(false);
-    exercise_wayland_keyboard();
+struct pointer_scene {
+    struct seaside_tty_input *input;
+    struct wlr_surface *surfaces[2];
+    double x, y;
+    unsigned move_calls, clicks, consumed_releases;
+    bool locked;
+};
+
+static void scene_motion(void *data, bool absolute, double x, double y) {
+    struct pointer_scene *scene = data;
+    ++scene->move_calls;
+    scene->x = absolute ? 200 * x : scene->x + x;
+    scene->y = absolute ? 100 * y : scene->y + y;
+}
+
+static bool scene_absolute_delta(void *data, double x, double y, double *dx, double *dy) {
+    const struct pointer_scene *scene = data;
+    *dx = 200 * x - scene->x;
+    *dy = 100 * y - scene->y;
+    return true;
+}
+
+static bool scene_target(void *data, struct seaside_tty_pointer_target *target) {
+    const struct pointer_scene *scene = data;
+    size_t slot;
+    if (target->surface) {
+        slot = target->surface == scene->surfaces[0] ? 0 : 1;
+        if (target->surface != scene->surfaces[slot]) {
+            return false;
+        }
+    } else {
+        if (scene->x < 0 || scene->x >= 200 || scene->y < 0 || scene->y >= 100) {
+            return false;
+        }
+        slot = scene->x < 100 ? 0 : 1;
+    }
+    target->surface = scene->surfaces[slot];
+    target->window_id = slot + 1;
+    target->sx = scene->x - 100 * slot;
+    target->sy = scene->y;
+    return target->surface != NULL;
+}
+
+static bool scene_button(void *data, uint64_t window, uint32_t button, bool pressed,
+                         uint8_t modifiers) {
+    struct pointer_scene *scene = data;
+    if (button == BTN_RIGHT && modifiers == 1) {
+        if (!pressed) {
+            ++scene->consumed_releases;
+        }
+        return true;
+    }
+    if (pressed && window > 0 && window <= 2) {
+        ++scene->clicks;
+        seaside_tty_input_set_focus(scene->input, scene->surfaces[window - 1]);
+    }
+    return false;
+}
+
+static void scene_locked(void *data, bool locked) {
+    ((struct pointer_scene *)data)->locked = locked;
+}
+
+struct pointer_client {
+    struct wl_display *display;
+    struct wl_registry *registry;
+    struct wl_surface *surface;
+    struct wl_buffer *buffer;
+    struct zwp_relative_pointer_v1 *relative;
+    struct keyboard_client events;
+};
+
+static void relative_motion(void *data, struct zwp_relative_pointer_v1 *relative, uint32_t hi,
+                            uint32_t lo, wl_fixed_t dx, wl_fixed_t dy, wl_fixed_t unaccel_dx,
+                            wl_fixed_t unaccel_dy) {
+    (void)relative;
+    (void)hi;
+    (void)lo;
+    (void)dy;
+    (void)unaccel_dy;
+    struct keyboard_client *client = data;
+    ++client->relative_motions;
+    client->relative_dx = wl_fixed_to_double(dx);
+    client->unaccelerated_dx = wl_fixed_to_double(unaccel_dx);
+}
+
+static const struct zwp_relative_pointer_v1_listener relative_listener = {
+    .relative_motion = relative_motion,
+};
+
+static void pointer_locked(void *data, struct zwp_locked_pointer_v1 *lock) {
+    (void)lock;
+    ++((struct keyboard_client *)data)->locks;
+}
+
+static void pointer_unlocked(void *data, struct zwp_locked_pointer_v1 *lock) {
+    (void)lock;
+    ++((struct keyboard_client *)data)->unlocks;
+}
+
+static const struct zwp_locked_pointer_v1_listener lock_listener = {
+    .locked = pointer_locked,
+    .unlocked = pointer_unlocked,
+};
+
+static void pointer_confined(void *data, struct zwp_confined_pointer_v1 *confine) {
+    (void)confine;
+    ++((struct keyboard_client *)data)->confines;
+}
+
+static void pointer_unconfined(void *data, struct zwp_confined_pointer_v1 *confine) {
+    (void)confine;
+    ++((struct keyboard_client *)data)->unconfines;
+}
+
+static const struct zwp_confined_pointer_v1_listener confine_listener = {
+    .confined = pointer_confined,
+    .unconfined = pointer_unconfined,
+};
+
+static struct wlr_surface *connect_pointer_client(struct wl_display *server,
+                                                  struct pointer_client *client) {
+    int ends[2];
+    check(socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, ends) == 0, "socketpair failed");
+    struct wl_client *peer = wl_client_create(server, ends[0]);
+    client->display = wl_display_connect_to_fd(ends[1]);
+    check(peer && client->display, "pointer client connect failed");
+    client->registry = wl_display_get_registry(client->display);
+    wl_registry_add_listener(client->registry, &registry_listener, &client->events);
+    round_trip(server, client->display);
+    round_trip(server, client->display);
+    struct keyboard_client *events = &client->events;
+    check(events->compositor && events->shm && events->keyboard && events->pointer &&
+              events->constraints && events->relative_pointer_manager &&
+              events->capabilities == (WL_SEAT_CAPABILITY_KEYBOARD | WL_SEAT_CAPABILITY_POINTER),
+          "seat did not advertise pointer capability and protocols");
+
+    const int side = 100, stride = side * 4;
+    int fd = memfd_create("seaside-pointer-test", MFD_CLOEXEC);
+    check(fd >= 0 && ftruncate(fd, side * stride) == 0, "could not allocate pointer test buffer");
+    struct wl_shm_pool *pool = wl_shm_create_pool(events->shm, fd, side * stride);
+    client->buffer = wl_shm_pool_create_buffer(pool, 0, side, side, stride, WL_SHM_FORMAT_XRGB8888);
+    wl_shm_pool_destroy(pool);
+    close(fd);
+    client->surface = wl_compositor_create_surface(events->compositor);
+    wl_surface_attach(client->surface, client->buffer, 0, 0);
+    wl_surface_commit(client->surface);
+    client->relative = zwp_relative_pointer_manager_v1_get_relative_pointer(
+        events->relative_pointer_manager, events->pointer);
+    zwp_relative_pointer_v1_add_listener(client->relative, &relative_listener, events);
+    round_trip(server, client->display);
+    struct wl_resource *resource =
+        wl_client_get_object(peer, wl_proxy_get_id((struct wl_proxy *)client->surface));
+    check(resource != NULL, "missing pointer test surface resource");
+    return wlr_surface_from_resource(resource);
+}
+
+static void disconnect_pointer_client(struct wl_display *server, struct pointer_client *client) {
+    wl_surface_destroy(client->surface);
+    wl_buffer_destroy(client->buffer);
+    zwp_relative_pointer_v1_destroy(client->relative);
+    zwp_relative_pointer_manager_v1_destroy(client->events.relative_pointer_manager);
+    zwp_pointer_constraints_v1_destroy(client->events.constraints);
+    wl_pointer_release(client->events.pointer);
+    wl_keyboard_release(client->events.keyboard);
+    wl_seat_release(client->events.seat);
+    wl_shm_destroy(client->events.shm);
+    wl_compositor_destroy(client->events.compositor);
+    wl_registry_destroy(client->registry);
+    round_trip(server, client->display);
+    wl_display_disconnect(client->display);
+}
+
+static void relative(struct wlr_pointer *pointer, double dx, double raw_dx) {
+    struct wlr_pointer_motion_event motion = {
+        .pointer = pointer, .time_msec = 11, .delta_x = dx, .unaccel_dx = raw_dx};
+    wl_signal_emit_mutable(&pointer->events.motion, &motion);
+    wl_signal_emit_mutable(&pointer->events.frame, pointer);
+}
+
+static void button(struct wlr_pointer *pointer, uint32_t code, bool pressed) {
+    struct wlr_pointer_button_event event = {
+        .pointer = pointer,
+        .time_msec = 12,
+        .button = code,
+        .state = pressed ? WL_POINTER_BUTTON_STATE_PRESSED : WL_POINTER_BUTTON_STATE_RELEASED,
+    };
+    wlr_pointer_notify_button(pointer, &event);
+    wl_signal_emit_mutable(&pointer->events.frame, pointer);
+}
+
+static void axis(struct wlr_pointer *pointer) {
+    struct wlr_pointer_axis_event scroll = {
+        .pointer = pointer,
+        .time_msec = 13,
+        .source = WL_POINTER_AXIS_SOURCE_FINGER,
+        .orientation = WL_POINTER_AXIS_VERTICAL_SCROLL,
+        .delta = 3,
+    };
+    wl_signal_emit_mutable(&pointer->events.axis, &scroll);
+    wl_signal_emit_mutable(&pointer->events.frame, pointer);
+}
+
+static void exercise_wayland_pointer(void) {
+    struct wl_display *server = wl_display_create();
+    const uint32_t formats[] = {DRM_FORMAT_XRGB8888, DRM_FORMAT_ARGB8888};
+    check(server && wlr_compositor_create(server, 6, NULL) &&
+              wlr_shm_create(server, 1, formats, sizeof(formats) / sizeof(formats[0])),
+          "pointer test compositor setup failed");
+    struct wlr_backend backend = {0};
+    struct wlr_keyboard keyboard = {0};
+    struct wlr_pointer pointer = {0};
+    wlr_backend_init(&backend, &backend_impl);
+    wlr_keyboard_init(&keyboard, &keyboard_impl, "pointer test keyboard");
+    wlr_pointer_init(&pointer, &pointer_impl, "pointer test pointer");
+    struct pointer_scene scene = {.x = 10, .y = 10};
+    const struct seaside_tty_input_callbacks seat_callbacks = {
+        .motion = scene_motion,
+        .pointer_target = scene_target,
+        .pointer_button = scene_button,
+        .pointer_locked = scene_locked,
+        .pointer_absolute_delta = scene_absolute_delta,
+    };
+    scene.input = seaside_tty_input_create(&backend, &seat_callbacks, &scene);
+    check(scene.input && seaside_tty_input_enable_keyboard(scene.input, server) &&
+              seaside_tty_input_get_seat(scene.input),
+          "pointer test seat setup failed");
+    wl_signal_emit_mutable(&backend.events.new_input, &keyboard.base);
+    wl_signal_emit_mutable(&backend.events.new_input, &pointer.base);
+
+    struct pointer_client left = {0}, right = {0};
+    scene.surfaces[0] = connect_pointer_client(server, &left);
+    scene.surfaces[1] = connect_pointer_client(server, &right);
+    seaside_tty_input_set_focus(scene.input, scene.surfaces[0]);
+    seaside_tty_input_refresh_pointer(scene.input);
+    relative(&pointer, 100, 90);
+    axis(&pointer);
+    round_trip(server, left.display);
+    round_trip(server, right.display);
+    check(left.events.enters == 1 && left.events.pointer_enters == 1 &&
+              left.events.pointer_leaves == 1 && left.events.pointer_axes == 0 &&
+              right.events.enters == 0 && right.events.pointer_enters == 1 &&
+              right.events.pointer_axes == 1 && right.events.pointer_frames > 0 &&
+              right.events.pointer_x == 10 && right.events.pointer_y == 10,
+          "hover or background scrolling changed keyboard focus or reached the wrong surface");
+
+    struct zwp_locked_pointer_v1 *lock = zwp_pointer_constraints_v1_lock_pointer(
+        right.events.constraints, right.surface, right.events.pointer, NULL,
+        ZWP_POINTER_CONSTRAINTS_V1_LIFETIME_ONESHOT);
+    zwp_locked_pointer_v1_add_listener(lock, &lock_listener, &right.events);
+    round_trip(server, right.display);
+    check(right.events.locks == 0 && !scene.locked, "background surface acquired a pointer lock");
+
+    button(&pointer, BTN_LEFT, true);
+    round_trip(server, right.display);
+    check(right.events.enters == 1 && right.events.pointer_buttons == 1 && scene.clicks == 1 &&
+              right.events.locks == 1 && scene.locked,
+          "click did not focus the hover target and activate its pointer lock");
+    const unsigned old_regular = right.events.pointer_motions;
+    const unsigned old_relative = right.events.relative_motions;
+    relative(&pointer, -125, -111);
+    axis(&pointer);
+    button(&pointer, BTN_LEFT, false);
+    round_trip(server, right.display);
+    check(scene.x == 110 && right.events.pointer_motions == old_regular &&
+              right.events.relative_motions == old_relative + 1 &&
+              right.events.relative_dx == -125 && right.events.unaccelerated_dx == -111 &&
+              right.events.pointer_axes == 2 && right.events.pointer_buttons == 2,
+          "pointer lock did not suppress motion or failed to preserve raw deltas/axis/buttons");
+    seaside_tty_input_set_focus(scene.input, scene.surfaces[0]);
+    round_trip(server, right.display);
+    check(right.events.unlocks == 1 && !scene.locked,
+          "pointer lock survived the focus change to another client");
+    zwp_locked_pointer_v1_destroy(lock);
+
+    seaside_tty_input_set_focus(scene.input, scene.surfaces[1]);
+    lock = zwp_pointer_constraints_v1_lock_pointer(right.events.constraints, right.surface,
+                                                   right.events.pointer, NULL,
+                                                   ZWP_POINTER_CONSTRAINTS_V1_LIFETIME_ONESHOT);
+    zwp_locked_pointer_v1_add_listener(lock, &lock_listener, &right.events);
+    round_trip(server, right.display);
+    check(right.events.locks == 2 && scene.locked, "second lock did not activate");
+    struct wl_region *outside = wl_compositor_create_region(right.events.compositor);
+    wl_region_add(outside, 50, 0, 50, 100);
+    zwp_locked_pointer_v1_set_region(lock, outside);
+    wl_region_destroy(outside);
+    wl_surface_commit(right.surface);
+    round_trip(server, right.display);
+    check(right.events.unlocks == 2 && !scene.locked,
+          "committing a new region failed to safely deactivate a one-shot lock");
+    zwp_locked_pointer_v1_destroy(lock);
+
+    // A normal client button grab stays with the original surface until release.
+    button(&pointer, BTN_LEFT, true);
+    relative(&pointer, -100, -100);
+    round_trip(server, left.display);
+    round_trip(server, right.display);
+    check(left.events.pointer_enters == 1 && right.events.pointer_x == -90,
+          "pointer changed surfaces while a client button was held");
+    button(&pointer, BTN_LEFT, false);
+    round_trip(server, left.display);
+    round_trip(server, right.display);
+    check(left.events.pointer_enters == 2 && right.events.pointer_buttons == 4,
+          "the press and release were delivered to different surfaces");
+
+    // A compositor gesture must not leak its press or release to either client.
+    key(&keyboard, KEY_LEFTMETA, WL_KEYBOARD_KEY_STATE_PRESSED);
+    button(&pointer, BTN_RIGHT, true);
+    relative(&pointer, 100, 100);
+    button(&pointer, BTN_RIGHT, false);
+    key(&keyboard, KEY_LEFTMETA, WL_KEYBOARD_KEY_STATE_RELEASED);
+    round_trip(server, left.display);
+    round_trip(server, right.display);
+    check(left.events.pointer_buttons == 0 && right.events.pointer_buttons == 4 &&
+              scene.consumed_releases == 1 && right.events.pointer_enters == 2,
+          "a consumed pointer gesture leaked a button or failed to restore hover");
+
+    struct wl_region *region = wl_compositor_create_region(right.events.compositor);
+    wl_region_add(region, 0, 0, 30, 100);
+    struct zwp_confined_pointer_v1 *confine = zwp_pointer_constraints_v1_confine_pointer(
+        right.events.constraints, right.surface, right.events.pointer, region,
+        ZWP_POINTER_CONSTRAINTS_V1_LIFETIME_PERSISTENT);
+    zwp_confined_pointer_v1_add_listener(confine, &confine_listener, &right.events);
+    wl_region_destroy(region);
+    round_trip(server, right.display);
+    check(right.events.confines == 1, "eligible confinement did not activate");
+    relative(&pointer, 80, 80);
+    check(scene.x > 125 && scene.x < 130, "relative motion escaped pointer confinement");
+    struct wlr_pointer_motion_absolute_event absolute = {
+        .pointer = &pointer, .time_msec = 16, .x = 0.1, .y = 0.1};
+    wl_signal_emit_mutable(&pointer.events.motion_absolute, &absolute);
+    wl_signal_emit_mutable(&pointer.events.frame, &pointer);
+    round_trip(server, right.display);
+    check(scene.x >= 100 && scene.x < 105 && right.events.unconfines == 0,
+          "absolute motion escaped pointer confinement");
+    zwp_confined_pointer_v1_destroy(confine);
+    round_trip(server, right.display);
+    relative(&pointer, -60, -60);
+    round_trip(server, left.display);
+    check(left.events.pointer_enters == 3, "destroying constraint left pointer focus stuck");
+
+    wlr_pointer_finish(&pointer);
+    round_trip(server, left.display);
+    check(left.events.capabilities == WL_SEAT_CAPABILITY_KEYBOARD &&
+              left.events.pointer_leaves == 3,
+          "pointer unplug did not clear hover and retire pointer capability");
+    disconnect_pointer_client(server, &left);
+    disconnect_pointer_client(server, &right);
+    wl_display_destroy_clients(server);
+    seaside_tty_input_destroy(scene.input);
+    wlr_backend_finish(&backend);
+    wlr_keyboard_finish(&keyboard);
+    wl_display_destroy(server);
+}
+
+int main(int argc, char **argv) {
+    if (argc == 1 || (argc == 2 && strcmp(argv[1], "keyboard") == 0)) {
+        exercise(true);
+        exercise(false);
+        exercise_wayland_keyboard();
+    }
+    if (argc == 1 || (argc == 2 && strcmp(argv[1], "pointer") == 0)) {
+        exercise_wayland_pointer();
+    }
+    if (argc > 2 ||
+        (argc == 2 && strcmp(argv[1], "keyboard") != 0 && strcmp(argv[1], "pointer") != 0)) {
+        return EXIT_FAILURE;
+    }
     return EXIT_SUCCESS;
 }

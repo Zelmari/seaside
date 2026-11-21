@@ -11,6 +11,12 @@ struct wlr_output;
 struct wlr_renderer;
 struct seaside_tty_drm;
 
+struct seaside_tty_drm_output_callbacks {
+    bool (*added)(void *data, struct wlr_output *output, const char *name, const char *identity,
+                  int x, int y, int width, int height);
+    void (*removed)(void *data, struct wlr_output *output, const char *name);
+};
+
 struct seaside_tty_drm_observation {
     bool active;
     bool failed;
@@ -41,14 +47,29 @@ struct seaside_tty_drm *seaside_tty_drm_create(struct wl_display *display, const
                                                struct wlr_renderer **renderer);
 void seaside_tty_drm_destroy(struct seaside_tty_drm *drm);
 
-/* Called after backend start, before attaching the scene to the selected real
- * output. The result is borrowed until the output's destroy event. */
+/* Register before enabling outputs. Strings and handles in the callback are
+ * borrowed. Passing NULL clears both callbacks before their owner is freed. */
+void seaside_tty_drm_set_output_callbacks(struct seaside_tty_drm *drm,
+                                          const struct seaside_tty_drm_output_callbacks *callbacks,
+                                          void *data);
+
+/* Drain new and rejected output work outside backend/commit callbacks. Returns
+ * false for a fatal owner or attachment error. A failing output is disabled
+ * individually. Other outputs and the server can keep running. */
+bool seaside_tty_drm_enable_pending(struct seaside_tty_drm *drm, struct wlr_allocator *allocator,
+                                    struct wlr_renderer *renderer);
+
+/* First-output qualification fixture. The result is borrowed. */
 struct wlr_output *seaside_tty_drm_enable(struct seaside_tty_drm *drm,
                                           struct wlr_allocator *allocator,
                                           struct wlr_renderer *renderer);
 
-/* Absolute coordinates are normalized, relative coordinates are logical pixels.
- * The accepted move count advances only for a changed cursor position. */
+/* Position and relative deltas use logical output-layout coordinates. Absolute
+ * input is normalized against the bounds of the active outputs. */
+bool seaside_tty_drm_cursor_position(const struct seaside_tty_drm *drm, double *x, double *y);
+bool seaside_tty_drm_absolute_delta(const struct seaside_tty_drm *drm, double x, double y,
+                                    double *dx, double *dy);
+bool seaside_tty_drm_set_cursor_visible(struct seaside_tty_drm *drm, bool visible);
 bool seaside_tty_drm_move(struct seaside_tty_drm *drm, bool absolute, double x, double y);
 bool seaside_tty_drm_change_vt(struct seaside_tty_drm *drm, unsigned vt);
 struct seaside_tty_drm_observation seaside_tty_drm_observation(const struct seaside_tty_drm *drm);

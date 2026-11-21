@@ -161,13 +161,10 @@ std::expected<void, StateError> State::move_window(WindowId id, WorkspaceId dest
     if (window->second.home_workspace == destination) {
         return {};
     }
-    try {
-        // Allocate destination membership before changing the old relationship.
-        workspace->second.windows.insert(id);
-    } catch (const std::bad_alloc &) {
-        return std::unexpected(StateError::allocation);
-    }
-    workspaces_.at(window->second.home_workspace).windows.erase(id);
+    // Transferring the existing set node keeps parent-and-dialog moves free of
+    // allocation failures after the destination workspace has been prepared.
+    auto &source = workspaces_.at(window->second.home_workspace).windows;
+    workspace->second.windows.insert(source.extract(id));
     window->second.home_workspace = destination;
     return {};
 }

@@ -178,6 +178,11 @@ std::expected<Result, const char *> run_fixture(const char *device, bool termina
         .exit_requested = terminal_mode ? nullptr : Fixture::exit_requested,
         .launch_requested = terminal_mode ? Fixture::launch_terminal : nullptr,
         .shortcut_pressed = nullptr,
+        .modifiers_changed = nullptr,
+        .pointer_target = nullptr,
+        .pointer_button = nullptr,
+        .pointer_absolute_delta = nullptr,
+        .pointer_locked = nullptr,
     };
     std::unique_ptr<seaside_tty_input, decltype(&seaside_tty_input_destroy)> input(
         seaside_tty_input_create(backend, &callbacks, &fixture), seaside_tty_input_destroy);
