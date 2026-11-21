@@ -172,14 +172,12 @@ std::string create_session(sd_bus *bus) {
     return session;
 }
 
-void select_sources(sd_bus *bus, const char *session, std::uint32_t type) {
+std::uint32_t select_sources(sd_bus *bus, const char *session, std::uint32_t type) {
     auto message = make_call(bus, desktop, screencast, "SelectSources");
     check(sd_bus_message_append(message.get(), "oa{sv}", session, 4, "handle_token", "s", "select",
                                 "types", "u", type, "multiple", "b", 0, "cursor_mode", "u", 1u),
           "write SelectSources options");
-    if (request(bus, message, "SelectSources", "select").code != 0) {
-        throw std::runtime_error("the portal rejected SelectSources");
-    }
+    return request(bus, message, "SelectSources", "select").code;
 }
 
 std::uint32_t stream_node(const Response &result, std::uint32_t requested) {
@@ -416,7 +414,16 @@ void run(std::string_view source, std::string_view lifetime) {
                               "Closed", session_closed, &session),
           "match session closure");
     const Slot match(raw_slot, sd_bus_slot_unref);
-    select_sources(bus.get(), session.path(), requested);
+    const auto selection = select_sources(bus.get(), session.path(), requested);
+    if (selection != 0) {
+        if (lifetime == "cancel" && selection == 1) {
+            session.closed = true;
+            std::puts("cancelled during source selection");
+            return;
+        }
+        throw std::runtime_error("the portal rejected SelectSources with code " +
+                                 std::to_string(selection));
+    }
     auto message = make_call(bus.get(), desktop, screencast, "Start");
     check(sd_bus_message_append(message.get(), "osa{sv}", session.path(), "", 1, "handle_token",
                                 "s", "start"),

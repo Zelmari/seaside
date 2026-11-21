@@ -148,11 +148,14 @@ class TrialSession:
                           + json.dumps(marker_command) + "]\n")
         portal = root / "config/xdg-desktop-portal-wlr/Seaside"
         portal.parent.mkdir()
-        command = [chooser, "-d", "-n", "--prompt=Select a source to share:"]
+        command = [chooser, "-d", "-n", "--no-custom-entry", f"--cache-file={root / 'wofi-cache'}"]
         if part7_runtime_prefix:
             command = ["/usr/bin/env", "LD_LIBRARY_PATH=" + str(Path(part7_runtime_prefix) / "lib"),
                        *command]
-        portal.write_text("[screencast]\nchooser_type=dmenu\nchooser_cmd=" + shlex.join(command) + "\n")
+        chooser_script = root / "share-chooser"
+        chooser_script.write_text("#!/bin/sh\nexec " + shlex.join(command) + "\n")
+        chooser_script.chmod(0o700)
+        portal.write_text(f"[screencast]\nchooser_type=dmenu\nchooser_cmd={chooser_script}\n")
         self.process = standard["start_seaside"](repo, self.env, self.log)
 
     def ready(self):
@@ -228,7 +231,9 @@ def choose(session, child, *, choice=None):
                      if "wofi" in (row.get("app_id", "") or "").casefold()
                      or "wofi" in (row.get("title", "") or "").casefold()), None)
 
-    wait_for(chooser_window, 10, "the real Wofi chooser window", child)
+    window = wait_for(chooser_window, 10, "the real Wofi chooser window", child)
+    wait_for(lambda: session.ctl("focus")["window_id"] == window["id"], 4,
+             "keyboard focus on the chooser", child)
     if choice:
         event("part7-input", f"select {choice} in Wofi", choice=choice)
     else:
@@ -451,6 +456,7 @@ def trial():
         return
     results = Path.home() / "Projects/seaside/test-results" / f"vm-{base.rsplit('/', 1)[-1][:12]}"
     results.mkdir(mode=0o700, parents=True)
+    started = int(time.time())
     state = {"revision": revision, "kernel": os.uname().release, "renderer": "pixman", "ok": False}
     try:
         env = environment(state)
@@ -473,18 +479,34 @@ def trial():
                 session = TrialSession(repo, root / "part7", results, env, state["tools"]["wofi"])
                 try:
                     session.ready()
-                    event("part7", "real portal monitor and selected-window streams")
-                    run_video(session, results, state)
-                    event("part7", "lazy X11 startup, shared window and child restart")
-                    run_x11(session, results, state)
-                    event("part7", "native and X11 clipboard, including primary selection")
                     sys.path.insert(0, str(repo / "tests/session"))
                     from part7_clipboard import run_clipboard
-                    state["cross_client_clipboard"] = run_clipboard(session.env, session.focus)
-                    event("part7", "external audio playback, capture and default media keys")
-                    run_audio(session, state)
-                    run_portal_loss(session, results, state)
+
+                    def clipboard():
+                        state["cross_client_clipboard"] = run_clipboard(session.env, session.focus)
+
+                    checks = {
+                        "video": lambda: run_video(session, results, state),
+                        "x11": lambda: run_x11(session, results, state),
+                        "clipboard": clipboard,
+                        "audio": lambda: run_audio(session, state),
+                        "portal-loss": lambda: run_portal_loss(session, results, state),
+                    }
+                    outcomes = state["tty_checks"] = {}
+                    for name, check in checks.items():
+                        event("part7", name)
+                        try:
+                            session.ctl("workspace", "1")
+                            check()
+                            outcomes[name] = "pass"
+                        except (OSError, RuntimeError, ValueError, KeyError, subprocess.SubprocessError) as error:
+                            outcomes[name] = str(error) or type(error).__name__
+                            event("diagnostic", f"{name}: {outcomes[name]}")
+                            if session.process.poll() is not None:
+                                break
                     session.close()
+                    failed = [name for name, result in outcomes.items() if result != "pass"]
+                    require(not failed, "Part 7 TTY checks failed: " + ", ".join(failed))
                 finally:
                     standard["stop"](session.process)
         state["ok"] = True
@@ -493,9 +515,13 @@ def trial():
         state["error"] = str(error) or type(error).__name__
         event("diagnostic", state["error"])
     finally:
+        journal = subprocess.run(["journalctl", "--user", "--no-pager", "-o", "cat", "-n", "120",
+                                  "--user-unit=seaside-portal-*", f"--since=@{started}"],
+                                 capture_output=True, timeout=10, check=False)
+        (results / "part7-portals.log").write_bytes(journal.stdout)
         artifacts = ("prepare.log", "harness.log", "normal.log", "failure.log", "part7-session.log",
                      "part7-native.log", "part7-x11.log", "part7-monitor.log", "part7-window.log",
-                     "part7-cancel.log", "part7-x11-window.log", "part7-grim.png")
+                     "part7-cancel.log", "part7-x11-window.log", "part7-grim.png", "part7-portals.log")
         for name in artifacts:
             upload(name, results / name)
         state["guest_evidence"] = str(results)
