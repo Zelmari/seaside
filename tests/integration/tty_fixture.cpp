@@ -184,6 +184,7 @@ std::expected<Result, const char *> run_fixture(const char *device, bool termina
         .pointer_absolute_delta = nullptr,
         .pointer_locked = nullptr,
         .pointer_cancelled = nullptr,
+        .drag_icon = nullptr,
     };
     std::unique_ptr<seaside_tty_input, decltype(&seaside_tty_input_destroy)> input(
         seaside_tty_input_create(backend, &callbacks, &fixture), seaside_tty_input_destroy);
