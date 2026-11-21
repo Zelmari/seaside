@@ -20,6 +20,7 @@ DEPENDENCIES = (
     'wlroots-0.20', 'wayland-server', 'wayland-client',
     'wayland-protocols', 'libdrm', 'pixman-1', 'gtest_main', 'tomlplusplus', 'xkbcommon',
     'libsystemd', 'libpipewire-0.3',
+    'libpng', 'libturbojpeg', 'libwebp', 'pangocairo', 'cairo', 'nlohmann_json',
 )
 PACKAGES = (
     'gcc', 'gcc-libs', 'glibc', 'binutils', 'pkgconf', 'meson', 'ninja', 'python',
@@ -29,6 +30,8 @@ PACKAGES = (
     'systemd', 'systemd-libs', 'libpipewire', 'pipewire', 'dbus',
     'xdg-desktop-portal', 'xdg-desktop-portal-wlr', 'xdg-desktop-portal-gtk',
     'wireplumber', 'grim', 'foot',
+    'libpng', 'libjpeg-turbo', 'libwebp', 'pango', 'cairo', 'fontconfig', 'ttf-dejavu',
+    'nlohmann-json',
 )
 
 

@@ -2,6 +2,7 @@
 #include "part3_bridge.h"
 #include "server.hpp"
 #include "wlroots_bridge.h"
+#include "xdg-activation-v1-client-protocol.h"
 #include "xdg-shell-client-protocol.h"
 
 #include <algorithm>
@@ -62,6 +63,9 @@ struct Client {
         if (shell) {
             xdg_wm_base_destroy(shell);
         }
+        if (activation) {
+            xdg_activation_v1_destroy(activation);
+        }
         if (shm) {
             wl_shm_destroy(shm);
         }
@@ -96,6 +100,7 @@ struct Client {
     wl_compositor *compositor = nullptr;
     wl_shm *shm = nullptr;
     xdg_wm_base *shell = nullptr;
+    xdg_activation_v1 *activation = nullptr;
     wl_surface *surface = nullptr;
     xdg_surface *xdg = nullptr;
     xdg_toplevel *toplevel = nullptr;
@@ -145,6 +150,9 @@ void global(void *data, wl_registry *registry, std::uint32_t name, const char *i
         client.shell =
             static_cast<xdg_wm_base *>(wl_registry_bind(registry, name, &xdg_wm_base_interface, 6));
         xdg_wm_base_add_listener(client.shell, &shell_listener, nullptr);
+    } else if (std::strcmp(interface, xdg_activation_v1_interface.name) == 0) {
+        client.activation = static_cast<xdg_activation_v1 *>(
+            wl_registry_bind(registry, name, &xdg_activation_v1_interface, 1));
     }
 }
 
@@ -762,6 +770,88 @@ bool run_scrolling(const Fixture &fixture) {
     return true;
 }
 
+void token_created(void *data, xdg_activation_token_v1 *, const char *token) {
+    *static_cast<std::string *>(data) = token;
+}
+
+bool run_attention(const Fixture &fixture) {
+    auto &scene = fixture.scene;
+    auto &desktop = fixture.desktop;
+    auto output = fixture.output();
+    REQUIRE(output);
+    REQUIRE(desktop.add_output(part3_output_handle(output.get()), "headless", "stable-headless",
+                               output_bounds));
+    const auto &windows = desktop.windows();
+    const auto original_workspace = windows.focused_workspace();
+    REQUIRE(original_workspace);
+
+    Connection connection(fixture.display);
+    Client first, second;
+    REQUIRE(connection.connect(first) && first.activation && connection.open(first));
+    xdg_toplevel_set_app_id(first.toplevel, "org.example.Attention");
+    xdg_toplevel_set_title(first.toplevel, "Attention café");
+    REQUIRE(connection.attach(first, ordinary_width, ordinary_height));
+    const auto first_id = windows.focused_window();
+    REQUIRE(first_id);
+    const auto metadata = scene.window_metadata(*first_id);
+    REQUIRE(metadata.app_id && std::string_view(metadata.app_id) == "org.example.Attention");
+    REQUIRE(metadata.title && std::string_view(metadata.title) == "Attention café");
+    REQUIRE(connection.connect(second) && connection.open(second));
+    REQUIRE(connection.attach(second, ordinary_width, ordinary_height));
+    const auto second_id = windows.focused_window();
+    REQUIRE(second_id && second_id != first_id);
+    REQUIRE(desktop.action(action(ActionKind::move_to_workspace, 42)));
+    REQUIRE(!windows.view(*first_id).visible);
+
+    struct Attention {
+        WindowId target = 0;
+        seaside::WorkspaceId workspace = 0;
+        unsigned count = 0;
+    };
+    const auto attention = std::make_shared<Attention>();
+    desktop.on_attention([attention](WindowId target, seaside::WorkspaceId workspace) {
+        *attention = {target, workspace, attention->count + 1};
+    });
+    const xdg_activation_token_v1_listener listener{.done = token_created};
+    std::string token;
+    auto *request = xdg_activation_v1_get_activation_token(first.activation);
+    xdg_activation_token_v1_add_listener(request, &listener, &token);
+    xdg_activation_token_v1_set_surface(request, first.surface);
+    xdg_activation_token_v1_commit(request);
+    const bool issued = connection.wait(first, [&] { return !token.empty(); });
+    xdg_activation_token_v1_destroy(request);
+    REQUIRE(issued);
+    xdg_activation_v1_activate(first.activation, token.c_str(), first.surface);
+    REQUIRE(connection.roundtrip(first));
+    REQUIRE(attention->count == 1 && attention->target == *first_id &&
+            attention->workspace == *original_workspace);
+    REQUIRE(windows.focused_window() == second_id && windows.focused_workspace() == 42);
+    xdg_activation_v1_activate(first.activation, token.c_str(), first.surface);
+    REQUIRE(connection.roundtrip(first) && attention->count == 1);
+    desktop.on_attention({});
+
+    xdg_toplevel_set_fullscreen(second.toplevel, nullptr);
+    REQUIRE(connection.wait(second, [&] { return second.configured.fullscreen; }));
+    REQUIRE(connection.attach_configured(second, blue));
+    REQUIRE(wait_pixel(connection, second, output.get(), 0, 0, blue));
+    const seaside::Diagnostic error{.path = "/tmp/café.toml",
+                                    .line = 4,
+                                    .column = 1,
+                                    .field = "window.layout",
+                                    .message = "Invalid value"};
+    scene.set_config_error(error);
+    const auto banner = seaside::render_config_banner("color sample", output_bounds.width, 1);
+    REQUIRE(banner);
+    const auto &pixel = banner->pixels;
+    const auto color = static_cast<std::uint32_t>(pixel[0] | pixel[1] << 8 | pixel[2] << 16);
+    REQUIRE(wait_pixel(connection, second, output.get(), 0, 0, color));
+    seaside_scene_target target{};
+    REQUIRE(scene.window_at(1, 1, target) && target.id == *second_id);
+    scene.set_config_error(std::nullopt);
+    REQUIRE(wait_pixel(connection, second, output.get(), 0, 0, blue));
+    return true;
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -771,6 +861,10 @@ int main(int argc, char **argv) {
         return run_fixture(config, run_part4) ? EXIT_SUCCESS : EXIT_FAILURE;
     }
     const std::string_view scenario = argv[1];
+    if (argc == 2 && scenario == "attention") {
+        config.window.tiling = false;
+        return run_fixture(config, run_attention) ? EXIT_SUCCESS : EXIT_FAILURE;
+    }
     if (argc == 2 && scenario == "dwindle") {
         config.window.gaps_outer = 4;
         config.window.gaps_inner = 6;

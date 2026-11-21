@@ -7,11 +7,15 @@
 #include <sys/types.h>
 
 struct wl_display;
+struct wlr_buffer;
 struct wlr_output;
 struct wlr_surface;
 struct seaside_scene_bridge;
 
 typedef void (*seaside_scene_focus_fn)(void *data, struct wlr_surface *surface);
+typedef void (*seaside_scene_output_appearance_fn)(void *data, struct wlr_output *output, int width,
+                                                   float scale);
+typedef void (*seaside_scene_image_release_fn)(void *data);
 
 struct seaside_scene_rect {
     int x, y, width, height;
@@ -27,6 +31,7 @@ enum seaside_scene_window_event_kind {
     SEASIDE_WINDOW_PARENT_CHANGED,
     SEASIDE_WINDOW_MAXIMIZE_REQUESTED,
     SEASIDE_WINDOW_FULLSCREEN_REQUESTED,
+    SEASIDE_WINDOW_ATTENTION_REQUESTED,
 };
 
 struct seaside_scene_window_event {
@@ -58,6 +63,10 @@ struct seaside_scene_size_limits {
     int min_width, min_height, max_width, max_height;
 };
 
+struct seaside_scene_window_metadata {
+    const char *app_id, *title;
+};
+
 struct seaside_scene_snapshot {
     size_t live_toplevels;
     size_t mapped_toplevels;
@@ -86,6 +95,19 @@ bool seaside_scene_place_output(struct seaside_scene_bridge *scene, struct wlr_o
 void seaside_scene_remove_output(struct seaside_scene_bridge *scene, struct wlr_output *output);
 struct seaside_scene_snapshot seaside_scene_get_snapshot(const struct seaside_scene_bridge *scene);
 
+/* Successful creation holds the supplied pixel owner until the last scene
+ * reference is released. Drop the producer reference or transfer it to the
+ * wallpaper or banner setter. Pixels stay immutable until release. */
+struct wlr_buffer *seaside_scene_create_image(int width, int height, const uint8_t *pixels,
+                                              seaside_scene_image_release_fn release, void *owner);
+void seaside_scene_drop_image(struct wlr_buffer *buffer);
+void seaside_scene_set_wallpaper(struct seaside_scene_bridge *scene, struct wlr_buffer *buffer);
+void seaside_scene_set_banner(struct seaside_scene_bridge *scene, struct wlr_output *output,
+                              struct wlr_buffer *buffer, int logical_height);
+/* Width zero reports removal or a viewport no longer eligible to draw. */
+void seaside_scene_set_appearance_handler(struct seaside_scene_bridge *scene,
+                                          seaside_scene_output_appearance_fn handler, void *data);
+
 void seaside_scene_set_window_handler(struct seaside_scene_bridge *scene,
                                       seaside_scene_window_fn handler, void *data);
 void seaside_scene_place_window(struct seaside_scene_bridge *scene, uint64_t id,
@@ -94,6 +116,9 @@ struct wlr_surface *seaside_scene_window_surface(struct seaside_scene_bridge *sc
 bool seaside_scene_close_window(struct seaside_scene_bridge *scene, uint64_t id);
 struct seaside_scene_size_limits
 seaside_scene_window_size_limits(struct seaside_scene_bridge *scene, uint64_t id);
+/* Borrowed toplevel strings are valid until the next Wayland dispatch. */
+struct seaside_scene_window_metadata
+seaside_scene_get_window_metadata(struct seaside_scene_bridge *scene, uint64_t id);
 /* Set target->surface to resolve an implicit grab or constrained surface. */
 bool seaside_scene_window_at(struct seaside_scene_bridge *scene, double x, double y,
                              struct seaside_scene_target *target);

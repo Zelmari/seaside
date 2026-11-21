@@ -1,29 +1,38 @@
 #define _POSIX_C_SOURCE 200809L
 #include "scene_bridge.h"
 
+#include <drm_fourcc.h>
 #include <limits.h>
 #include <stdlib.h>
 #include <time.h>
 #include <wayland-server-core.h>
+#include <wlr/interfaces/wlr_buffer.h>
 #include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_output.h>
 #include <wlr/types/wlr_scene.h>
+#include <wlr/types/wlr_xdg_activation_v1.h>
 #include <wlr/types/wlr_xdg_shell.h>
 #include <wlr/util/edges.h>
 
 struct seaside_scene_bridge {
     struct wl_display *display;
     struct wlr_scene *scene;
+    struct wlr_scene_tree *backgrounds, *windows, *decorations;
+    struct wlr_buffer *wallpaper;
     struct wlr_xdg_shell *shell;
+    struct wlr_xdg_activation_v1 *activation;
     struct wl_list views;
     struct wl_list popups;
     struct wl_list outputs;
     struct wl_listener new_toplevel;
     struct wl_listener new_popup;
     struct wl_listener shell_destroy;
+    struct wl_listener activation_destroy, request_activation;
     struct seaside_scene_snapshot snapshot;
     seaside_scene_window_fn window;
     void *window_data;
+    seaside_scene_output_appearance_fn appearance;
+    void *appearance_data;
     struct scene_view *focused_view;
     pid_t watched_pid;
     seaside_scene_focus_fn focus;
@@ -67,10 +76,70 @@ struct scene_popup {
 struct scene_output {
     struct seaside_scene_bridge *owner;
     struct wlr_scene_output *viewport;
+    struct wlr_scene_buffer *wallpaper, *banner;
     struct wl_list link;
     struct wl_listener frame;
     struct wl_listener destroy;
+    struct wl_listener commit;
+    int width, height;
+    int banner_width, banner_height, banner_logical_height;
+    float scale;
 };
+
+struct scene_image {
+    struct wlr_buffer base;
+    const uint8_t *pixels;
+    seaside_scene_image_release_fn release;
+    void *owner;
+};
+
+static void destroy_scene_image(struct wlr_buffer *base) {
+    struct scene_image *image = wl_container_of(base, image, base);
+    wlr_buffer_finish(base);
+    image->release(image->owner);
+    free(image);
+}
+
+static bool scene_image_data(struct wlr_buffer *base, uint32_t flags, void **data, uint32_t *format,
+                             size_t *stride) {
+    struct scene_image *image = wl_container_of(base, image, base);
+    if (flags != WLR_BUFFER_DATA_PTR_ACCESS_READ) {
+        return false;
+    }
+    *data = (void *)image->pixels;
+    *format = DRM_FORMAT_XRGB8888;
+    *stride = (size_t)base->width * 4;
+    return true;
+}
+
+static void end_scene_image_data(struct wlr_buffer *base) {
+    (void)base;
+}
+
+static const struct wlr_buffer_impl scene_image_impl = {
+    .destroy = destroy_scene_image,
+    .begin_data_ptr_access = scene_image_data,
+    .end_data_ptr_access = end_scene_image_data,
+};
+
+struct wlr_buffer *seaside_scene_create_image(int width, int height, const uint8_t *pixels,
+                                              seaside_scene_image_release_fn release, void *owner) {
+    struct scene_image *image = calloc(1, sizeof(*image));
+    if (!image) {
+        return NULL;
+    }
+    image->pixels = pixels;
+    image->release = release;
+    image->owner = owner;
+    wlr_buffer_init(&image->base, &scene_image_impl, width, height);
+    return &image->base;
+}
+
+void seaside_scene_drop_image(struct wlr_buffer *buffer) {
+    if (buffer) {
+        wlr_buffer_drop(buffer);
+    }
+}
 
 static struct scene_view *find_view(struct seaside_scene_bridge *scene, uint64_t id) {
     if (!id) {
@@ -336,7 +405,7 @@ static void new_toplevel(struct wl_listener *listener, void *data) {
     }
     view->owner = scene;
     view->toplevel = toplevel;
-    view->tree = wlr_scene_tree_create(&scene->scene->tree);
+    view->tree = wlr_scene_tree_create(scene->windows);
     if (view->tree) {
         view->xdg_tree = wlr_scene_xdg_surface_create(view->tree, toplevel->base);
     }
@@ -502,6 +571,86 @@ static void new_popup(struct wl_listener *listener, void *data) {
     wl_signal_add(&popup->tree->node.events.destroy, &popup->tree_destroy);
 }
 
+static struct scene_output *find_output(struct seaside_scene_bridge *scene,
+                                        const struct wlr_output *output) {
+    struct scene_output *view;
+    wl_list_for_each(view, &scene->outputs, link) {
+        if (view->viewport->output == output) {
+            return view;
+        }
+    }
+    return NULL;
+}
+
+static void fit_wallpaper(struct scene_output *view) {
+    const struct wlr_buffer *image = view->owner->wallpaper;
+    if (!image || view->width <= 0 || view->height <= 0) {
+        wlr_scene_node_set_enabled(&view->wallpaper->node, false);
+        return;
+    }
+    const double output_ratio = (double)view->width / view->height;
+    struct wlr_fbox crop = {.width = image->width, .height = image->height};
+    if (crop.width / crop.height > output_ratio) {
+        crop.width = crop.height * output_ratio;
+        crop.x = (image->width - crop.width) / 2;
+    } else {
+        crop.height = crop.width / output_ratio;
+        crop.y = (image->height - crop.height) / 2;
+    }
+    wlr_scene_buffer_set_source_box(view->wallpaper, &crop);
+    wlr_scene_buffer_set_dest_size(view->wallpaper, view->width, view->height);
+    wlr_scene_node_set_enabled(&view->wallpaper->node, true);
+}
+
+static void fit_banner(struct scene_output *view) {
+    const bool visible = view->banner_logical_height > 0 && view->width > 0 && view->height > 0;
+    wlr_scene_node_set_enabled(&view->banner->node, visible);
+    if (visible) {
+        const int height =
+            view->banner_logical_height < view->height ? view->banner_logical_height : view->height;
+        const struct wlr_fbox crop = {
+            .width = view->banner_width,
+            .height = (double)view->banner_height * height / view->banner_logical_height,
+        };
+        wlr_scene_buffer_set_source_box(view->banner, &crop);
+        wlr_scene_buffer_set_dest_size(view->banner, view->width, height);
+    }
+}
+
+static void update_output_appearance(struct scene_output *view) {
+    struct wlr_output *output = view->viewport->output;
+    int width = 0, height = 0;
+    if (output->enabled) {
+        wlr_output_effective_resolution(output, &width, &height);
+    }
+    const bool reraster = view->width != width || view->scale != output->scale;
+    view->width = width;
+    view->height = height;
+    view->scale = output->scale;
+    wlr_scene_node_set_position(&view->wallpaper->node, view->viewport->x, view->viewport->y);
+    wlr_scene_node_set_position(&view->banner->node, view->viewport->x, view->viewport->y);
+    fit_wallpaper(view);
+    if (reraster) {
+        // The old banner size belongs to another viewport. Drop it before
+        // moving or stretching it into the new geometry.
+        wlr_scene_buffer_set_buffer(view->banner, NULL);
+        view->banner_logical_height = 0;
+        if (view->owner->appearance) {
+            view->owner->appearance(view->owner->appearance_data, output, width, output->scale);
+        }
+    }
+    fit_banner(view);
+}
+
+static void output_commit(struct wl_listener *listener, void *data) {
+    struct scene_output *view = wl_container_of(listener, view, commit);
+    const struct wlr_output_event_commit *event = data;
+    if (event->state->committed & (WLR_OUTPUT_STATE_ENABLED | WLR_OUTPUT_STATE_MODE |
+                                   WLR_OUTPUT_STATE_SCALE | WLR_OUTPUT_STATE_TRANSFORM)) {
+        update_output_appearance(view);
+    }
+}
+
 static void output_frame(struct wl_listener *listener, void *data) {
     (void)data;
     struct scene_output *output = wl_container_of(listener, output, frame);
@@ -522,10 +671,17 @@ static void output_frame(struct wl_listener *listener, void *data) {
 static void output_destroy(struct wl_listener *listener, void *data) {
     (void)data;
     struct scene_output *output = wl_container_of(listener, output, destroy);
+    struct seaside_scene_bridge *scene = output->owner;
     output->owner->snapshot.outputs--;
     wl_list_remove(&output->frame.link);
     wl_list_remove(&output->destroy.link);
+    wl_list_remove(&output->commit.link);
     wl_list_remove(&output->link);
+    wlr_scene_node_destroy(&output->wallpaper->node);
+    wlr_scene_node_destroy(&output->banner->node);
+    if (scene->appearance) {
+        scene->appearance(scene->appearance_data, output->viewport->output, 0, 0);
+    }
     free(output);
 }
 
@@ -542,6 +698,11 @@ static void detach(struct seaside_scene_bridge *scene) {
     wl_list_remove(&scene->new_toplevel.link);
     wl_list_remove(&scene->new_popup.link);
     wl_list_remove(&scene->shell_destroy.link);
+    if (scene->activation) {
+        wl_list_remove(&scene->request_activation.link);
+        wl_list_remove(&scene->activation_destroy.link);
+        scene->activation = NULL;
+    }
     struct scene_view *view, *next_view;
     wl_list_for_each_safe(view, next_view, &scene->views, link) {
         destroy_view(view);
@@ -550,6 +711,8 @@ static void detach(struct seaside_scene_bridge *scene) {
         struct scene_output *output = wl_container_of(scene->outputs.next, output, link);
         wlr_scene_output_destroy(output->viewport);
     }
+    seaside_scene_drop_image(scene->wallpaper);
+    scene->wallpaper = NULL;
     wlr_scene_node_destroy(&scene->scene->tree.node);
     scene->scene = NULL;
     scene->shell = NULL;
@@ -560,6 +723,25 @@ static void shell_destroy(struct wl_listener *listener, void *data) {
     (void)data;
     struct seaside_scene_bridge *scene = wl_container_of(listener, scene, shell_destroy);
     detach(scene);
+}
+
+static void activation_destroy(struct wl_listener *listener, void *data) {
+    (void)data;
+    struct seaside_scene_bridge *scene = wl_container_of(listener, scene, activation_destroy);
+    wl_list_remove(&scene->request_activation.link);
+    wl_list_remove(&scene->activation_destroy.link);
+    scene->activation = NULL;
+}
+
+static void request_activation(struct wl_listener *listener, void *data) {
+    struct seaside_scene_bridge *scene = wl_container_of(listener, scene, request_activation);
+    const struct wlr_xdg_activation_v1_request_activate_event *request = data;
+    struct wlr_surface *root = wlr_surface_get_root_surface(request->surface);
+    struct scene_view *view =
+        root ? toplevel_view(scene, wlr_xdg_toplevel_try_from_wlr_surface(root)) : NULL;
+    if (view && view->mapped && !view->placement.activated) {
+        emit_window(view, SEASIDE_WINDOW_ATTENTION_REQUESTED, true, false);
+    }
 }
 
 struct seaside_scene_bridge *seaside_scene_create(struct wl_display *display) {
@@ -579,8 +761,22 @@ struct seaside_scene_bridge *seaside_scene_create(struct wl_display *display) {
         free(scene);
         return NULL;
     }
+    scene->backgrounds = wlr_scene_tree_create(&scene->scene->tree);
+    scene->windows = wlr_scene_tree_create(&scene->scene->tree);
+    scene->decorations = wlr_scene_tree_create(&scene->scene->tree);
+    if (!scene->backgrounds || !scene->windows || !scene->decorations) {
+        wlr_scene_node_destroy(&scene->scene->tree.node);
+        free(scene);
+        return NULL;
+    }
     scene->shell = wlr_xdg_shell_create(display, 6);
     if (!scene->shell) {
+        wlr_scene_node_destroy(&scene->scene->tree.node);
+        free(scene);
+        return NULL;
+    }
+    scene->activation = wlr_xdg_activation_v1_create(display);
+    if (!scene->activation) {
         wlr_scene_node_destroy(&scene->scene->tree.node);
         free(scene);
         return NULL;
@@ -588,9 +784,13 @@ struct seaside_scene_bridge *seaside_scene_create(struct wl_display *display) {
     scene->new_toplevel.notify = new_toplevel;
     scene->new_popup.notify = new_popup;
     scene->shell_destroy.notify = shell_destroy;
+    scene->activation_destroy.notify = activation_destroy;
+    scene->request_activation.notify = request_activation;
     wl_signal_add(&scene->shell->events.new_toplevel, &scene->new_toplevel);
     wl_signal_add(&scene->shell->events.new_popup, &scene->new_popup);
     wl_signal_add(&scene->shell->events.destroy, &scene->shell_destroy);
+    wl_signal_add(&scene->activation->events.destroy, &scene->activation_destroy);
+    wl_signal_add(&scene->activation->events.request_activate, &scene->request_activation);
     scene->attached = true;
     return scene;
 }
@@ -617,12 +817,28 @@ bool seaside_scene_add_output(struct seaside_scene_bridge *scene, struct wlr_out
         free(view);
         return false;
     }
+    view->wallpaper = wlr_scene_buffer_create(scene->backgrounds, scene->wallpaper);
+    view->banner = wlr_scene_buffer_create(scene->decorations, NULL);
+    if (!view->wallpaper || !view->banner) {
+        if (view->wallpaper) {
+            wlr_scene_node_destroy(&view->wallpaper->node);
+        }
+        if (view->banner) {
+            wlr_scene_node_destroy(&view->banner->node);
+        }
+        wlr_scene_output_destroy(view->viewport);
+        free(view);
+        return false;
+    }
     view->frame.notify = output_frame;
     view->destroy.notify = output_destroy;
+    view->commit.notify = output_commit;
     wl_signal_add(&output->events.frame, &view->frame);
     wl_signal_add(&view->viewport->events.destroy, &view->destroy);
+    wl_signal_add(&output->events.commit, &view->commit);
     wl_list_insert(&scene->outputs, &view->link);
     scene->snapshot.outputs++;
+    update_output_appearance(view);
     wlr_output_schedule_frame(output);
     return true;
 }
@@ -632,13 +848,52 @@ bool seaside_scene_place_output(struct seaside_scene_bridge *scene, struct wlr_o
     if (!scene || !scene->attached || !output) {
         return false;
     }
-    struct wlr_scene_output *viewport = wlr_scene_get_scene_output(scene->scene, output);
-    if (!viewport) {
+    struct scene_output *view = find_output(scene, output);
+    if (!view) {
         return false;
     }
-    wlr_scene_output_set_position(viewport, x, y);
+    wlr_scene_output_set_position(view->viewport, x, y);
+    update_output_appearance(view);
     wlr_output_create_global(output, scene->display);
     return output->global != NULL;
+}
+
+void seaside_scene_set_wallpaper(struct seaside_scene_bridge *scene, struct wlr_buffer *buffer) {
+    if (!scene || !scene->attached) {
+        seaside_scene_drop_image(buffer);
+        return;
+    }
+    struct wlr_buffer *previous = scene->wallpaper;
+    scene->wallpaper = buffer;
+    struct scene_output *view;
+    wl_list_for_each(view, &scene->outputs, link) {
+        wlr_scene_buffer_set_buffer(view->wallpaper, buffer);
+        fit_wallpaper(view);
+    }
+    seaside_scene_drop_image(previous);
+}
+
+void seaside_scene_set_banner(struct seaside_scene_bridge *scene, struct wlr_output *output,
+                              struct wlr_buffer *buffer, int logical_height) {
+    if (scene && scene->attached) {
+        struct scene_output *view = find_output(scene, output);
+        if (view) {
+            view->banner_width = buffer ? buffer->width : 0;
+            view->banner_height = buffer ? buffer->height : 0;
+            view->banner_logical_height = buffer ? logical_height : 0;
+            wlr_scene_buffer_set_buffer(view->banner, buffer);
+            fit_banner(view);
+        }
+    }
+    seaside_scene_drop_image(buffer);
+}
+
+void seaside_scene_set_appearance_handler(struct seaside_scene_bridge *scene,
+                                          seaside_scene_output_appearance_fn handler, void *data) {
+    if (scene && scene->attached) {
+        scene->appearance = handler;
+        scene->appearance_data = data;
+    }
 }
 
 void seaside_scene_remove_output(struct seaside_scene_bridge *scene, struct wlr_output *output) {
@@ -837,9 +1092,18 @@ seaside_scene_window_size_limits(struct seaside_scene_bridge *scene, uint64_t id
                                               current->max_width, current->max_height};
 }
 
+struct seaside_scene_window_metadata
+seaside_scene_get_window_metadata(struct seaside_scene_bridge *scene, uint64_t id) {
+    struct scene_view *view = find_view(scene, id);
+    if (!view) {
+        return (struct seaside_scene_window_metadata){0};
+    }
+    return (struct seaside_scene_window_metadata){view->toplevel->app_id, view->toplevel->title};
+}
+
 static struct scene_view *node_view(struct seaside_scene_bridge *scene,
                                     struct wlr_scene_node *node) {
-    while (node->parent && node->parent != &scene->scene->tree) {
+    while (node->parent && node->parent != scene->windows) {
         node = &node->parent->node;
     }
     return node->parent ? node->data : NULL;
@@ -897,7 +1161,7 @@ bool seaside_scene_window_at(struct seaside_scene_bridge *scene, double x, doubl
         return exact_surface_at(scene, x, y, target);
     }
     struct wlr_scene_node *node =
-        wlr_scene_node_at(&scene->scene->tree.node, x, y, &target->sx, &target->sy);
+        wlr_scene_node_at(&scene->windows->node, x, y, &target->sx, &target->sy);
     if (!node) {
         return false;
     }
