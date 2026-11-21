@@ -15,11 +15,17 @@ is available. Record results here as the native trial progresses.
   input, focus, display layout, and cursor recovery. Repeat after suspend and
   resume once that path is ready.
 
-## OBS and Discord
+## Part 7 checks still open
 
-Run the applicable checks in each installed app and record its version. Check
-OBS in the preview and a local recording. Check Discord from the receiving end
-of a test call.
+The Arch VM verified the underlying sharing and playback paths. The checks
+below use the actual apps, receiving clients, and physical devices on native
+Arch. [Part 7 VM evidence](../Parts/Part-07/HANDOFF.md#arch-vm-verification-from-2026-11-21)
+
+### OBS and Discord sharing
+
+Run the sharing checks for both apps and record the outcome separately for
+each. Check OBS in the preview and a local recording. Check Discord from the
+receiving end of a test call.
 
 - [ ] Share a whole monitor. Verify the chosen output, cursor behavior, and
   live motion. Cancel the chooser, then start and stop sharing again.
@@ -35,7 +41,7 @@ of a test call.
   Check audio/video sync, mute, and changing the playback device mid-share.
   Record which devices the app actually includes in the mix.
 
-## Physical audio and keys
+### Physical audio and keys
 
 - [ ] Check normal playback through the speakers, headphones, and any other
   audio devices normally used. Switch the default output while audio plays.
