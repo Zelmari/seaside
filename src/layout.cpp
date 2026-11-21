@@ -607,8 +607,7 @@ bool WorkspaceLayout::reveal(WindowId id, std::optional<Direction> from) {
     return true;
 }
 
-std::optional<WindowId> WorkspaceLayout::neighbor(WindowId id, Direction direction,
-                                                  bool wrap) const noexcept {
+std::optional<WindowId> WorkspaceLayout::neighbor(WindowId id, Direction direction) const noexcept {
     const auto tile = tiles_.find(id);
     if (tile == tiles_.end() || direction == Direction::none) {
         return {};
@@ -622,13 +621,13 @@ std::optional<WindowId> WorkspaceLayout::neighbor(WindowId id, Direction directi
             if (at != columns_.begin()) {
                 return *std::prev(at);
             }
-            return wrap ? std::optional{columns_.back()} : std::nullopt;
+            return {};
         }
         ++at;
         if (at != columns_.end()) {
             return *at;
         }
-        return wrap ? std::optional{columns_.front()} : std::nullopt;
+        return {};
     }
 
     const bool axis = horizontal(direction);
@@ -642,7 +641,6 @@ std::optional<WindowId> WorkspaceLayout::neighbor(WindowId id, Direction directi
     const auto [from_axis, from_cross] = center(origin);
     using Rank = std::tuple<bool, std::int64_t, std::int64_t, WindowId>;
     std::optional<Rank> closest;
-    std::optional<std::tuple<std::int64_t, std::int64_t, WindowId>> opposite;
     for (const auto &[candidate, position] : tiles_) {
         if (candidate == id) {
             continue;
@@ -657,15 +655,8 @@ std::optional<WindowId> WorkspaceLayout::neighbor(WindowId id, Direction directi
                 closest = rank;
             }
         }
-        const auto rank = std::tuple{towards, cross, candidate};
-        if (wrap && (!opposite || rank < *opposite)) {
-            opposite = rank;
-        }
     }
-    if (closest) {
-        return std::get<3>(*closest);
-    }
-    return opposite ? std::optional{std::get<2>(*opposite)} : std::nullopt;
+    return closest ? std::optional{std::get<3>(*closest)} : std::nullopt;
 }
 
 std::optional<WindowId> WorkspaceLayout::close_focus(WindowId id) const noexcept {

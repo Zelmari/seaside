@@ -13,8 +13,9 @@ workspace mode. [Part 5 plan](PART5_PLAN.md) · [Seaside design](SEASIDE_SPEC.md
   constrained areas.
 - Scrolling uses one independent width per column and retains order, custom
   widths, and viewport across workspace visits. Focus reveals columns by the
-  smallest necessary shift. Directional navigation reveals an oversized
-  column's entry edge. A global layout rebuild restores the
+  smallest necessary shift. Horizontal focus stops at the first and last
+  columns, with focus and the viewport staying in place. Directional navigation
+  reveals an oversized column's entry edge. A global layout rebuild restores the
   original opening order and starts scrolling at the left edge. If the old
   focus falls outside that viewport, the first presented column takes focus.
 - The existing `Super+D`, `Super+Left/Right/Up/Down`, and Super+mouse drags
@@ -70,10 +71,9 @@ passive DRM capability probe was skipped.
   another terminal opened. A right-button resize widened it to 125. A
   left-button drag reinserted the second terminal on the left. Clicks on
   each side verified the two terminal shell PIDs in their new positions.
-- Scrolling opened three terminals, each 106 text columns wide. Rightward
-  focus wrapped from the third terminal to the first. Pointer resize widened
-  the first to 127 while its neighbor stayed at 106. A workspace round trip
-  returned focus to the neighbor.
+- Scrolling opened three terminals, each 106 text columns wide. Pointer resize
+  widened the first to 127 while its neighbor stayed at 106. A workspace round
+  trip returned focus to the neighbor.
 - The TTY trial reached `seaside READY cursor-plane=40`. It captured
   1280×839 frames with the same terminal shell PID before and after the VT
   round trip. Both layout sessions returned to TTY 1 with status 0. A

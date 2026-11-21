@@ -143,7 +143,7 @@ TEST(DwindleLayout, DropHonorsTheSelectedEdgeAndCanRestoreAnExactSnapshot) {
     EXPECT_EQ(layout.geometry(2), (WindowRect{400, 0, 400, 600}));
 }
 
-TEST(ScrollingLayout, RevealsMinimallyAndWrapsAtTheStripEdge) {
+TEST(ScrollingLayout, RevealsMinimallyAndStopsAtTheStripEdges) {
     WorkspaceLayout layout(no_gaps(Layout::scrolling));
     layout.set_area({20, -30, 400, 292});
     ASSERT_TRUE(layout.add({1, 1}));
@@ -159,10 +159,10 @@ TEST(ScrollingLayout, RevealsMinimallyAndWrapsAtTheStripEdge) {
     ASSERT_TRUE(layout.reveal(3));
     EXPECT_EQ(layout.geometry(3)->x, 220);
 
-    EXPECT_EQ(layout.neighbor(1, Direction::right, true), 2U);
-    EXPECT_EQ(layout.neighbor(3, Direction::right, true), 1U);
-    EXPECT_EQ(layout.neighbor(1, Direction::left, true), 3U);
-    EXPECT_FALSE(layout.neighbor(3, Direction::up, true));
+    EXPECT_EQ(layout.neighbor(1, Direction::right), 2U);
+    EXPECT_EQ(layout.neighbor(3, Direction::left), 2U);
+    EXPECT_FALSE(layout.neighbor(3, Direction::right));
+    EXPECT_FALSE(layout.neighbor(3, Direction::up));
     EXPECT_FALSE(layout.neighbor(1, Direction::left));
     EXPECT_EQ(layout.close_focus(2), 3U);
     EXPECT_EQ(layout.close_focus(3), 2U);

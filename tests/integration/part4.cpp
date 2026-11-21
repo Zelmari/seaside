@@ -720,6 +720,13 @@ bool run_scrolling(const Fixture &fixture) {
     REQUIRE(windows.view(c).geometry == (WindowRect{80, 0, 80, 90}));
 
     REQUIRE(desktop.action(directional_action(ActionKind::focus, Direction::right)));
+    REQUIRE(windows.focused_window() == c);
+    REQUIRE(windows.view(c).geometry == (WindowRect{80, 0, 80, 90}));
+    REQUIRE(desktop.action(directional_action(ActionKind::focus, Direction::left)));
+    REQUIRE(windows.focused_window() == b);
+    REQUIRE(desktop.action(directional_action(ActionKind::focus, Direction::left)));
+    REQUIRE(windows.focused_window() == a);
+    REQUIRE(desktop.action(directional_action(ActionKind::focus, Direction::left)));
     REQUIRE(windows.focused_window() == a);
     REQUIRE(windows.view(a).geometry == (WindowRect{0, 0, 80, 90}));
     REQUIRE(windows.view(b).geometry == (WindowRect{80, 0, 100, 90}));

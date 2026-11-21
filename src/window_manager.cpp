@@ -996,15 +996,17 @@ bool WindowManager::focus_direction(Direction direction) {
     }
     const bool horizontal = direction == Direction::left || direction == Direction::right;
     const auto &layout = workspaces_.at(*home).layout;
-    const bool from_column =
-        layout_settings_.kind == Layout::scrolling && layout.contains(*focused_window_);
+    const bool scrolling = layout_settings_.kind == Layout::scrolling;
+    const bool from_column = scrolling && layout.contains(*focused_window_);
     if (from_column && horizontal) {
-        if (const auto next = layout.neighbor(*focused_window_, direction, true);
+        if (const auto next = layout.neighbor(*focused_window_, direction);
             next && eligible(*next, *home)) {
             set_focus(next, true, direction);
             return true;
         }
+        return false;
     }
+    const bool can_wrap = !scrolling || !horizontal;
     const int sign = (direction == Direction::left || direction == Direction::up) ? -1 : 1;
     const auto origin = view(*focused_window_).geometry;
     const auto center = [horizontal, sign](WindowRect rect) {
@@ -1026,9 +1028,11 @@ bool WindowManager::focus_direction(Direction direction) {
         const auto rect = view(id).geometry;
         const auto [towards, across] = center(rect);
         const auto cross = distance(across - from_cross);
-        const auto next = std::tuple(towards, cross, id);
-        if (!wrap || next < *wrap) {
-            wrap = next;
+        if (can_wrap) {
+            const auto next = std::tuple(towards, cross, id);
+            if (!wrap || next < *wrap) {
+                wrap = next;
+            }
         }
         if (towards > from_axis) {
             const auto spans = horizontal ? std::int64_t{origin.height} + rect.height

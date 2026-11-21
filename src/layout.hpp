@@ -70,8 +70,7 @@ class WorkspaceLayout {
     std::optional<TileDrop> drop_at(double x, double y) const noexcept;
 
     bool reveal(WindowId id, std::optional<Direction> from = {});
-    std::optional<WindowId> neighbor(WindowId id, Direction direction,
-                                     bool wrap = false) const noexcept;
+    std::optional<WindowId> neighbor(WindowId id, Direction direction) const noexcept;
     std::optional<WindowId> close_focus(WindowId id) const noexcept;
     bool move(WindowId id, Direction direction);
     bool swap(WindowId first, WindowId second);

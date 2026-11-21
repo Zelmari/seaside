@@ -124,12 +124,15 @@ def run_layout(repo, directory, result_dir, state, layout):
             third = observe("third", key="open")
             if len({first["pid"], second["pid"], third["pid"]}) != 3:
                 raise RuntimeError("The scrolling trial requires three independent terminals")
-            wrapped = observe("logical-wrap", key="right", expected=first)
-            if wrapped["columns"] != first["columns"]:
+            observe("right-edge", key="right", expected=third)
+            observe("left-from-third", key="left", expected=second)
+            revealed = observe("left-from-second", key="left", expected=first)
+            observe("left-edge", key="left", expected=first)
+            if revealed["columns"] != first["columns"]:
                 raise RuntimeError("Scrolling changed the original column width during reveal")
             resized = observe("resize", mouse=drag(2, (left, middle), (left + width // 10, middle)),
                               expected=first)
-            if resized["columns"] <= wrapped["columns"]:
+            if resized["columns"] <= revealed["columns"]:
                 raise RuntimeError("Scrolling pointer resize did not widen the selected column")
             neighbor = observe("neighbor", key="right", expected=second)
             if neighbor["columns"] != second["columns"]:
