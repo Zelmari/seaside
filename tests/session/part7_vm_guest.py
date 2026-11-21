@@ -12,6 +12,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 
@@ -33,6 +34,46 @@ def require(condition, message):
 
 def output(args, *, env=None, timeout=8):
     return subprocess.check_output(list(map(str, args)), env=env, text=True, timeout=timeout).strip()
+
+
+def memory(pid):
+    proc = Path(f"/proc/{pid}")
+    status = (proc / "status").read_text()
+    meminfo = Path("/proc/meminfo").read_text()
+    fields = {name: int(value) for name, value in
+              re.findall(r"^(VmRSS|VmHWM|VmData):\s+(\d+) kB$", status, re.MULTILINE)}
+    available = re.search(r"^MemAvailable:\s+(\d+) kB$", meminfo, re.MULTILINE)
+    return dict(fields, fds=sum(1 for _ in (proc / "fd").iterdir()),
+                guest_available_kb=int(available[1]))
+
+
+@contextmanager
+def track_memory(session, path):
+    stopped = threading.Event()
+
+    def collect():
+        with path.open("w", buffering=1) as stream:
+            for _ in range(720):
+                try:
+                    sample = memory(session.process.pid)
+                except (FileNotFoundError, ProcessLookupError):
+                    return
+                excessive = sample.get("VmRSS", 0) > 512 * 1024 or sample["guest_available_kb"] < 768 * 1024
+                stream.write(json.dumps(dict(sample, recorded_at=time.time(), limit_reached=excessive)) + "\n")
+                if excessive:
+                    if session.process.poll() is None:
+                        session.process.terminate()
+                    return
+                if stopped.wait(.5):
+                    return
+
+    thread = threading.Thread(target=collect, daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stopped.set()
+        thread.join(timeout=2)
 
 
 def environment(state):
@@ -114,7 +155,8 @@ def prepare(source, results, env, state):
         event("harness", revision[:12])
         reports = results / "harness"
         status = run_logged(["tools/run-tests", "--results-dir", str(reports), "--suite", "unit",
-                             "--suite", "integration", "--suite", "runner", "--suite", "hardware"],
+                             "--suite", "integration", "--suite", "runner", "--suite", "hardware",
+                             "--jobs", "2"],
                             repo, results / "harness.log", 760, env=env)
         summaries = list(reports.glob("*/summary.json"))
         require(len(summaries) == 1, "The guest harness did not produce a unique summary")
@@ -505,6 +547,27 @@ def run_portal_loss(session, results, state):
         state["portal_loss_survived"] = True
 
 
+def run_capture_soak(session, state):
+    shot = session.root / "soak.png"
+    args = [state["tools"]["grim"], "-c", shot]
+    for _ in range(3):
+        output(args, env=session.env)
+    before = memory(session.process.pid)
+    for _ in range(24):
+        output(args, env=session.env)
+    after = memory(session.process.pid)
+    state["capture_soak"] = {"captures_after_warmup": 24, "before_kb": before, "after_kb": after}
+    require(after["fds"] <= before["fds"] + 2, "Capture retained file descriptors after disconnect")
+    require(after["VmRSS"] <= before["VmRSS"] + 32 * 1024, "Capture kept over 32 MiB after disconnect")
+
+
+def publish_state(results, state, artifacts):
+    for name in artifacts:
+        upload(name, results / name)
+    state["guest_evidence"] = str(results)
+    standard["send"]("guest.json", json.dumps(state, indent=2).encode() + b"\n")
+
+
 def trial():
     tty = os.ttyname(0)
     current = standard["active"]()
@@ -517,6 +580,10 @@ def trial():
     results = Path.home() / "Projects/seaside/test-results" / f"vm-{base.rsplit('/', 1)[-1][:12]}"
     results.mkdir(mode=0o700, parents=True)
     started = int(time.time())
+    artifacts = ("prepare.log", "harness.log", "normal.log", "failure.log", "part7-session.log",
+                 "part7-native.log", "part7-x11.log", "part7-monitor.log", "part7-window.log",
+                 "part7-cancel.log", "part7-x11-window.log", "part7-grim.png", "part7-portals.log",
+                 "part7-pipewire.log", "part7-memory.jsonl")
     state = {"revision": revision, "kernel": os.uname().release, "renderer": "pixman", "ok": False}
     try:
         env = environment(state)
@@ -538,35 +605,38 @@ def trial():
                     os.environ.update(old_env)
                 session = TrialSession(repo, root / "part7", results, env, state["tools"]["wofi"])
                 try:
-                    session.ready()
-                    sys.path.insert(0, str(repo / "tests/session"))
-                    from part7_clipboard import run_clipboard
+                    with track_memory(session, results / "part7-memory.jsonl"):
+                        session.ready()
+                        sys.path.insert(0, str(repo / "tests/session"))
+                        from part7_clipboard import run_clipboard
 
-                    def clipboard():
-                        state["cross_client_clipboard"] = run_clipboard(session.env, session.focus)
+                        def clipboard():
+                            state["cross_client_clipboard"] = run_clipboard(session.env, session.focus)
 
-                    checks = {
-                        "video": lambda: run_video(session, results, state),
-                        "x11": lambda: run_x11(session, results, state),
-                        "clipboard": clipboard,
-                        "audio": lambda: run_audio(session, state),
-                        "portal-loss": lambda: run_portal_loss(session, results, state),
-                    }
-                    outcomes = state["tty_checks"] = {}
-                    for name, check in checks.items():
-                        event("part7", name)
-                        try:
-                            session.ctl("workspace", "1")
-                            check()
-                            outcomes[name] = "pass"
-                        except (OSError, RuntimeError, ValueError, KeyError, subprocess.SubprocessError) as error:
-                            outcomes[name] = str(error) or type(error).__name__
-                            event("diagnostic", f"{name}: {outcomes[name]}")
+                        checks = {
+                            "capture-soak": lambda: run_capture_soak(session, state),
+                            "video": lambda: run_video(session, results, state),
+                            "x11": lambda: run_x11(session, results, state),
+                            "clipboard": clipboard,
+                            "portal-loss": lambda: run_portal_loss(session, results, state),
+                            "audio": lambda: run_audio(session, state),
+                        }
+                        outcomes = state["tty_checks"] = {}
+                        for name, check in checks.items():
+                            event("part7", name)
+                            try:
+                                session.ctl("workspace", "1")
+                                check()
+                                outcomes[name] = "pass"
+                            except (OSError, RuntimeError, ValueError, KeyError, subprocess.SubprocessError) as error:
+                                outcomes[name] = str(error) or type(error).__name__
+                                event("diagnostic", f"{name}: {outcomes[name]}")
+                            publish_state(results, state, artifacts)
                             if session.process.poll() is not None:
                                 break
-                    session.close()
-                    failed = [name for name, result in outcomes.items() if result != "pass"]
-                    require(not failed, "Part 7 TTY checks failed: " + ", ".join(failed))
+                        session.close()
+                        failed = [name for name, result in outcomes.items() if result != "pass"]
+                        require(not failed, "Part 7 TTY checks failed: " + ", ".join(failed))
                 finally:
                     standard["stop"](session.process)
         state["ok"] = True
@@ -575,18 +645,14 @@ def trial():
         state["error"] = str(error) or type(error).__name__
         event("diagnostic", state["error"])
     finally:
-        journal = subprocess.run(["journalctl", "--user", "--no-pager", "-o", "cat", "-n", "120",
-                                  "--user-unit=seaside-portal-*", f"--since=@{started}"],
-                                 capture_output=True, timeout=10, check=False)
-        (results / "part7-portals.log").write_bytes(journal.stdout)
-        artifacts = ("prepare.log", "harness.log", "normal.log", "failure.log", "part7-session.log",
-                     "part7-native.log", "part7-x11.log", "part7-monitor.log", "part7-window.log",
-                     "part7-cancel.log", "part7-x11-window.log", "part7-grim.png", "part7-portals.log",
-                     "part7-pipewire.log")
-        for name in artifacts:
-            upload(name, results / name)
-        state["guest_evidence"] = str(results)
-        standard["send"]("guest.json", json.dumps(state, indent=2).encode() + b"\n")
+        try:
+            journal = subprocess.run(["journalctl", "--user", "--no-pager", "-o", "cat", "-n", "120",
+                                      "--user-unit=seaside-portal-*", f"--since=@{started}"],
+                                     capture_output=True, timeout=10, check=False)
+            (results / "part7-portals.log").write_bytes(journal.stdout)
+        except (OSError, subprocess.SubprocessError) as error:
+            state["portal_journal_error"] = str(error)
+        publish_state(results, state, artifacts)
         event("done", state.get("error", "Part 7 VM trial passed"), ok=state["ok"])
 
 

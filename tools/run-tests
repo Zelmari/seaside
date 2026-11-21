@@ -846,10 +846,13 @@ def main(argv: list[str] | None = None, *, repository_root: Path | None = None) 
     parser.add_argument("--results-dir", default="test-results", help="parent for run-specific evidence directories")
     parser.add_argument("--timeout", type=positive_float, default=300.0, help="deadline in seconds per setup/build/test command")
     parser.add_argument("--log-limit", type=int, default=1024 * 1024, help="maximum retained bytes per command/test log")
+    parser.add_argument("--jobs", type=int, help="maximum concurrent compiler jobs and Meson tests")
     parser.add_argument("--suite", action="append", default=[], help="select a Meson suite; repeat to select several")
     args = parser.parse_args(argv)
     if args.log_limit < 1:
         parser.error("--log-limit must be positive")
+    if args.jobs is not None and args.jobs < 1:
+        parser.error("--jobs must be positive")
     root = (repository_root or Path(__file__).resolve().parent.parent).resolve()
     build_dir = (root / args.build_dir).resolve()
     results_dir = (root / args.results_dir).resolve()
@@ -906,11 +909,16 @@ def main(argv: list[str] | None = None, *, repository_root: Path | None = None) 
             configured = execute("configure", setup)
             compiled = None
             if configured["status"] == "pass" and not interrupted:
-                compiled = execute("compile", ["meson", "compile", "-C", str(build_dir)])
+                compile_command = ["meson", "compile", "-C", str(build_dir)]
+                if args.jobs is not None:
+                    compile_command.extend(["--jobs", str(args.jobs)])
+                compiled = execute("compile", compile_command)
             if not interrupted:
                 execute("baseline", [sys.executable, str(root / "tools/record-baseline"), "--build-dir", str(build_dir), "--output", report["baseline"]])
             if compiled is not None and compiled["status"] == "pass" and not interrupted:
                 command = ["meson", "test", "-C", str(build_dir), "--no-rebuild", "--print-errorlogs", "--logbase", str(run_dir / "meson")]
+                if args.jobs is not None:
+                    command.extend(["--num-processes", str(args.jobs)])
                 for suite in args.suite:
                     command.extend(["--suite", suite])
                 try:

@@ -9,7 +9,7 @@ from part5_vm import revision_bundle, run
 
 ARTIFACTS = {"part7-session.log", "part7-native.log", "part7-x11.log", "part7-monitor.log",
              "part7-window.log", "part7-cancel.log", "part7-x11-window.log", "part7-grim.png",
-             "part7-portals.log", "part7-pipewire.log"}
+             "part7-portals.log", "part7-pipewire.log", "part7-memory.jsonl"}
 
 KEYS = {
     "cycle": ("38", "0f", "8f", "b8"),
