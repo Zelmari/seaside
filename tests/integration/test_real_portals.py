@@ -97,9 +97,11 @@ context.modules = [
 
         def wait_for(check, *required, description="a fixture service", timeout=4):
             deadline = time.monotonic() + timeout
-            while time.monotonic() < deadline and all(p.poll() is None for p in required):
+            while time.monotonic() < deadline:
                 if check():
                     return
+                if any(p.poll() is not None for p in required):
+                    break
                 time.sleep(.025)
             raise RuntimeError(f"Timed out waiting for {description}")
 
@@ -118,27 +120,48 @@ context.modules = [
             child.stdin.flush()
 
         def check_frames():
-            monitor = start("monitor", [receiver, "monitor", "frame"])
-            if monitor.wait(timeout=8) or not log_has("monitor", "frame 160 90"):
-                raise RuntimeError("The monitor receiver did not read a 160 by 90 frame")
-
             native = start("native", [native_client, "Selected window", "2244cc"], handshake=True)
             wait_for(lambda: log_has("native", "color 2244cc 264 176"), native,
                      description="the selected fixture window")
-            window = start("window", [receiver, "window", "closed"])
+
+            def paint(color):
+                send(native, f"{color}\n".encode("ascii"))
+                wait_for(lambda: log_has("native", f"color {color} 264 176"), native,
+                         description=f"native client commit {color}")
+
+            def start_damaged_stream(label, source, lifetime, colors):
+                child = start(label, [receiver, source, lifetime])
+                wait_for(lambda: log_has(label, "PipeWire stream state streaming"), child,
+                         description=f"the {source} PipeWire stream", timeout=6)
+                # A still desktop may only produce the initial Wayland frame.
+                # Supply real damage while the new PipeWire link starts.
+                for color in colors:
+                    paint(color)
+                return child
+
+            def frame_present(label, size, color):
+                expected = f"frame {size} " + " ".join([color] * 5)
+                return log_has(label, expected)
+
+            monitor = start_damaged_stream("monitor", "monitor", "frame", ("119966", "7755bb"))
+            if monitor.wait(timeout=8) or not any(
+                    frame_present("monitor", "160 90", color)
+                    for color in ("2244cc", "119966", "7755bb")):
+                raise RuntimeError("The monitor receiver did not read a 160 by 90 marker frame")
+
+            window = start_damaged_stream("window", "window", "closed", ("4422cc", "33bb55"))
 
             def expect_color(color):
-                expected = "frame 264 176 " + " ".join([color] * 5)
-                wait_for(lambda: log_has("window", expected), window, native,
+                wait_for(lambda: frame_present("window", "264 176", color), window, native,
                          description=f"selected-window frame {color}", timeout=6)
 
-            expect_color("2244cc")
+            expect_color("33bb55")
             overlap = start("overlap", [native_client, "Overlapping window", "aa5533"],
                             handshake=True)
             wait_for(lambda: log_has("overlap", "color aa5533 264 176"), overlap,
                      description="the overlapping fixture window")
-            send(native, b"33bb55\n")
-            expect_color("33bb55")
+            paint("22a088")
+            expect_color("22a088")
             send(native, b"close\n")
             if native.wait(timeout=4) or window.wait(timeout=6) or not log_has("window", "closed frames "):
                 raise RuntimeError("The selected stream did not close with the window")
