@@ -36,6 +36,7 @@ PART_QUALIFICATION = {
     5: "headless_layout_checks_pending_arch_vm_tty_layout_trial",
     8: "software_checks_only_arch_vm_and_native_drm_evidence_reported_separately",
     9: "software_checks_only_arch_vm_session_and_native_display_evidence_reported_separately",
+    10: "software_checks_only_installed_arch_vm_and_native_release_evidence_reported_separately",
 }
 
 

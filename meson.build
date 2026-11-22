@@ -490,10 +490,22 @@ seaside = executable(
 )
 install_data('packaging/seaside-portals.conf', install_dir: get_option('datadir') / 'xdg-desktop-portal')
 install_data('packaging/black.png', install_dir: get_option('datadir') / 'seaside' / 'wallpapers')
+install_data('packaging/xdg-desktop-portal-wlr/Seaside',
+  install_dir: get_option('sysconfdir') / 'xdg' / 'xdg-desktop-portal-wlr',
+)
+install_data('LICENSE', install_dir: get_option('datadir') / 'licenses' / 'seaside')
+install_data('Specification/SEASIDE_CONFIG_EXAMPLE.toml',
+  rename: 'config.example.toml', install_dir: get_option('datadir') / 'doc' / 'seaside',
+)
 test('part3-session-entry-guard', python,
   args: [files('tests/integration/test_session_entry.py'), seaside],
   suite: ['integration', 'part3'], timeout: 15,
   env: {'SEASIDE_TEST_PART': '3', 'SEASIDE_REQUIREMENTS': '3,12.2b'},
+)
+test('part10-installed-payload', python,
+  args: [files('tests/packaging/test_installed_payload.py'), meson.project_source_root(), meson.project_build_root()],
+  depends: [seaside, seasidectl], suite: ['integration', 'part10'], timeout: 45,
+  env: {'SEASIDE_TEST_PART': '10', 'SEASIDE_REQUIREMENTS': '3,11.1,12.2b'},
 )
 
 headless_fixture = executable(
