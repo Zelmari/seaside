@@ -28,6 +28,14 @@ def target_state(env):
     return state
 
 
+def target_active_since(env):
+    observed = helpers["checked"](["systemctl", "--user", "show", "graphical-session.target",
+                                   "--property=ActiveEnterTimestampMonotonic", "--value"], env=env)
+    timestamp = int(observed.strip())
+    require(timestamp > 0, "The graphical target has no activation timestamp")
+    return timestamp
+
+
 def connector_command():
     require(re.fullmatch(r"card[0-9]+-Virtual-[0-9]+", zero_output_connector),
             "Refusing to change a non-VirtualBox connector")
@@ -84,18 +92,26 @@ def check_startup(repo, root, results, env, state):
                     "The cold session failed to report readiness without outputs")
             require(starts.read_text() == "started\n", "Autostart did not execute exactly once")
             wait_for(lambda: target_state(env) == "active", 5, "the passive graphical target")
+            activated = target_active_since(env)
+            state["target_active_since_us"] = activated
             state["ready_without_outputs"] = True
             with helpers["fixture"](session, results / "zero-output-client.log",
-                                    "seaside-part7-native-client", title, "316657") as client:
+                                    "seaside-part7-native-client", title, "316657", interactive=True) as client:
                 original = wait_for(lambda: session.window(title), 8, "a cold-start Wayland window", client)
                 with recovery["subscription"](session) as records:
-                    pid = recovery["stop_owned_portal"](session, "org.freedesktop.portal.Desktop")
-                    down = recovery["expect_integration"](records, "failed", "portal-frontend")
-                    require(target_state(env) == "active" and session.ctl("status")["ready"],
-                            "Restarting the owned frontend stopped the target or the session")
-                    up = recovery["expect_integration"](records, "recovered", "portal-frontend")
-                    require(up["seq"] > down["seq"], "Recovery preceded frontend failure")
-                    state["frontend_restart"] = {"pid": pid, "failure": down["seq"], "recovery": up["seq"]}
+                    for key, name, service in (
+                        ("frontend_restart", "portal-frontend", "org.freedesktop.portal.Desktop"),
+                        ("backend_restart", "capture-backend", "org.freedesktop.impl.portal.desktop.wlr"),
+                    ):
+                        pid = recovery["stop_owned_portal"](session, service)
+                        down = recovery["expect_integration"](records, "failed", name)
+                        require(target_state(env) == "active" and session.ctl("status")["ready"],
+                                f"Restarting {name} stopped the target or Seaside")
+                        up = recovery["expect_integration"](records, "recovered", name)
+                        require(up["seq"] > down["seq"], f"Recovery preceded {name} failure")
+                        require(target_active_since(env) == activated,
+                                f"The graphical target restarted after {name} failed")
+                        state[key] = {"pid": pid, "failure": down["seq"], "recovery": up["seq"]}
                 write_status(command, "detect")
                 plane = f"output {zero_output_connector.split('-', 1)[1]} presented with cursor plane "
                 output = session.wait(lambda: session.focused_output() if plane in
