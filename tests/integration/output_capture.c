@@ -3,6 +3,7 @@
 #include "output_capture.h"
 #include "capture_fence_fixture.h"
 #include "scene_bridge.h"
+#include "tearing-control-v1-client-protocol.h"
 
 #include "ext-foreign-toplevel-list-v1-client-protocol.h"
 #include "ext-image-capture-source-v1-client-protocol.h"
@@ -21,6 +22,7 @@
 #include <unistd.h>
 #include <wayland-client.h>
 #include <wayland-server-core.h>
+#include <wlr/backend/drm.h>
 #include <wlr/backend/headless.h>
 #include <wlr/render/allocator.h>
 #include <wlr/render/pass.h>
@@ -30,11 +32,52 @@
 #include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_output.h>
 #include <wlr/types/wlr_subcompositor.h>
+#include <xf86drm.h>
 
 enum { WIDTH = 48, HEIGHT = 42, CURSOR_SIZE = 4 };
 static const uint32_t BACKGROUND_RGB = 0x00ff00;
 static const uint32_t CURSOR_RGB = 0xff0000;
 static const uint32_t SECOND_RGB = 0x0000ff;
+
+// The headless backend presents real buffers synchronously. Model a driver
+// that advertises async flips but rejects them for this fullscreen workload.
+static struct wlr_output *tearing_output;
+static bool reject_tearing, count_flips;
+static unsigned async_flips, sync_flips;
+
+bool __real_wlr_output_is_drm(struct wlr_output *output);
+bool __wrap_wlr_output_is_drm(struct wlr_output *output) {
+    return (output && output == tearing_output) || __real_wlr_output_is_drm(output);
+}
+
+int __real_drmGetCap(int fd, uint64_t capability, uint64_t *value);
+int __wrap_drmGetCap(int fd, uint64_t capability, uint64_t *value) {
+    if (fd == -1 && tearing_output &&
+        (capability == DRM_CAP_ATOMIC_ASYNC_PAGE_FLIP || capability == DRM_CAP_ASYNC_PAGE_FLIP)) {
+        *value = 1;
+        return 0;
+    }
+    return __real_drmGetCap(fd, capability, value);
+}
+
+bool __real_wlr_output_commit_state(struct wlr_output *output,
+                                    const struct wlr_output_state *state);
+bool __wrap_wlr_output_commit_state(struct wlr_output *output,
+                                    const struct wlr_output_state *state) {
+    if (count_flips && output == tearing_output && state->buffer) {
+        if (state->tearing_page_flip) {
+            async_flips++;
+            if (reject_tearing) {
+                return false;
+            }
+            struct wlr_output_state accepted = *state;
+            accepted.tearing_page_flip = false;
+            return __real_wlr_output_commit_state(output, &accepted);
+        }
+        sync_flips++;
+    }
+    return __real_wlr_output_commit_state(output, state);
+}
 
 struct listed_window {
     struct ext_foreign_toplevel_handle_v1 *handle;
@@ -58,6 +101,7 @@ struct fixture {
     struct wl_output *other_output;
     struct wl_compositor *compositor;
     struct wl_subcompositor *subcompositor;
+    struct wp_tearing_control_manager_v1 *tearing;
     struct xdg_wm_base *shell;
     struct ext_foreign_toplevel_list_v1 *list;
     struct ext_foreign_toplevel_image_capture_source_manager_v1 *window_manager;
@@ -238,6 +282,9 @@ static void registry_add(void *data, struct wl_registry *registry, uint32_t name
             wl_registry_bind(registry, name, &zwlr_screencopy_manager_v1_interface, 3);
     } else if (strcmp(interface, wl_compositor_interface.name) == 0) {
         fixture->compositor = wl_registry_bind(registry, name, &wl_compositor_interface, 4);
+    } else if (strcmp(interface, wp_tearing_control_manager_v1_interface.name) == 0) {
+        fixture->tearing =
+            wl_registry_bind(registry, name, &wp_tearing_control_manager_v1_interface, 1);
     } else if (strcmp(interface, wl_subcompositor_interface.name) == 0) {
         fixture->subcompositor = wl_registry_bind(registry, name, &wl_subcompositor_interface, 1);
     } else if (strcmp(interface, xdg_wm_base_interface.name) == 0) {
@@ -944,6 +991,50 @@ done:
     return passed;
 }
 
+static bool check_tearing(struct fixture *fixture, struct seaside_scene_bridge *scene,
+                          struct wl_surface *surface) {
+    bool passed = false;
+    struct wp_tearing_control_v1 *hint =
+        wp_tearing_control_manager_v1_get_tearing_control(fixture->tearing, surface);
+    CHECK(hint);
+    wp_tearing_control_v1_set_presentation_hint(hint,
+                                                WP_TEARING_CONTROL_V1_PRESENTATION_HINT_ASYNC);
+    struct seaside_scene_window_placement fullscreen = {
+        .geometry = {0, 0, WIDTH, HEIGHT},
+        .output = {0, 0, WIDTH, HEIGHT},
+        .stacking = 3,
+        .visible = true,
+        .fullscreen = true,
+    };
+    seaside_scene_place_window(scene, 1, &fullscreen);
+    seaside_scene_set_render_policy(scene, true, true, false, 4500);
+    count_flips = reject_tearing = true;
+    for (unsigned i = 0; i < 6; i++) {
+        CHECK(paint(fixture, surface, WIDTH, HEIGHT, i) && pump_for(fixture, 50));
+    }
+    fprintf(stderr, "Fullscreen async rejection: async=%u synchronized=%u\n", async_flips,
+            sync_flips);
+    CHECK(async_flips == 1 && sync_flips >= 6);
+    // Changing the active hint permits another attempt.
+    wp_tearing_control_v1_set_presentation_hint(hint,
+                                                WP_TEARING_CONTROL_V1_PRESENTATION_HINT_VSYNC);
+    CHECK(paint(fixture, surface, WIDTH, HEIGHT, SECOND_RGB) && pump_for(fixture, 50));
+    reject_tearing = false;
+    wp_tearing_control_v1_set_presentation_hint(hint,
+                                                WP_TEARING_CONTROL_V1_PRESENTATION_HINT_ASYNC);
+    CHECK(paint(fixture, surface, WIDTH, HEIGHT, CURSOR_RGB) && pump_for(fixture, 50));
+    CHECK(async_flips > 1);
+    passed = true;
+done:
+    if (hint) {
+        wp_tearing_control_v1_destroy(hint);
+    }
+    count_flips = false;
+    seaside_scene_set_render_policy(scene, true, false, false, 4500);
+    place_window(scene, 1, 2, 3, true);
+    return passed;
+}
+
 static bool check_selected_window(struct fixture *fixture) {
     bool passed = false;
     struct painted_window selected = {0}, occluding = {0};
@@ -962,6 +1053,7 @@ static bool check_selected_window(struct fixture *fixture) {
                                             seaside_output_capture_copy_manager(fixture->capture)));
     wl_list_remove(&fixture->output_frame.link);
     wl_list_init(&fixture->output_frame.link);
+    tearing_output = fixture->output;
     CHECK(seaside_scene_add_output(scene, fixture->output));
     CHECK(seaside_scene_place_output(scene, fixture->output, 0, 0));
     seaside_scene_set_window_handler(scene, window_event, &placement);
@@ -998,6 +1090,9 @@ static bool check_selected_window(struct fixture *fixture) {
     CHECK(pump_until(fixture, &fixture->windows[0].done));
     CHECK(strlen(fixture->windows[0].title) == 511 &&
           strcmp(fixture->windows[0].identifier, identifier) == 0);
+
+    CHECK(fixture->tearing && check_tearing(fixture, scene, selected.surface));
+    CHECK(paint(fixture, selected.surface, 20, 14, selected_rgb) && sync_client(fixture));
 
     selected_source = ext_foreign_toplevel_image_capture_source_manager_v1_create_source(
         fixture->window_manager, fixture->windows[0].handle);
@@ -1303,6 +1398,9 @@ done:
     finish_session(&resumed);
     if (fixture.source) {
         ext_image_capture_source_v1_destroy(fixture.source);
+    }
+    if (fixture.tearing) {
+        wp_tearing_control_manager_v1_destroy(fixture.tearing);
     }
     if (fixture.copy_manager) {
         ext_image_copy_capture_manager_v1_destroy(fixture.copy_manager);

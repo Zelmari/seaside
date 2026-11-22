@@ -85,18 +85,20 @@ idle_inhibit_code = custom_target(
   'idle-inhibit-client-code', input: idle_inhibit_xml, output: 'idle-inhibit-protocol.c',
   command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'],
 )
-display_protocols = []
-foreach protocol : ['stable/presentation-time/presentation-time', 'staging/fractional-scale/fractional-scale-v1']
+display_protocols = {}
+foreach protocol : ['stable/presentation-time/presentation-time', 'staging/fractional-scale/fractional-scale-v1',
+                    'staging/tearing-control/tearing-control-v1']
   name = protocol.split('/')[-1]
   xml = wayland_protocols.get_variable(pkgconfig: 'pkgdatadir') / (protocol + '.xml')
-  display_protocols += custom_target(
+  header = custom_target(
     name + '-client-header', input: xml, output: name + '-client-protocol.h',
     command: [wayland_scanner, 'client-header', '@INPUT@', '@OUTPUT@'],
   )
-  display_protocols += custom_target(
+  code = custom_target(
     name + '-private-code', input: xml, output: name + '-protocol.c',
     command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'],
   )
+  display_protocols += {name: [header, code]}
 endforeach
 xdg_shell_xml = wayland_protocols.get_variable(pkgconfig: 'pkgdatadir') / 'stable/xdg-shell/xdg-shell.xml'
 xdg_shell_client_header = custom_target(
@@ -248,7 +250,7 @@ capture_test = executable(
   'seaside-output-capture-test',
   ['tests/integration/output_capture.c', 'tests/integration/capture_fence_fixture.c', capture_source_client, capture_copy_client, capture_copy_code,
    xdg_output_client, xdg_output_code, xdg_shell_client_header, xdg_shell_private_code,
-   foreign_toplevel_client, legacy_capture_client],
+   foreign_toplevel_client, legacy_capture_client, display_protocols['tearing-control-v1']],
   include_directories: include_directories('src'),
   dependencies: [wlroots, wayland_server, wayland_client, pixman, libdrm, threads],
   link_args: ['-Wl,--wrap=wlr_linux_drm_syncobj_v1_get_surface_state',
@@ -256,7 +258,8 @@ capture_test = executable(
               '-Wl,--wrap=wlr_drm_syncobj_timeline_create', '-Wl,--wrap=wlr_drm_syncobj_timeline_unref',
               '-Wl,--wrap=wlr_drm_syncobj_timeline_waiter_init', '-Wl,--wrap=wlr_drm_syncobj_timeline_waiter_finish',
               '-Wl,--wrap=wlr_drm_syncobj_timeline_check', '-Wl,--wrap=wlr_renderer_begin_buffer_pass',
-              '-Wl,--wrap=wlr_render_pass_add_texture'],
+              '-Wl,--wrap=wlr_render_pass_add_texture', '-Wl,--wrap=wlr_output_commit_state',
+              '-Wl,--wrap=wlr_output_is_drm', '-Wl,--wrap=drmGetCap'],
   link_with: [capture_foundation, core], install: false,
 )
 test('part3-output-capture', capture_test, suite: ['integration', 'part3'], timeout: 25,
@@ -583,7 +586,8 @@ headless_fixture = executable(
 part3_fixture = executable(
   'seaside-part3-fixture',
   ['tests/integration/part3.cpp', 'tests/integration/part3_bridge.c', 'tests/integration/part8_frame_fault.c',
-   xdg_shell_client_header, xdg_shell_private_code, display_protocols],
+   xdg_shell_client_header, xdg_shell_private_code,
+   display_protocols['presentation-time'], display_protocols['fractional-scale-v1']],
   include_directories: include_directories('src', 'tests/integration'),
   dependencies: [wlroots, wayland_server, wayland_client, pixman, libdrm, threads],
   link_args: ['-Wl,--wrap=wlr_output_commit_state'],

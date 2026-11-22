@@ -130,7 +130,9 @@ struct scene_output {
     bool pending_tearing;
     struct wlr_drm_syncobj_timeline *unsubmitted_scanout;
     uint64_t unsubmitted_point;
-    bool retry_synchronized, retry_composed, retry_frame;
+    uint64_t tearing_window;
+    bool scanout_tearing_rejected, composed_tearing_rejected;
+    bool retry_composed, retry_frame;
     enum { LUT_CLEAN, LUT_PENDING, LUT_RETRY } lut_request;
 };
 
@@ -1170,6 +1172,11 @@ static void update_output_appearance(struct scene_output *view) {
 static void output_commit(struct wl_listener *listener, void *data) {
     struct scene_output *view = wl_container_of(listener, view, commit);
     const struct wlr_output_event_commit *event = data;
+    if (event->state->committed &
+        (WLR_OUTPUT_STATE_ENABLED | WLR_OUTPUT_STATE_MODE | WLR_OUTPUT_STATE_ADAPTIVE_SYNC_ENABLED |
+         WLR_OUTPUT_STATE_RENDER_FORMAT | WLR_OUTPUT_STATE_TRANSFORM | WLR_OUTPUT_STATE_SCALE)) {
+        view->tearing_window = 0;
+    }
     if (event->state->committed & (WLR_OUTPUT_STATE_ENABLED | WLR_OUTPUT_STATE_MODE |
                                    WLR_OUTPUT_STATE_SCALE | WLR_OUTPUT_STATE_TRANSFORM)) {
         update_output_appearance(view);
@@ -1231,14 +1238,14 @@ static enum seaside_output_support tearing_support(struct wlr_output *output) {
     return known_atomic && known_legacy ? SEASIDE_OUTPUT_UNSUPPORTED : SEASIDE_OUTPUT_UNKNOWN;
 }
 
-static bool wants_tearing(const struct scene_output *output) {
+static uint64_t tearing_candidate(const struct scene_output *output) {
     const struct seaside_scene_bridge *scene = output->owner;
-    if (!scene->allow_tearing || output->retry_synchronized || output->lut_request != LUT_CLEAN ||
+    if (!scene->allow_tearing || output->lut_request != LUT_CLEAN ||
         output->render_status.tearing == SEASIDE_OUTPUT_UNSUPPORTED ||
         output->banner->node.enabled || !wl_list_empty(&scene->drag_icons->children) ||
         seaside_layer_scene_has_overlay(scene->layers, output->viewport->output) ||
         output->viewport->output->attach_render_locks > (scene->direct_scanout ? 0 : 1)) {
-        return false;
+        return 0;
     }
     const struct scene_view *top = NULL, *view;
     wl_list_for_each(view, &scene->views, link) {
@@ -1249,10 +1256,13 @@ static bool wants_tearing(const struct scene_output *output) {
             top = view;
         }
     }
-    return top && top->placement.fullscreen &&
-           wlr_tearing_control_manager_v1_surface_hint_from_surface(scene->tearing,
-                                                                    top->toplevel->base->surface) ==
-               WP_TEARING_CONTROL_V1_PRESENTATION_HINT_ASYNC;
+    if (top && top->placement.fullscreen &&
+        wlr_tearing_control_manager_v1_surface_hint_from_surface(scene->tearing,
+                                                                 top->toplevel->base->surface) ==
+            WP_TEARING_CONTROL_V1_PRESENTATION_HINT_ASYNC) {
+        return top->id;
+    }
+    return 0;
 }
 
 static struct wlr_color_transform *night_light_transform(size_t size, int kelvin) {
@@ -1331,7 +1341,19 @@ static bool commit_frame(struct scene_output *view) {
     const bool scanout =
         built && state.buffer &&
         (!output->swapchain || !wlr_swapchain_has_buffer(output->swapchain, state.buffer));
-    const bool async = built && state.buffer && wants_tearing(view);
+    bool *tearing_rejected =
+        scanout ? &view->scanout_tearing_rejected : &view->composed_tearing_rejected;
+    bool async = false;
+    if (built && state.buffer) {
+        const uint64_t candidate = tearing_candidate(view);
+        if (candidate != view->tearing_window) {
+            view->tearing_window = candidate;
+            view->scanout_tearing_rejected = view->composed_tearing_rejected = false;
+        }
+        async = candidate && !*tearing_rejected;
+        view->render_status.tearing_reason =
+            candidate && *tearing_rejected ? "backend rejected asynchronous presentation" : NULL;
+    }
     const bool lut = built && prepare_night_light(view, &state);
     state.tearing_page_flip = async;
     const bool committed = built && wlr_output_commit_state(output, &state);
@@ -1371,10 +1393,12 @@ static bool commit_frame(struct scene_output *view) {
             view->render_status.tearing = SEASIDE_OUTPUT_SUPPORTED;
             view->render_status.tearing_reason = NULL;
         }
-        view->retry_synchronized = view->retry_composed = view->retry_frame = false;
+        view->retry_composed = view->retry_frame = false;
     } else if (async) {
         view->render_status.tearing_reason = "backend rejected asynchronous presentation";
-        view->retry_synchronized = true;
+        // A successful synchronized fallback cannot establish async support.
+        // Reconsider it on a new candidate, render path or output configuration.
+        *tearing_rejected = true;
         wlr_output_schedule_frame(output);
     } else if (lut) {
         // A combined commit cannot distinguish a bad scanout buffer from a
@@ -1584,9 +1608,8 @@ void seaside_scene_set_render_policy(struct seaside_scene_bridge *scene, bool di
             if (color_changed) {
                 view->lut_request = LUT_PENDING;
             }
-            if (!allow_tearing) {
-                view->render_status.tearing_reason = NULL;
-            }
+            view->tearing_window = 0;
+            view->render_status.tearing_reason = NULL;
             wlr_output_schedule_frame(view->viewport->output);
         }
     }
