@@ -89,6 +89,9 @@ struct Client {
         if (layers) {
             zwlr_layer_shell_v1_destroy(layers);
         }
+        if (data_devices) {
+            wl_data_device_manager_destroy(data_devices);
+        }
         if (shell) {
             xdg_wm_base_destroy(shell);
         }
@@ -135,6 +138,7 @@ struct Client {
     xdg_wm_base *shell = nullptr;
     xdg_activation_v1 *activation = nullptr;
     zwlr_layer_shell_v1 *layers = nullptr;
+    wl_data_device_manager *data_devices = nullptr;
     wl_seat *seat = nullptr;
     wl_keyboard *keyboard = nullptr;
     wl_pointer *pointer = nullptr;
@@ -341,6 +345,9 @@ void global(void *data, wl_registry *registry, std::uint32_t name, const char *i
     } else if (std::strcmp(interface, zwlr_layer_shell_v1_interface.name) == 0) {
         client.layers = static_cast<zwlr_layer_shell_v1 *>(wl_registry_bind(
             registry, name, &zwlr_layer_shell_v1_interface, std::min(version, 5u)));
+    } else if (std::strcmp(interface, wl_data_device_manager_interface.name) == 0 && version >= 3) {
+        client.data_devices = static_cast<wl_data_device_manager *>(
+            wl_registry_bind(registry, name, &wl_data_device_manager_interface, 3));
     } else if (std::strcmp(interface, wl_seat_interface.name) == 0 && version >= 5) {
         client.seat =
             static_cast<wl_seat *>(wl_registry_bind(registry, name, &wl_seat_interface, 5));
@@ -1000,6 +1007,24 @@ bool run_layer_shell(const Fixture &fixture) {
     REQUIRE(seat.shortcuts == 2 && client.keys == 1 &&
             desktop.windows().view(id).geometry == reserved);
     REQUIRE(wait_pixel(connection, client, primary.get(), 4, 5, green));
+    REQUIRE(client.data_devices);
+    const std::unique_ptr<wl_data_device, decltype(&wl_data_device_release)> data_device{
+        wl_data_device_manager_get_data_device(client.data_devices, client.seat),
+        wl_data_device_release};
+    client.button_serial = 0;
+    part3_input_button(seat.devices.get(), BTN_LEFT, true);
+    REQUIRE(connection.wait(client, [&] { return client.button_serial != 0; }));
+    wl_data_device_start_drag(data_device.get(), nullptr, panel.surface, nullptr,
+                              client.button_serial);
+    const auto *server_seat = seaside_tty_input_get_seat(seat.input.get());
+    REQUIRE(connection.wait(client, [&] { return part3_seat_has_drag(server_seat); }));
+    seat.key(KEY_F8);
+    REQUIRE(connection.wait(client, [&] { return client.configured.fullscreen; }));
+    REQUIRE(!part3_seat_has_drag(server_seat));
+    part3_input_button(seat.devices.get(), BTN_LEFT, false);
+    seat.key(KEY_F8);
+    REQUIRE(connection.wait(client, [&] { return !client.configured.fullscreen; }));
+
     zwlr_layer_surface_v1_set_exclusive_zone(panel.role, 20);
     wl_surface_commit(panel.surface);
     REQUIRE(connection.wait(client, [&] { return desktop.windows().view(id).geometry.y == 24; }));

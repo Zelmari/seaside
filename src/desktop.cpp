@@ -523,6 +523,9 @@ Desktop::dispatch(const Action &action, std::uint8_t modifiers, std::optional<Wi
         }
         break;
     }
+    if (focused != windows_.focused_window() || current_workspace != windows_.focused_workspace()) {
+        scene_.select_layer(nullptr);
+    }
     project(resized);
     return changed;
 } catch (...) {

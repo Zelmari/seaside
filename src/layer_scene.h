@@ -33,6 +33,8 @@ struct wlr_surface *seaside_layer_scene_keyboard_focus(struct seaside_layer_scen
                                                        struct wlr_output *focused_output);
 struct wlr_output *seaside_layer_scene_visible_output(struct seaside_layer_scene *layers,
                                                       struct wlr_surface *surface);
+bool seaside_layer_scene_has_overlay(const struct seaside_layer_scene *layers,
+                                     const struct wlr_output *output);
 bool seaside_scene_surface_intersects(struct wlr_scene_tree *tree, struct wlr_surface *surface,
                                       struct seaside_scene_rect viewport);
 

@@ -744,3 +744,15 @@ struct wlr_output *seaside_layer_scene_visible_output(struct seaside_layer_scene
                ? layer->output->output
                : NULL;
 }
+
+bool seaside_layer_scene_has_overlay(const struct seaside_layer_scene *layers,
+                                     const struct wlr_output *output) {
+    const struct layer_surface *layer;
+    wl_list_for_each(layer, &layers->surfaces, link) {
+        if (layer->output->output == output && layer->visible &&
+            layer->role->current.layer >= ZWLR_LAYER_SHELL_V1_LAYER_TOP) {
+            return true;
+        }
+    }
+    return false;
+}

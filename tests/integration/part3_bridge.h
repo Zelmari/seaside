@@ -9,6 +9,7 @@ struct wlr_backend;
 struct wlr_renderer;
 struct wlr_allocator;
 struct wlr_output;
+struct wlr_seat;
 struct part3_output;
 struct part3_input;
 
@@ -39,6 +40,7 @@ struct part3_input *part3_input_create(struct wlr_backend *backend);
 void part3_input_destroy(struct part3_input *input);
 void part3_input_key(struct part3_input *input, uint32_t code, bool pressed);
 void part3_input_button(struct part3_input *input, uint32_t code, bool pressed);
+bool part3_seat_has_drag(const struct wlr_seat *seat);
 void part8_reject_next_frame(struct wlr_output *output);
 struct part3_output_snapshot part3_output_get_snapshot(struct part3_output *output);
 bool part3_output_sample_pixel(struct part3_output *output, unsigned x, unsigned y);

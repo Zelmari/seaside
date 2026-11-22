@@ -1123,6 +1123,7 @@ static bool wants_tearing(const struct scene_output *output) {
     if (!scene->allow_tearing || output->retry_synchronized || output->night_light_dirty ||
         output->render_status.tearing == SEASIDE_OUTPUT_UNSUPPORTED ||
         output->banner->node.enabled || !wl_list_empty(&scene->drag_icons->children) ||
+        seaside_layer_scene_has_overlay(scene->layers, output->viewport->output) ||
         output->viewport->output->attach_render_locks > (scene->direct_scanout ? 0 : 1)) {
         return false;
     }

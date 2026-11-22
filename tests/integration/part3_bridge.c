@@ -10,6 +10,7 @@
 #include <wlr/render/pixman.h>
 #include <wlr/types/wlr_buffer.h>
 #include <wlr/types/wlr_output.h>
+#include <wlr/types/wlr_seat.h>
 
 enum { OUTPUT_WIDTH = 160, OUTPUT_HEIGHT = 90, CLIENT_WIDTH = 16, CLIENT_HEIGHT = 8 };
 static const uint32_t CLIENT_RGB = 0x335577;
@@ -207,6 +208,10 @@ void part3_input_button(struct part3_input *input, uint32_t code, bool pressed) 
 
 struct part3_output_snapshot part3_output_get_snapshot(struct part3_output *output) {
     return output ? output->snapshot : (struct part3_output_snapshot){0};
+}
+
+bool part3_seat_has_drag(const struct wlr_seat *seat) {
+    return seat && seat->drag != NULL;
 }
 
 bool part3_output_sample_pixel(struct part3_output *output, unsigned x, unsigned y) {
