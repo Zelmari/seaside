@@ -889,6 +889,13 @@ bool run_opening_transaction(const Fixture &fixture) {
     REQUIRE(wait_pixel(connection, first, output.get(), 110, 55, red));
     const auto right = desktop.windows().focused_window();
     REQUIRE(right && right != left);
+    const auto workspace = desktop.windows().focused_workspace();
+    REQUIRE(workspace);
+    const auto unchanged = desktop.dispatch(action(ActionKind::workspace, *workspace));
+    REQUIRE(unchanged && !*unchanged);
+    seaside_scene_target pending{};
+    REQUIRE(fixture.scene.window_at(110, 45, pending) && pending.id == left);
+    REQUIRE(wait_pixel(connection, first, output.get(), 110, 55, red));
     REQUIRE(!desktop.button(left, BTN_LEFT, true, 0, 110, 45));
     REQUIRE(!desktop.button(left, BTN_LEFT, false, 0, 110, 45));
     seaside_scene_target shown{};
@@ -965,6 +972,43 @@ bool run_opening_transaction(const Fixture &fixture) {
     }));
     REQUIRE(connection.attach(third, ordinary_width, ordinary_height, true, blue));
     REQUIRE(!desktop.failed() && !fixture.scene.snapshot().failed);
+    return true;
+}
+
+bool run_workspace_during_opening(const Fixture &fixture) {
+    auto &desktop = fixture.desktop;
+    auto output = fixture.output();
+    REQUIRE(output &&
+            desktop.add_output(part3_output_handle(output.get()), "main", "", output_bounds));
+    Connection connection(fixture.display);
+    Client first, second, third;
+    WindowId left{};
+    REQUIRE(map_tiled(fixture, connection, first, left, 160, 90, 0, red));
+    const auto workspace = desktop.windows().focused_workspace();
+    REQUIRE(workspace);
+    REQUIRE(connection.connect(second) && connection.open(second) &&
+            connection.attach_configured(second, green));
+    const auto right = desktop.windows().focused_window();
+    REQUIRE(right && right != left && desktop.keyboard_window() == left);
+    // Reselect throughout the stall. The original opening timer must still fire
+    // while the neighbor withholds its resized buffer.
+    const auto limit = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    while (desktop.keyboard_window() == left && std::chrono::steady_clock::now() < limit) {
+        const auto unchanged = desktop.dispatch(action(ActionKind::workspace, *workspace));
+        REQUIRE(unchanged && !*unchanged && desktop.keyboard_window() == left);
+        REQUIRE(connection.pump(first));
+    }
+    REQUIRE(desktop.keyboard_window() == right);
+    REQUIRE(wait_pixel(connection, second, output.get(), 110, 55, green));
+    REQUIRE(connection.connect(third) && connection.open(third) &&
+            connection.attach_configured(third, blue));
+    REQUIRE(desktop.keyboard_window() == right);
+    const auto switched = desktop.dispatch(action(ActionKind::workspace, 42));
+    REQUIRE(switched && *switched && !desktop.keyboard_window());
+    seaside_scene_target empty{};
+    REQUIRE(!fixture.scene.window_at(110, 55, empty));
+    REQUIRE(wait_pixel(connection, third, output.get(), 110, 55, 0));
+    desktop.remove_output(part3_output_handle(output.get()));
     return true;
 }
 
@@ -1863,6 +1907,7 @@ int main(int argc, char **argv) {
         config.window.gaps_inner = 6;
         return run_fixture(config, run_dwindle) &&
                        run_fixture(transaction, run_opening_transaction) &&
+                       run_fixture(transaction, run_workspace_during_opening) &&
                        run_fixture(transaction, run_pending_opening_focus)
                    ? EXIT_SUCCESS
                    : EXIT_FAILURE;

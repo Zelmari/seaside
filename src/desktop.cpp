@@ -645,10 +645,11 @@ Desktop::dispatch(const Action &action, std::uint8_t modifiers, std::optional<Wi
         if (!current_workspace) {
             return std::unexpected(Error::no_target);
         }
-        if (current_workspace != destination) {
-            discard_drag();
-            changed = windows_.select_workspace(destination);
+        if (current_workspace == destination) {
+            return false;
         }
+        discard_drag();
+        changed = windows_.select_workspace(destination);
         break;
     }
     case ActionKind::transfer_workspace: {

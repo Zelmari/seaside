@@ -172,6 +172,12 @@ def run_resize(session, state):
             require(pending_focus == left_focus and not early_events and not events,
                     f"Keyboard focus advanced before presentation: {pending_focus}, "
                     f"events={early_events + events}")
+            reselected, events = ipc_request(stream, "action.workspace_select",
+                                             {"workspace_id": pending_focus["workspace_id"]})
+            still_focused, focus_events = ipc_request(stream, "query.focus")
+            require(reselected["changed"] is False and still_focused == left_focus and
+                    not events and not focus_events,
+                    f"Workspace reselection published the pending opening: {still_focused}")
             state["pending_focus"] = pending_focus
             samples = []
             deadline = time.monotonic() + 0.6
