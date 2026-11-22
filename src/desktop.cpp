@@ -668,9 +668,9 @@ Desktop::dispatch(const Action &action, std::uint8_t modifiers, std::optional<Wi
         if (!destination) {
             return std::unexpected(Error::not_found);
         }
-        if (windows_.workspace_output(*selected) != destination) {
+        changed = windows_.transfer_workspace(*destination, selected);
+        if (changed) {
             discard_drag();
-            changed = windows_.transfer_workspace(*destination, selected);
         }
         break;
     }

@@ -78,21 +78,49 @@ TEST_P(WorkspaceModes, TransferHidesDestinationAndRestoresSourceHistory) {
     EXPECT_TRUE(manager.state().valid());
 }
 
-TEST_P(WorkspaceModes, TransfersAnExplicitHiddenWorkspace) {
+TEST_P(WorkspaceModes, TransfersAnExplicitHiddenWorkspaceToTheFocusedOutput) {
     WindowManager manager(GetParam());
     ASSERT_TRUE(manager.add_output("left", left, left, true));
     ASSERT_TRUE(manager.select_workspace(31));
     const auto window = open_window(manager);
     ASSERT_TRUE(manager.select_workspace(32));
     ASSERT_TRUE(manager.add_output("right", right, right));
+    ASSERT_TRUE(manager.focus_output("right"));
+    const auto previous = open_window(manager);
 
     ASSERT_TRUE(manager.transfer_workspace("right", 31));
     EXPECT_EQ(manager.state().output("left")->shown, 32U);
     EXPECT_EQ(manager.state().output("right")->shown, 31U);
     EXPECT_EQ(manager.workspace_owner(31), "right");
     EXPECT_EQ(manager.focused_window(), window);
+    EXPECT_FALSE(manager.view(previous).visible);
     EXPECT_FALSE(manager.transfer_workspace("left", 75));
     EXPECT_TRUE(manager.state().valid());
+}
+
+TEST_P(WorkspaceModes, MovingAPinnedWindowFollowsAndFocusesItOverFullscreen) {
+    WindowManager manager(GetParam());
+    ASSERT_TRUE(manager.add_output("left", left, left, true));
+    const auto pinned = open_window(manager);
+    ASSERT_TRUE(manager.toggle_pin(pinned));
+    ASSERT_TRUE(manager.add_output("right", right, right));
+    ASSERT_TRUE(manager.focus_output("right"));
+    const auto destination = manager.focused_workspace();
+    ASSERT_TRUE(destination);
+    const auto fullscreen = open_window(manager);
+    ASSERT_TRUE(manager.set_fullscreen(fullscreen, true));
+    ASSERT_TRUE(manager.focus_output("left"));
+
+    ASSERT_TRUE(manager.move_to_workspace(pinned, *destination));
+    EXPECT_EQ(manager.focused_output(), "right");
+    EXPECT_EQ(manager.focused_workspace(), destination);
+    EXPECT_EQ(manager.focused_window(), pinned);
+    EXPECT_TRUE(manager.view(pinned).visible);
+    EXPECT_TRUE(manager.view(pinned).pinned);
+    EXPECT_GT(manager.view(pinned).stacking, manager.view(fullscreen).stacking);
+
+    ASSERT_TRUE(manager.click(fullscreen));
+    EXPECT_FALSE(manager.view(pinned).visible);
 }
 
 INSTANTIATE_TEST_SUITE_P(WindowManager, WorkspaceModes,

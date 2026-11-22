@@ -373,7 +373,7 @@ std::optional<WorkspaceId> WindowManager::focused_workspace() const noexcept {
     return focused_output_ ? state_.output(*focused_output_)->shown : std::nullopt;
 }
 
-bool WindowManager::focus_on_output(std::string_view id) {
+bool WindowManager::focus_on_output(std::string_view id, bool restore_workspace_focus) {
     auto found = outputs_.find(id);
     if (found == outputs_.end() || !found->second.connected) {
         return false;
@@ -384,7 +384,7 @@ bool WindowManager::focus_on_output(std::string_view id) {
     }
     focused_output_ = found->first;
     found->second.last_focused = ++sequence_;
-    if (previous != focused_output_) {
+    if (previous != focused_output_ || restore_workspace_focus) {
         restore_focus();
     }
     return true;
@@ -470,31 +470,30 @@ bool WindowManager::select_workspace(WorkspaceId id) {
             return false;
         }
     }
-    if (!show_workspace(*output, id) || !focus_on_output(*output)) {
-        return false;
-    }
-    restore_focus();
-    return true;
+    return show_workspace(*output, id) && focus_on_output(*output, true);
 }
 
 bool WindowManager::transfer_workspace(std::string_view destination,
                                        std::optional<WorkspaceId> target) {
     const auto workspace = target ? target : focused_workspace();
+    const auto record = workspace ? workspaces_.find(*workspace) : workspaces_.end();
     const auto source = workspace ? workspace_output(*workspace) : std::nullopt;
-    const auto *source_state = source ? state_.output(*source) : nullptr;
-    const bool was_visible = source_state && source_state->shown == workspace;
-    if (!workspace || !state_.workspace(*workspace) || destination == source ||
+    const bool moves_output = source != destination;
+    // A transfer to the current fallback can make a temporary assignment permanent.
+    if (record == workspaces_.end() || (!moves_output && !record->second.migration) ||
         !state_.output(destination)) {
         return false;
     }
+    const auto *source_state = source ? state_.output(*source) : nullptr;
+    const bool replace_source = moves_output && source_state && source_state->shown == workspace;
     cancel_tile_move();
     finish_focus_cycle();
-    if (!state_.assign_workspace(*workspace, destination) ||
-        !show_workspace(destination, *workspace) || (was_visible && !show_fallback(*source))) {
+    if ((moves_output && !state_.assign_workspace(*workspace, destination)) ||
+        !show_workspace(destination, *workspace) || (replace_source && !show_fallback(*source))) {
         return false;
     }
-    workspaces_.at(*workspace).migration.reset();
-    return focus_on_output(destination);
+    record->second.migration.reset();
+    return focus_on_output(destination, true);
 }
 
 std::optional<WindowId> WindowManager::create_window(std::optional<WindowId> parent) {
@@ -1191,7 +1190,9 @@ bool WindowManager::move_to_workspace(WindowId id, WorkspaceId destination) {
         !relocate_window(id, destination)) {
         return false;
     }
-    if (is_visible(id)) {
+    // The explicit move gives a pinned window focus even if the destination
+    // currently suppresses pinned windows behind a fullscreen client.
+    if (windows_.at(id).pinned || is_visible(id)) {
         set_focus(id);
     } else {
         restore_focus();

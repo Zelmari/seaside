@@ -788,6 +788,44 @@ bool run_part4(const Fixture &fixture) {
     return true;
 }
 
+bool run_workspace_reassignment(const Fixture &fixture) {
+    auto &desktop = fixture.desktop;
+    const auto &windows = desktop.windows();
+    auto left = fixture.output();
+    auto right = fixture.output();
+    REQUIRE(left && right);
+    const WindowRect right_bounds{output_bounds.width, 0, output_bounds.width,
+                                  output_bounds.height};
+    REQUIRE(desktop.add_output(part3_output_handle(left.get()), "left", "", output_bounds));
+    REQUIRE(desktop.add_output(part3_output_handle(right.get()), "right", "", right_bounds));
+    const auto migrated = windows.state().output("right")->shown;
+    REQUIRE(migrated);
+
+    desktop.remove_output(part3_output_handle(right.get()));
+    right.reset();
+    REQUIRE(windows.workspace_output(*migrated) == "left");
+    REQUIRE(windows.workspace_owner(*migrated) == "right");
+    auto transfer = action(ActionKind::transfer_workspace);
+    transfer.text = "connector:left";
+    const auto changed = desktop.dispatch(transfer, 0, {}, migrated);
+    REQUIRE(changed && *changed);
+    REQUIRE(windows.workspace_owner(*migrated) == "left");
+    REQUIRE(windows.focused_workspace() == migrated);
+    const auto current = desktop.dispatch(transfer, 0, {}, migrated);
+    REQUIRE(current && !*current);
+
+    right = fixture.output();
+    REQUIRE(right);
+    REQUIRE(desktop.add_output(part3_output_handle(right.get()), "right", "", right_bounds));
+    REQUIRE(windows.workspace_output(*migrated) == "left");
+    REQUIRE(windows.state().output("left")->shown == migrated);
+    REQUIRE(windows.focused_workspace() == migrated);
+    REQUIRE(windows.state().valid() && !desktop.failed() && !fixture.scene.snapshot().failed);
+    desktop.remove_output(part3_output_handle(right.get()));
+    desktop.remove_output(part3_output_handle(left.get()));
+    return true;
+}
+
 bool wait_tiled(Connection &connection, Client &client, int width, int height) {
     return connection.wait(client, [&] {
         return client.configured.tiled_edges == all_tiled_edges &&
@@ -1660,7 +1698,8 @@ int main(int argc, char **argv) {
     auto config = seaside::default_config();
     if (argc == 1) {
         config.window.tiling = false;
-        return run_fixture(config, run_part4) && run_fixture(config, run_floating_borders) &&
+        return run_fixture(config, run_part4) && run_fixture(config, run_workspace_reassignment) &&
+                       run_fixture(config, run_floating_borders) &&
                        run_fixture(config, run_client_gestures)
                    ? EXIT_SUCCESS
                    : EXIT_FAILURE;
