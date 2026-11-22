@@ -72,6 +72,10 @@ python3 tests/hardware/part8_display.py 'fullscreen before sharing' --seconds 5
   output at 1.0, 1.25 and 1.5 scale and at the supported rotations. Repeat after
   a mode change, VT switch, suspend/resume, and reconnect. Move the pointer
   across monitor boundaries and check that it reaches the expected pixels.
+- [ ] Check the black arrow's white outline on dark and light content and
+  verify that its tip matches the click point. Move between the desktop,
+  text fields, links, and resize handles. Check that the requested shape
+  and hotspot track focus, output transitions, pointer lock, and capture.
 - [ ] Use two physical monitors with different refresh rates and, where
   available, two similar displays with ambiguous EDIDs. Reconnect on another
   port, unplug the primary and secondary in turn, and reconnect after removing

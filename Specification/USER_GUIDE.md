@@ -111,16 +111,26 @@ with `~/.local/state` as the fallback state directory.
 binding, as shown in the example. The `[keybinds]` table is the
 complete active list when present. Removing a line disables that shortcut,
 an empty table disables every shortcut, and removing the table restores the
-built-in defaults. The example includes optional chords for workspace,
-fullscreen and exit actions. Use `seasidectl exit` for the first session's
-clean exit. [Key names, actions, and examples](SEASIDE_SPEC.md#83-binding-grammar-and-action-catalog-engineering-choice)
+built-in defaults. The generated config includes commented examples for
+**Super+M** to toggle maximization, **Super+Q** to close a window, and
+workspace and fullscreen shortcuts. Uncomment the bindings you want and save
+the file to activate them. Run `seasidectl bindings` to see the shortcuts the
+running session is using. [Key names, actions, and examples](SEASIDE_SPEC.md#83-binding-grammar-and-action-catalog-engineering-choice)
+
+The default pointer is a black arrow with a white outline. Apps can request
+their own pointer shapes. A brighter border marks the focused window. Focus
+navigation brings a selected tile in front of a maximized window that covers
+it and preserves that window's maximized state. To move or resize a floating
+window, drag its title bar or resize handles where the app provides them.
 
 ### Monitors and layouts
 
 Use `seasidectl outputs` to find the identity or connector selector reported
 for each display. Use that value in a `[[monitors.output]]` override to set
 mode, scale, rotation or position for one monitor. The example shows how to
-write an override; the actual advertised modes depend on the output. Dwindle
+write an override. The `power_state` field shows whether the monitor is
+awake, asleep, or disabled. A sleeping monitor stays logically enabled so
+its workspace remains assigned. Dwindle
 splits space around a window as new windows open. Scrolling places windows in
 horizontal columns. Set `layout = "scrolling"` in `[window]` to switch the
 layout. [Monitor settings](SEASIDE_CONFIG_EXAMPLE.toml) · [Window layouts and focus](SEASIDE_SPEC.md#4-windows-layouts-focus-and-movement)
@@ -133,8 +143,9 @@ prints a JSON response. An error response includes a code and message.
 
 | Command | What it does |
 |---|---|
-| `seasidectl status` | Check readiness, active and requested config, and the last error |
-| `seasidectl outputs` | List displays and selectors, modes, and output capabilities |
+| `seasidectl status` | Check readiness, active layout and tiling, pending restart settings, and the last error |
+| `seasidectl bindings` | List active shortcuts and actions from the current configuration |
+| `seasidectl outputs` | List displays, selectors, modes, power state, and capabilities |
 | `seasidectl workspaces` / `seasidectl windows` | Inspect workspace and window IDs and state |
 | `seasidectl focus` | Inspect the focused output, workspace, and window |
 | `seasidectl workspace 2` | Show workspace 2 |
@@ -145,6 +156,9 @@ prints a JSON response. An error response includes a code and message.
 | `seasidectl events` | Print live events until interrupted with Ctrl+C |
 | `seasidectl exit` | End the session and return to the console |
 | `seasidectl --help` | List the available CLI forms |
+
+Both `seaside --version` and `seasidectl --version` report the build version
+and source revision. These commands also work outside a Seaside session.
 
 Clients that use the local IPC socket directly can read the [JSONL protocol and
 error formats](SEASIDE_SPEC.md#10-ipc-cli-command-and-event-protocol--v1).
@@ -162,7 +176,8 @@ error formats](SEASIDE_SPEC.md#10-ipc-cli-command-and-event-protocol--v1).
   Choose a monitor or a window in the external picker and then confirm in
   your app if prompted. The chosen window stays selected while it moves or its
   workspace is hidden. Closing the source ends its stream. The package's
-  default chooser is Wofi, configured in `/etc/xdg/xdg-desktop-portal-wlr/Seaside`.
+  default chooser is a Wofi overlay that leaves the tiling layout in place.
+  Its command is configured in `/etc/xdg/xdg-desktop-portal-wlr/Seaside`.
   The portal uses your per-user chooser config if you supply one. Isolated
   audio from one selected application is deferred. Receiving apps handle
   desktop audio and microphone selection.
@@ -180,6 +195,7 @@ error formats](SEASIDE_SPEC.md#10-ipc-cli-command-and-event-protocol--v1).
 |---|---|
 | `seaside FAIL: start on the active Linux console as a foreground job` | Log in on the currently visible virtual console and run `seaside` there as your normal user. `tty` should print a numbered `/dev/ttyN`. |
 | The login has no standard Arch user runtime directory | Check that the normal systemd-managed login set `XDG_RUNTIME_DIR` to `/run/user/` followed by your user ID. Sign into a fresh local TTY if the login environment is stale. |
+| `seaside` starts an older version | Run `type -a seaside seasidectl` to check for executables earlier on `PATH`, such as a previous source install under `/usr/local/bin`. Compare `seaside --version` with `/usr/bin/seaside --version`, and check the package version with `pacman -Q seaside`. |
 | `seaside FAIL service=...` | Note the named service and reason. Use `systemctl --user status pipewire.socket wireplumber.service` and `journalctl --user -b` to inspect the relevant login services. If a portal name already belongs to another graphical session, exit that session normally or use another account. Seaside keeps the existing owner. |
 | `seaside FAIL stage=seat-drm-renderer` in VirtualBox with 3D disabled | Run `WLR_RENDERER=pixman seaside` from the logged-in console. |
 | The console reports a seat, DRM, or hardware-cursor error | Check the `seaside FAIL` line and earlier graphics messages. Seaside requires placement on a hardware cursor plane. On a running output, inspect `seasidectl outputs` and `seasidectl debug render`. |
