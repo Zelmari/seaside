@@ -313,7 +313,24 @@ def run_live(repo, directory, result_dir, state):
             session.wait(lambda: session.strip(region) != clean, "visible fullscreen error banner")
             session.screenshot(result_dir, "error")
 
-            replace(config, repair)
+            config.unlink()
+            missing = events.expect("config.error", lambda data: data["message"] ==
+                                    "configuration is missing")
+            prefix, bindings = repair.split("[keybinds]", 1)
+            with config.open("w") as writer:
+                writer.write(prefix)
+                writer.flush()
+                # The prefix is valid TOML with a different workspace mode.
+                # Hold it open across the debounce window and query live state.
+                deadline = time.monotonic() + .65
+                while time.monotonic() < deadline:
+                    staged = session.config()
+                    require(staged["error"] and staged["error"]["message"] ==
+                            missing["data"]["message"] and not staged["pending_restart"] and
+                            snapshot.read_text() == initial,
+                            "An unfinished recreated config changed active state or last-good TOML")
+                    time.sleep(.05)
+                writer.write("[keybinds]" + bindings)
             recovered = events.expect("config.recovered")
             session.wait(lambda: session.config()["recovery_persisted"], "new recovery snapshot")
             accepted = session.config()
@@ -321,6 +338,7 @@ def run_live(repo, directory, result_dir, state):
                     accepted["active_workspace_mode"] == "global" and
                     accepted["requested_workspace_mode"] == "per-monitor" and
                     snapshot.read_text() == repair, "Valid edit lost live or restart-only state")
+            state["partial_recreation"] = "held-until-close"
             require(session.ctl("night-light", "status")["result"]["enabled"],
                     "An unrelated edit cleared the night-light override")
             session.wait(lambda: session.strip(region) == clean, "banner removal after repair")
@@ -361,7 +379,8 @@ def run_live(repo, directory, result_dir, state):
             focused = events.expect("window.focused", lambda data: data["window_id"] ==
                                     remapped["data"]["window_id"])
             state["event_sequence"] = {"subscribed": events.acknowledged, "first_window": mapped["seq"],
-                                       "invalid": invalid["seq"], "repaired": recovered["seq"],
+                                       "invalid": invalid["seq"], "missing_file": missing["seq"],
+                                       "repaired": recovered["seq"],
                                        "mode_rejected": mode_rejected["seq"], "position_applied": moved["seq"],
                                        "workspace": workspace["seq"], "remapped": remapped["seq"],
                                        "focused": focused["seq"], "query": events.query_watermark()}

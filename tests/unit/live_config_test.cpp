@@ -142,7 +142,50 @@ TEST_F(LiveConfigTest, DirectoryReplacementAndAnInPlaceWriteAreObserved) {
     ASSERT_TRUE(pump_until([&] { return transaction().active().window.gaps_outer == 17; }));
 }
 
-TEST_F(LiveConfigTest, SupersededWorkerCannotApplyWhileNewEditDebounces) {
+TEST_F(LiveConfigTest, RecreatedConfigWaitsForTheCompletedWrite) {
+    ASSERT_NO_FATAL_FAILURE(start());
+    ASSERT_TRUE(pump_until([&] { return transaction().recovery_persisted(); }));
+    const std::string previous = "[window]\ngaps_outer=29\n[keybinds]\n";
+    ASSERT_NO_FATAL_FAILURE(replace(previous));
+    ASSERT_TRUE(pump_until([&] {
+        return transaction().active().window.gaps_outer == 29 && transaction().recovery_persisted();
+    }));
+    ASSERT_TRUE(std::filesystem::remove(paths.user));
+    ASSERT_TRUE(pump_until([&] { return transaction().diagnostic().has_value(); }));
+
+    auto replacement = std::ofstream(paths.user);
+    const std::string prefix = "[window]\ngaps_outer=49\n";
+    ASSERT_TRUE(replacement << prefix << std::flush);
+    EXPECT_FALSE(pump_until([&] { return transaction().active().window.gaps_outer != 29; }, 400ms));
+    EXPECT_TRUE(transaction().active().keybinds.empty());
+    EXPECT_TRUE(transaction().diagnostic());
+    EXPECT_EQ(snapshot(), previous);
+
+    ASSERT_TRUE(replacement << "[keybinds]\n");
+    replacement.close();
+    ASSERT_TRUE(pump_until([&] {
+        return transaction().active().window.gaps_outer == 49 && transaction().recovery_persisted();
+    }));
+    EXPECT_TRUE(transaction().active().keybinds.empty());
+    EXPECT_FALSE(transaction().diagnostic());
+    EXPECT_EQ(snapshot(), prefix + "[keybinds]\n");
+}
+
+TEST_F(LiveConfigTest, AtomicReplacementSupersedesAnOpenWriter) {
+    ASSERT_NO_FATAL_FAILURE(start());
+    ASSERT_TRUE(pump_until([&] { return transaction().recovery_persisted(); }));
+
+    auto writer = std::ofstream(paths.user);
+    ASSERT_TRUE(writer << "[window]\ngaps_outer=37\n" << std::flush);
+    ASSERT_NO_FATAL_FAILURE(replace("[window]\ngaps_outer=39\n"));
+    ASSERT_TRUE(pump_until([&] {
+        return transaction().active().window.gaps_outer == 39 && transaction().recovery_persisted();
+    }));
+    writer.close();
+    EXPECT_EQ(snapshot(), "[window]\ngaps_outer=39\n");
+}
+
+TEST_F(LiveConfigTest, SupersededWorkerCannotApplyWhileNewWriteRemainsOpen) {
     struct Gate {
         std::atomic<bool> started = false;
         bool release = false;
@@ -171,13 +214,17 @@ TEST_F(LiveConfigTest, SupersededWorkerCannotApplyWhileNewEditDebounces) {
     ASSERT_TRUE(pump_until([&] { return gate->started.load(); }));
     const auto older = transaction().generation();
     const auto latest = "[window]\ngaps_outer=44\n";
-    ASSERT_NO_FATAL_FAILURE(replace(latest));
+    auto writer = std::ofstream(paths.user);
+    ASSERT_TRUE(writer << latest << std::flush);
     ASSERT_TRUE(pump_until([&] { return transaction().generation() > older; }));
     {
         std::scoped_lock lock(gate->mutex);
         gate->release = true;
     }
     gate->condition.notify_one();
+    EXPECT_FALSE(pump_until([&] { return !applied.empty(); }, 400ms));
+    EXPECT_EQ(snapshot(), default_template());
+    writer.close();
     ASSERT_TRUE(pump_until([&] {
         return transaction().active().window.gaps_outer == 44 && transaction().recovery_persisted();
     }));
@@ -224,7 +271,8 @@ TEST_F(LiveConfigTest, ConfigSymlinkFollowsInPlaceWritesAndTargetReplacement) {
     std::filesystem::create_directories(paths.user.parent_path());
     const auto linked_config = directory.path() / "dotfile.toml";
     ASSERT_TRUE(std::ofstream(linked_config) << "[window]\ngaps_outer=19\n");
-    std::filesystem::create_symlink(linked_config, paths.user);
+    std::filesystem::create_symlink(
+        std::filesystem::relative(linked_config, paths.user.parent_path()), paths.user);
     ASSERT_NO_FATAL_FAILURE(start());
     EXPECT_EQ(transaction().active().window.gaps_outer, 19);
 
@@ -233,8 +281,31 @@ TEST_F(LiveConfigTest, ConfigSymlinkFollowsInPlaceWritesAndTargetReplacement) {
     const auto replacement = directory.path() / "editor.tmp";
     ASSERT_TRUE(std::ofstream(replacement) << "[window]\ngaps_outer=39\n");
     std::filesystem::rename(replacement, linked_config);
-    ASSERT_TRUE(pump_until([&] { return transaction().active().window.gaps_outer == 39; }));
+    ASSERT_TRUE(pump_until([&] {
+        return transaction().active().window.gaps_outer == 39 && transaction().recovery_persisted();
+    }));
+
+    ASSERT_TRUE(std::filesystem::remove(linked_config));
+    ASSERT_TRUE(pump_until([&] { return transaction().diagnostic().has_value(); }));
+    auto writer = std::ofstream(linked_config);
+    ASSERT_TRUE(writer << "[window]\ngaps_outer=41\n" << std::flush);
+    EXPECT_FALSE(pump_until([&] { return transaction().active().window.gaps_outer != 39; }, 400ms));
+    EXPECT_EQ(snapshot(), "[window]\ngaps_outer=39\n");
+    writer.close();
+    ASSERT_TRUE(pump_until([&] {
+        return transaction().active().window.gaps_outer == 41 && transaction().recovery_persisted();
+    }));
+    EXPECT_FALSE(transaction().diagnostic());
     EXPECT_TRUE(std::filesystem::is_symlink(paths.user));
+
+    ASSERT_TRUE(std::filesystem::remove(paths.user));
+    ASSERT_TRUE(pump_until([&] { return transaction().diagnostic().has_value(); }));
+    ASSERT_TRUE(std::ofstream(linked_config) << "[window]\ngaps_outer=43\n");
+    std::filesystem::create_symlink(linked_config, paths.user);
+    ASSERT_TRUE(pump_until([&] {
+        return transaction().active().window.gaps_outer == 43 && transaction().recovery_persisted();
+    }));
+    EXPECT_FALSE(transaction().diagnostic());
 }
 
 TEST_F(LiveConfigTest, RescansCurrentPathAfterAnInotifyOverflow) {

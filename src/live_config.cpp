@@ -1,10 +1,12 @@
 #include "live_config.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
 #include <sys/inotify.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <wayland-server-core.h>
 
@@ -14,12 +16,12 @@ constexpr int debounce_ms = 120;
 // One job can hold its TOML parser, a compressed wallpaper, the decoded
 // image, and codec scratch space. Snapshot jobs reserve their bytes separately.
 constexpr std::size_t reload_reservation = 256 * 1024 * 1024;
-constexpr auto directory_events = IN_ONLYDIR | IN_CLOSE_WRITE | IN_CREATE | IN_DELETE |
+constexpr auto directory_events = IN_ONLYDIR | IN_CLOSE_WRITE | IN_CREATE | IN_DELETE | IN_MODIFY |
                                   IN_MOVED_FROM | IN_MOVED_TO | IN_MOVE_SELF | IN_DELETE_SELF |
                                   IN_ATTRIB;
-constexpr auto file_events = IN_CLOSE_WRITE | IN_MOVE_SELF | IN_DELETE_SELF | IN_ATTRIB;
+constexpr auto file_events = IN_CLOSE_WRITE | IN_MODIFY | IN_MOVE_SELF | IN_DELETE_SELF | IN_ATTRIB;
 constexpr auto lost_watch = IN_MOVE_SELF | IN_DELETE_SELF | IN_IGNORED;
-constexpr auto replaced_entry = IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO | IN_ATTRIB;
+constexpr auto replaced_entry = IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO;
 using Source = std::unique_ptr<wl_event_source, decltype(&wl_event_source_remove)>;
 
 std::error_code work_error(WorkError error) {
@@ -32,9 +34,14 @@ std::error_code work_error(WorkError error) {
 } // namespace
 
 struct LiveConfig::Impl {
+    enum class WriteState { complete, created, target_created, modified };
+    enum class Entry { config, target, ancestor };
+
     struct DirectoryWatch {
         int descriptor = -1;
         std::string entry;
+        Entry kind = Entry::ancestor;
+        bool follows_link = false;
     };
 
     Impl(std::unique_ptr<WorkQueue> queue, ConfigStore store, ConfigPaths paths,
@@ -63,11 +70,12 @@ struct LiveConfig::Impl {
         return watch_source_ && timer_ && arm_reload();
     }
 
-    bool refresh_watches() {
-        std::array<DirectoryWatch, 2> next;
-        auto directory = paths_.user.parent_path();
-        next[0] = {inotify_add_watch(watch_fd_, directory.c_str(), directory_events),
-                   paths_.user.filename().string()};
+    void watch_directories(const std::filesystem::path &path, DirectoryWatch &parent_watch,
+                           DirectoryWatch &ancestor_watch, Entry kind) const {
+        const auto directory = path.parent_path();
+        const bool follows_link = kind == Entry::target;
+        parent_watch = {inotify_add_watch(watch_fd_, directory.c_str(), directory_events),
+                        path.filename().string(), kind, follows_link};
 
         // Keep a watch above the config directory so remove/rename and later
         // recreation can be tracked even while the immediate path is absent.
@@ -75,18 +83,40 @@ struct LiveConfig::Impl {
             auto ancestor = child.parent_path();
             const int descriptor = inotify_add_watch(watch_fd_, ancestor.c_str(), directory_events);
             if (descriptor >= 0) {
-                next[1] = {descriptor, child.filename().string()};
+                ancestor_watch = {descriptor, child.filename().string(), Entry::ancestor,
+                                  follows_link};
                 break;
             }
             child = std::move(ancestor);
         }
+    }
 
-        // Watch the file itself as well as its name. In-place writes to a
-        // symlinked dotfile can arrive only on the underlying file watch.
+    std::filesystem::path symlink_target() const {
+        auto target = paths_.user;
+        // Follow the same bounded number of final-component links as Linux.
+        for (int links = 0; links <= 40; ++links) {
+            std::error_code error;
+            auto next = std::filesystem::read_symlink(target, error);
+            if (error)
+                return target == paths_.user ? std::filesystem::path{} : target;
+            target = next.is_absolute() ? std::move(next) : target.parent_path() / next;
+        }
+        return {};
+    }
+
+    bool refresh_watches() {
+        decltype(directories_) next;
+        watch_directories(paths_.user, next[0], next[1], Entry::config);
+        // The inode watch disappears when a dotfile target is unlinked.
+        // Its containing directory observes the next create and write-close.
+        target_path_ = symlink_target();
+        if (!target_path_.empty())
+            watch_directories(target_path_, next[2], next[3], Entry::target);
         const int file = inotify_add_watch(watch_fd_, paths_.user.c_str(), file_events);
-        for (auto &old : directories_) {
-            if (old.descriptor >= 0 && old.descriptor != next[0].descriptor &&
-                old.descriptor != next[1].descriptor)
+        for (const auto &old : directories_) {
+            if (old.descriptor >= 0 && std::ranges::none_of(next, [&](const auto &watch) {
+                    return watch.descriptor == old.descriptor;
+                }))
                 inotify_rm_watch(watch_fd_, old.descriptor);
         }
         if (file_watch_ >= 0 && file_watch_ != file)
@@ -113,6 +143,8 @@ struct LiveConfig::Impl {
 
     static int on_timer(void *data) noexcept {
         auto &self = *static_cast<Impl *>(data);
+        if (self.write_state_ != WriteState::complete)
+            return 0;
         self.due_ = true;
         self.submit_reload();
         return 0;
@@ -121,6 +153,8 @@ struct LiveConfig::Impl {
     void drain_watch() {
         bool changed = false;
         bool rewatch = false;
+        bool replaced = false;
+        bool config_replaced = false;
         std::array<char, 16 * 1024> buffer{};
         // Bound the amount of input processed in one dispatch, including when
         // other applications are busy writing to the watched ancestor.
@@ -143,16 +177,31 @@ struct LiveConfig::Impl {
                     changed = true;
                     rewatch = true;
                 } else if (event.wd == file_watch_) {
+                    // The file watch can still deliver events from an unlinked inode.
+                    if (replaced)
+                        continue;
                     changed = true;
                     rewatch |= (event.mask & (lost_watch | IN_ATTRIB)) != 0;
+                    record_write(event.mask, WriteState::created);
                 } else {
                     for (const auto &directory : directories_) {
-                        if (event.wd != directory.descriptor)
+                        if (event.wd != directory.descriptor ||
+                            (config_replaced && directory.follows_link))
                             continue;
                         if ((event.mask & lost_watch) ||
                             (event.len && std::string_view(name) == directory.entry)) {
                             changed = true;
-                            rewatch |= (event.mask & (lost_watch | replaced_entry)) != 0;
+                            const bool replacement =
+                                (event.mask & (lost_watch | replaced_entry)) != 0;
+                            rewatch |= replacement || (event.mask & IN_ATTRIB);
+                            replaced |= replacement;
+                            config_replaced |= replacement && !directory.follows_link;
+                            if (directory.kind != Entry::ancestor)
+                                record_write(event.mask, directory.kind == Entry::target
+                                                             ? WriteState::target_created
+                                                             : WriteState::created);
+                            else if (replacement)
+                                write_state_ = WriteState::complete;
                         }
                     }
                 }
@@ -166,14 +215,36 @@ struct LiveConfig::Impl {
         }
         if (rewatch)
             refresh_watches();
+        if ((write_state_ == WriteState::created && !created_regular_file(paths_.user)) ||
+            (write_state_ == WriteState::target_created && !created_regular_file(target_path_)))
+            write_state_ = WriteState::complete;
         if (changed && !arm_reload())
             watch_failed();
     }
 
+    void record_write(std::uint32_t mask, WriteState creation) noexcept {
+        if (mask & (IN_CLOSE_WRITE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO | lost_watch)) {
+            write_state_ = WriteState::complete;
+        } else if (mask & IN_MODIFY) {
+            write_state_ = WriteState::modified;
+        } else if (mask & IN_CREATE) {
+            write_state_ = creation;
+        }
+    }
+
+    static bool created_regular_file(const std::filesystem::path &path) noexcept {
+        struct stat status{};
+        // A symlink or hard link publishes an existing target without a write-close.
+        return lstat(path.c_str(), &status) == 0 && S_ISREG(status.st_mode) && status.st_nlink == 1;
+    }
+
     bool arm_reload() {
         due_ = false;
+        // A create or modify invalidates any older worker immediately. Only a
+        // completed save may arm another candidate, even if a prefix parses.
+        const int delay = write_state_ == WriteState::complete ? debounce_ms : 0;
         return transaction_.begin_reload() &&
-               wl_event_source_timer_update(timer_.get(), debounce_ms) == 0;
+               wl_event_source_timer_update(timer_.get(), delay) == 0;
     }
 
     void watch_failed() {
@@ -319,11 +390,13 @@ struct LiveConfig::Impl {
     std::string accepted_text_;
     ConfigTransaction transaction_;
     std::uint64_t accepted_generation_ = 0;
-    std::array<DirectoryWatch, 2> directories_;
+    std::array<DirectoryWatch, 4> directories_;
+    std::filesystem::path target_path_;
     Source watch_source_{nullptr, wl_event_source_remove};
     Source timer_{nullptr, wl_event_source_remove};
     int watch_fd_ = -1;
     int file_watch_ = -1;
+    WriteState write_state_ = WriteState::complete;
     bool ready_ = false;
     bool due_ = false;
     bool loading_ = false;
