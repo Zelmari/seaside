@@ -301,12 +301,28 @@ def integration_events(session):
             stop(process)
 
 
-def verify_chooser_cancel(session):
-    def chooser_focused():
-        focus = session.ctl("focus")["window_id"]
-        return any(row["id"] == focus and "wofi" in f"{row['app_id']} {row['title']}".casefold()
-                   for row in session.ctl("windows")["windows"])
+def overlay_chooser(session):
+    previous_windows = session.ctl("windows")["windows"]
 
+    def chooser_focused():
+        if session.ctl("focus")["window_id"] is not None:
+            return False
+        for exe in Path("/proc").glob("[0-9]*/exe"):
+            try:
+                if exe.parent.stat().st_uid != os.getuid() or exe.readlink() != session.chooser:
+                    continue
+            except OSError:
+                continue
+            require(session.ctl("windows")["windows"] == previous_windows,
+                    "The share picker changed the list or state of application windows")
+            return True
+        return False
+
+    return chooser_focused
+
+
+def verify_chooser_cancel(session):
+    chooser_focused = overlay_chooser(session)
     log = session.results / "part10-portal-cancel.log"
     with fixture(session, log, "seaside-portal-stream", "window", "cancel") as client:
         wait_for(chooser_focused, 10, "the package's focused portal chooser", client)
@@ -344,10 +360,13 @@ def portal_recovery_and_capture(session, generated, state):
         require(session.ctl("window", "toggle-fullscreen")["changed"], "The package did not enter fullscreen")
         mode = session.focused_output()["mode"]
         for source, size in (("monitor", (mode["width"], mode["height"])), ("window", (264, 176))):
-            helpers["run_portal"](session, pattern, source, size, state)
+            helpers["run_portal"](session, pattern, source, size, state,
+                                  chooser_ready=overlay_chooser(session))
             require(state["fullscreen_portal"][source]["status"] == "pass" and
                     session.window(TITLE)["id"] == target["id"],
                     f"Post-recovery {source} share did not retain the chosen content")
+            session.wait(lambda: session.ctl("focus")["window_id"] == target["id"],
+                         f"focus return after {source} selection")
         require(session.ctl("window", "toggle-fullscreen")["changed"], "The package did not leave fullscreen")
         pattern.stdin.write("close\n")
         pattern.stdin.flush()

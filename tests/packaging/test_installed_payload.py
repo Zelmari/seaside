@@ -55,7 +55,10 @@ def installed_payload(source, build, stage):
     chooser = configparser.ConfigParser()
     chooser.read(stage / destination("sysconfdir", "xdg/xdg-desktop-portal-wlr/Seaside"))
     assert chooser["screencast"]["chooser_type"] == "dmenu"
-    assert chooser["screencast"]["chooser_cmd"].split()[0].rsplit("/", 1)[-1] == "wofi"
+    command = chooser["screencast"]["chooser_cmd"].split()
+    assert command[0] == "/usr/bin/wofi"
+    assert "--dmenu" in command and "--no-custom-entry" in command
+    assert "--normal-window" not in command
     return {name: stage / path for name, path in binaries.items()}
 
 

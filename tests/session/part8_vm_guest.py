@@ -336,7 +336,7 @@ def run_adaptive_sync(session, state, output):
     state["adaptive_sync"] = {"status": "pass", "policies": outcomes}
 
 
-def run_portal(session, pattern, source_type, size, state):
+def run_portal(session, pattern, source_type, size, state, chooser_ready=None):
     outcomes = state.setdefault("fullscreen_portal", {})
     if not session.chooser:
         outcomes[source_type] = {"status": "blocked", "reason": "Wofi is unavailable in the guest trial"}
@@ -350,7 +350,7 @@ def run_portal(session, pattern, source_type, size, state):
                            f"{row['app_id']} {row['title']}".casefold()
                            for row in session.ctl("windows")["windows"])
 
-            wait_for(chooser_focused, 10, "the focused portal chooser", reader)
+            wait_for(chooser_ready or chooser_focused, 10, "the focused portal chooser", reader)
             event(f"{session.label}-input", f"choose the real {source_type} for the portal receiver", key=source_type)
             next_paint = 0.0
 
