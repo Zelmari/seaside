@@ -223,6 +223,53 @@ TEST(WindowManager, DirectionalFocusWrapsInTheCurrentWorkspace) {
     EXPECT_EQ(manager.focused_output(), "left");
 }
 
+TEST(WindowManager, KeyboardCycleRaisesFloatsAndMappingTilesPreservesTheirStack) {
+    WindowManager manager(WorkspaceMode::global);
+    ASSERT_TRUE(manager.add_output("left", left, left, true));
+    const auto a = open_window(manager);
+    ASSERT_TRUE(manager.toggle_tiling(a));
+    const auto b = open_window(manager);
+    ASSERT_TRUE(manager.toggle_pin(b));
+    const auto c = open_window(manager);
+    EXPECT_GT(manager.view(a).stacking, manager.view(c).stacking);
+    EXPECT_GT(manager.view(b).stacking, manager.view(c).stacking);
+    ASSERT_TRUE(manager.cycle_focus(true));
+    EXPECT_EQ(manager.focused_window(), b);
+    EXPECT_GT(manager.view(b).stacking, manager.view(a).stacking);
+    ASSERT_TRUE(manager.cycle_focus(true));
+    EXPECT_EQ(manager.focused_window(), a);
+    EXPECT_GT(manager.view(a).stacking, manager.view(b).stacking);
+}
+
+TEST(WindowManager, KeyboardNavigationAndUnpinFollowVisiblePinnedWindows) {
+    WindowManager manager(WorkspaceMode::global);
+    ASSERT_TRUE(manager.add_output("left", left, left, true));
+    ASSERT_TRUE(manager.add_output("right", right, right));
+    const auto pinned = open_window(manager);
+    ASSERT_TRUE(manager.toggle_pin(pinned));
+    const auto home = manager.focused_workspace().value();
+    ASSERT_TRUE(manager.select_workspace(23));
+    const auto tile = open_window(manager);
+    EXPECT_TRUE(manager.focus_direction(Direction::left));
+    EXPECT_EQ(manager.focused_window(), pinned);
+    ASSERT_TRUE(manager.click(pinned));
+    EXPECT_TRUE(manager.cycle_focus(false));
+    EXPECT_EQ(manager.focused_window(), tile);
+    ASSERT_TRUE(manager.click(tile));
+    EXPECT_TRUE(manager.cycle_focus(false));
+    EXPECT_EQ(manager.focused_window(), pinned);
+    ASSERT_TRUE(manager.click(pinned));
+    ASSERT_TRUE(manager.toggle_pin(pinned));
+    EXPECT_EQ(manager.state().window(pinned)->home_workspace, 23U);
+    EXPECT_FALSE(manager.state().workspace(home)->windows.contains(pinned));
+    EXPECT_TRUE(manager.view(pinned).tiled);
+    EXPECT_TRUE(manager.view(pinned).visible);
+    EXPECT_EQ(manager.focused_window(), pinned);
+    ASSERT_TRUE(manager.focus_output("right"));
+    EXPECT_FALSE(manager.cycle_focus(false));
+    EXPECT_TRUE(manager.state().valid());
+}
+
 TEST(WindowManager, FloatingRaiseAndLayeredGeometryRestore) {
     WindowManager manager(WorkspaceMode::global, false);
     ASSERT_TRUE(manager.add_output("left", left, usable, true));
@@ -359,8 +406,8 @@ TEST(WindowManager, ZeroOutputsPreserveExistingAndNewClients) {
     EXPECT_TRUE(manager.state().valid());
 }
 
-TEST(WindowManager, RestoresAutomaticMigrationAndHonorsManualReassignment) {
-    WindowManager manager(WorkspaceMode::per_monitor);
+TEST_P(WorkspaceModes, RestoresAutomaticMigrationAndHonorsManualReassignment) {
+    WindowManager manager(GetParam());
     ASSERT_TRUE(manager.add_output("left", left, left, true));
     ASSERT_TRUE(manager.add_output("right", right, right));
     ASSERT_TRUE(manager.add_output("top", top, top));

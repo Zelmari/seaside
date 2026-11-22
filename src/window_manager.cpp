@@ -10,6 +10,7 @@ namespace {
 constexpr WorkspaceId max_workspace_id = 2147483647U;
 constexpr auto fullscreen_priority = std::uint64_t{1} << 63;
 constexpr auto maximized_focus_priority = std::uint64_t{1} << 62;
+constexpr auto floating_priority = std::uint64_t{1} << 61;
 
 int coordinate(std::int64_t value) noexcept {
     return static_cast<int>(std::clamp<std::int64_t>(value, std::numeric_limits<int>::min(),
@@ -613,7 +614,7 @@ bool WindowManager::unmap_window(WindowId id) {
         return false;
     }
     remove_tile(id);
-    forget_focus(id, workspace);
+    forget_focus(id);
     auto &window = windows_.at(id);
     // The next map starts a fresh XDG toplevel state, while its ID and original
     // mapping order belong to the lifetime of the Wayland object.
@@ -644,7 +645,7 @@ bool WindowManager::destroy_window(WindowId id) {
         }
     }
     remove_tile(id);
-    forget_focus(id, workspace);
+    forget_focus(id);
     if (!state_.destroy_window(id)) {
         return false;
     }
@@ -681,7 +682,7 @@ bool WindowManager::relocate_window(WindowId id, WorkspaceId workspace) {
         }
         if (old != workspace) {
             workspaces_.at(old).layout.erase(member);
-            forget_focus(member, old);
+            forget_focus(member);
             attach_tile(member);
         }
     }
@@ -941,6 +942,9 @@ WindowView WindowManager::view(WindowId id) const {
         border = tile_layout ? layout.border_width(id) : layout_settings_.border_width;
     }
     auto stacking = moving ? tile_move_->stacking : window.stacking;
+    if (ordinary && !is_tiled(id, window)) {
+        stacking |= floating_priority;
+    }
     if (const auto output = window_output(id)) {
         if (window.fullscreen || window.parent) {
             if (const auto fullscreen = fullscreen_on(*output);
@@ -982,10 +986,10 @@ WindowView WindowManager::view(WindowId id) const {
     };
 }
 
-void WindowManager::remember_focus(WindowId id) {
+void WindowManager::remember_focus(WindowId id, WorkspaceId workspace) {
     const auto *window = state_.window(id);
     if (window && window->mapped) {
-        auto &history = workspaces_.at(window->home_workspace).focus_history;
+        auto &history = workspaces_.at(workspace).focus_history;
         const auto previous = std::ranges::find(history, id);
         if (previous != history.end()) {
             std::rotate(history.begin(), previous, previous + 1);
@@ -995,15 +999,20 @@ void WindowManager::remember_focus(WindowId id) {
     }
 }
 
-void WindowManager::forget_focus(WindowId id, WorkspaceId workspace) {
-    auto &history = workspaces_.at(workspace).focus_history;
-    std::erase(history, id);
+void WindowManager::forget_focus(WindowId id) {
+    // A pinned window can have focus history on several workspaces.
+    for (auto &[workspace, state] : workspaces_) {
+        std::erase(state.focus_history, id);
+    }
 }
 
 void WindowManager::set_focus(std::optional<WindowId> id, bool remember,
                               std::optional<Direction> direction) {
-    if (id && remember && state_.window(*id)->home_workspace == focused_workspace()) {
-        remember_focus(*id);
+    if (id && remember && focused_workspace()) {
+        remember_focus(*id, *focused_workspace());
+    }
+    if (id && id != focused_window_ && !is_tiled(*id, windows_.at(*id))) {
+        windows_.at(*id).stacking = ++sequence_;
     }
     focused_window_ = id;
     if (id) {
@@ -1013,7 +1022,12 @@ void WindowManager::set_focus(std::optional<WindowId> id, bool remember,
 
 bool WindowManager::eligible(WindowId id, WorkspaceId workspace) const {
     const auto *entry = state_.window(id);
-    return entry && entry->home_workspace == workspace && is_visible(id);
+    if (!entry || !is_visible(id)) {
+        return false;
+    }
+    const auto output = window_output(id);
+    return entry->home_workspace == workspace ||
+           (output && state_.output(*output)->shown == workspace);
 }
 
 void WindowManager::restore_focus() {
@@ -1031,10 +1045,10 @@ void WindowManager::restore_focus() {
     }
     std::optional<WindowId> candidate;
     std::uint64_t highest = 0;
-    for (const auto id : state_.workspace(*workspace)->windows) {
-        if (eligible(id, *workspace) && windows_.at(id).stacking > highest) {
+    for (const auto &[id, window] : windows_) {
+        if (eligible(id, *workspace) && window.stacking > highest) {
             candidate = id;
-            highest = windows_.at(id).stacking;
+            highest = window.stacking;
         }
     }
     set_focus(candidate, false);
@@ -1052,7 +1066,7 @@ bool WindowManager::click(WindowId id) {
     finish_focus_cycle();
     focus_on_output(output);
     auto &window = windows_.at(id);
-    if (!is_tiled(id, window)) {
+    if (focused_window_ == id && !is_tiled(id, window)) {
         window.stacking = ++sequence_;
     }
     set_focus(id);
@@ -1079,7 +1093,6 @@ bool WindowManager::focus_direction(Direction direction) {
             set_focus(next, true, direction);
             return true;
         }
-        return false;
     }
     const bool can_wrap = !scrolling || !horizontal;
     const int sign = (direction == Direction::left || direction == Direction::up) ? -1 : 1;
@@ -1095,9 +1108,8 @@ bool WindowManager::focus_direction(Direction direction) {
     using Rank = std::tuple<bool, std::int64_t, std::int64_t, WindowId>;
     std::optional<Rank> closest;
     std::optional<std::tuple<std::int64_t, std::int64_t, WindowId>> wrap;
-    for (const auto id : state_.workspace(*home)->windows) {
-        if (id == focused_window_ || !eligible(id, *home) ||
-            (from_column && !horizontal && layout.contains(id))) {
+    for (const auto &[id, window] : windows_) {
+        if (id == focused_window_ || !eligible(id, *home) || (from_column && layout.contains(id))) {
             continue;
         }
         const auto rect = view(id).geometry;
@@ -1148,7 +1160,7 @@ bool WindowManager::cycle_focus(bool held) {
         for (const auto id : workspaces_.at(*workspace).focus_history) {
             append(id);
         }
-        for (const auto id : state_.workspace(*workspace)->windows) {
+        for (const auto &[id, window] : windows_) {
             append(id);
         }
         if (cycle.windows.empty()) {
@@ -1179,8 +1191,8 @@ void WindowManager::finish_focus_cycle() {
         return;
     }
     cycle_.reset();
-    if (focused_window_ && state_.window(*focused_window_)->home_workspace == focused_workspace()) {
-        remember_focus(*focused_window_);
+    if (focused_window_ && focused_workspace()) {
+        remember_focus(*focused_window_, *focused_workspace());
     }
 }
 
@@ -1236,7 +1248,7 @@ bool WindowManager::set_fullscreen(WindowId id, bool enabled) {
         if (focused_output_ == output) {
             set_focus(id);
         } else {
-            remember_focus(id);
+            remember_focus(id, entry->home_workspace);
         }
     } else if (focused_window_ && !is_visible(*focused_window_)) {
         restore_focus();
@@ -1254,6 +1266,13 @@ bool WindowManager::toggle_pin(WindowId id) {
     }
     cancel_tile_move();
     finish_focus_cycle();
+    if (found->second.pinned) {
+        const auto output = window_output(id);
+        const auto shown = output ? state_.output(*output)->shown : std::nullopt;
+        if (shown && !relocate_window(id, *shown)) {
+            return false;
+        }
+    }
     found->second.pinned = !found->second.pinned;
     if (found->second.pinned) {
         remove_tile(id);
@@ -1263,7 +1282,7 @@ bool WindowManager::toggle_pin(WindowId id) {
     if (focused_window_ && !is_visible(*focused_window_)) {
         restore_focus();
     } else if (focused_window_ == id) {
-        reveal(id);
+        set_focus(id);
     }
     return true;
 }

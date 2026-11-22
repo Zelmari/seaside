@@ -144,8 +144,8 @@ class WindowManager final {
     bool show_fallback(std::string_view output);
     bool focus_on_output(std::string_view id, bool restore_workspace_focus = false);
     bool relocate_window(WindowId id, WorkspaceId workspace);
-    void remember_focus(WindowId id);
-    void forget_focus(WindowId id, WorkspaceId workspace);
+    void remember_focus(WindowId id, WorkspaceId workspace);
+    void forget_focus(WindowId id);
     void set_focus(std::optional<WindowId> id, bool remember = true,
                    std::optional<Direction> direction = {});
     void restore_focus();
