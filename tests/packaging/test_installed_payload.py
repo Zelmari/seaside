@@ -5,6 +5,7 @@ import configparser
 import json
 import os
 from pathlib import Path
+import shutil
 import stat
 import subprocess
 import sys
@@ -34,7 +35,20 @@ def installed_payload(source, build, stage):
         destination("sysconfdir", "xdg/xdg-desktop-portal-wlr/Seaside"):
             "packaging/xdg-desktop-portal-wlr/Seaside",
     }
-    result = run("meson", "install", "--no-rebuild", "-C", build, "--destdir", stage)
+    # Even with DESTDIR, Meson replaces the build's install-log.txt. A real
+    # system installation may own that log. Give the exact plan and its built
+    # inputs a private working directory so this trial cannot overwrite it.
+    install_build = stage.parent / "install-build"
+    (install_build / "meson-private").mkdir(parents=True)
+    (install_build / "meson-logs").mkdir()
+    shutil.copyfile(build / "meson-private/install.dat", install_build / "meson-private/install.dat")
+    for filename in json.loads((build / "meson-info/intro-installed.json").read_text()):
+        path = Path(filename)
+        if path.is_relative_to(build):
+            target = install_build / path.relative_to(build)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, target, follow_symlinks=False)
+    result = run("meson", "install", "--no-rebuild", "-C", install_build, "--destdir", stage)
     assert result.returncode == 0, result.stderr or result.stdout
     actual = {path.relative_to(stage) for path in stage.rglob("*")
               if path.is_file() or path.is_symlink()}
@@ -95,6 +109,6 @@ if __name__ == "__main__":
         trial = Path(directory)
         home = trial / "home"
         home.mkdir()
-        source, build = map(Path, sys.argv[1:])
+        source, build = (Path(arg).resolve() for arg in sys.argv[1:])
         binaries = installed_payload(source, build, trial / "stage")
         check_entrypoints(binaries, home, source, build)
