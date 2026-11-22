@@ -468,7 +468,38 @@ def satellite_restart(session, state):
     state["satellite_restart"] = {"processes": pids, "status": "pass"}
 
 
-def change_modes(session, generated):
+def stability_resources(pid):
+    snapshot = compatibility["memory"](pid)
+    dma_buffers = {}
+    other_fds = 0
+    # fdinfo identifies a DMA-BUF by exporter and size even when the kernel
+    # recycles its descriptor number or the driver replaces its inode.
+    for entry in Path(f"/proc/{pid}/fdinfo").iterdir():
+        try:
+            info = entry.read_text()
+        except FileNotFoundError:
+            continue
+        exporter = re.search(r"^exp_name:\s*(.+)$", info, re.M)
+        if exporter:
+            size = re.search(r"^size:\s*(\d+)$", info, re.M)
+            require(size, f"Missing DMA-BUF size for {entry}")
+            key = f"{exporter[1]}:{size[1]}"
+            dma_buffers[key] = dma_buffers.get(key, 0) + 1
+        else:
+            other_fds += 1
+    snapshot.update(dma_buffers=dma_buffers, other_fds=other_fds,
+                    fds=other_fds + sum(dma_buffers.values()))
+    return snapshot
+
+
+def restored_mode_resources(cold, warm, current):
+    return (current["other_fds"] <= cold["other_fds"] + 2 and
+            current["VmRSS"] <= cold["VmRSS"] + 32 * 1024 and
+            all(count <= warm["dma_buffers"].get(key, 0)
+                for key, count in current["dma_buffers"].items()))
+
+
+def change_modes(session, generated, result):
     output = session.focused_output()
     original = output["mode"]
     original_size = (original["width"], original["height"])
@@ -476,7 +507,8 @@ def change_modes(session, generated):
              for file in Path("/sys/class/drm").glob(f"card*-{output['connector']}/modes")
              for size in file.read_text().split() if re.fullmatch(r"[1-9][0-9]*x[1-9][0-9]*", size)}
     if not (alternates := modes - {original_size}):
-        return {"status": "skip", "reason": "Only the active guest mode was advertised"}
+        result.update(status="skip", reason="Only the active guest mode was advertised")
+        return
     alternate = min(alternates)
     default = b'resolution = "auto"\n'
     require(generated.count(default) == 1, "Expected the canonical monitor resolution default")
@@ -496,18 +528,39 @@ def change_modes(session, generated):
 
         session.wait(matches, f"real guest modeset and cursor restoration for {size}")
 
-    for _ in range(MODE_CYCLES):
+    def round_trip():
         apply(changed, alternate)
         apply(generated, original_size)
-    return {"status": "pass", "cycles": MODE_CYCLES, "alternate": alternate, "restored": original_size}
+
+    pid = session.process.pid
+    cold = stability_resources(pid)
+    result.update(status="fail", alternate=alternate, restored=original_size, cold=cold,
+                  warmup_cycles=MODE_CYCLES, cycles=MODE_CYCLES, samples=[])
+    for _ in range(MODE_CYCLES):
+        round_trip()
+    warm = result["warm"] = stability_resources(pid)
+    # The first modesets can populate the cursor and scanout buffer pools.
+    # Further round trips to this same mode must release temporary buffers.
+    for _ in range(MODE_CYCLES):
+        round_trip()
+        sample = {}
+        result["samples"].append(sample)
+
+        def settled():
+            sample.update(stability_resources(pid))
+            return restored_mode_resources(cold, warm, sample)
+
+        session.wait(settled, "mode-change resource cleanup at the restored resolution")
+    result["status"] = "pass"
 
 
 def stability(session, generated, state):
     def present_after(previous):
         return session.diagnostics(session.focused_output())["presented_frames"] > previous
 
-    before = compatibility["memory"](session.process.pid)
-    regressions = {"mode_changes": change_modes(session, generated)}
+    regressions = state["stability"] = {"status": "fail", "mode_changes": {}}
+    change_modes(session, generated, regressions["mode_changes"])
+    before = regressions["before"] = stability_resources(session.process.pid)
     first = time.monotonic()
     with fixture(session, session.results / "part10-stability-client.log", "seaside-part7-native-client",
                  "Part 10 Stability Pattern", "112244", interactive=True) as pattern:
@@ -550,13 +603,12 @@ def stability(session, generated, state):
         pattern.stdin.flush()
         require(pattern.wait(timeout=8) == 0, "The stability fixture did not stop")
     session.wait(lambda: not session.window("Part 10 Stability Pattern"), "removal of the stability client")
-    regressions.update(status="fail", workspace_cycles=WORKSPACE_CYCLES, fullscreen_frames=frames,
+    regressions.update(workspace_cycles=WORKSPACE_CYCLES, fullscreen_frames=frames,
                        fullscreen_seconds=FULLSCREEN_SECONDS,
-                       seconds=round(time.monotonic() - first, 2), before=before)
-    state["stability"] = regressions
+                       seconds=round(time.monotonic() - first, 2))
 
     def resources_released():
-        after = compatibility["memory"](session.process.pid)
+        after = stability_resources(session.process.pid)
         regressions["after"] = after
         return after["fds"] <= before["fds"] + 2 and after["VmRSS"] <= before["VmRSS"] + 32 * 1024
 

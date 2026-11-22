@@ -40,6 +40,18 @@ class Part10WorkerTests(unittest.TestCase):
         self.assertTrue(callable(worker["recovery"]["stop_owned_portal"]))
         self.assertEqual(worker["part10_package"], package)
 
+    def test_restored_mode_checks_each_dma_pool_other_descriptors_and_rss(self):
+        worker, _ = self.load_worker()
+        check = worker["restored_mode_resources"]
+        cold = dict(dma_buffers={"drm:16384": 1, "drm:4096000": 2}, other_fds=81, VmRSS=30000)
+        warm = dict(cold, dma_buffers={"drm:16384": 3, "drm:4096000": 2})
+        self.assertTrue(check(cold, warm, warm))
+        for leaking in (dict(warm, dma_buffers={"drm:16384": 4, "drm:4096000": 1}),
+                        dict(warm, dma_buffers={"drm:1228800": 1}),
+                        dict(warm, other_fds=84), dict(warm, VmRSS=30000 + 32 * 1024 + 1)):
+            with self.subTest(sample=leaking):
+                self.assertFalse(check(cold, warm, leaking))
+
     def test_playback_requires_recorded_pcm_when_producer_stays_active(self):
         for send_pcm in (True, False):
             with self.subTest(send_pcm=send_pcm), TemporaryDirectory() as temporary:
