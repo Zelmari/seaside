@@ -98,7 +98,10 @@ struct LiveConfig::Impl {
                 break;
             path = target.is_absolute() ? std::move(target) : path.parent_path() / target;
         }
-        const int file = inotify_add_watch(watch_fd_, paths_.user.c_str(), file_events);
+        // An invalid profile can resolve to a directory already watched above.
+        // Keep its entry notifications so a corrected link can recover.
+        const int file =
+            inotify_add_watch(watch_fd_, paths_.user.c_str(), file_events | IN_MASK_ADD);
         for (const auto &[wd, entries] : directories_) {
             if (!next.contains(wd) && wd != file)
                 inotify_rm_watch(watch_fd_, wd);
@@ -158,7 +161,7 @@ struct LiveConfig::Impl {
                     writer_check_ = WriterCheck::required;
                     changed = true;
                     rewatch = true;
-                } else if (event.wd == file_watch_) {
+                } else if (event.wd == file_watch_ && !event.len) {
                     // The file watch can still deliver events from an unlinked inode.
                     if (replaced_hop)
                         continue;

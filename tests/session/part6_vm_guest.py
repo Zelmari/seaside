@@ -379,7 +379,18 @@ def run_live(repo, directory, result_dir, state):
             session.wait(lambda: session.config()["recovery_persisted"], "repaired profile snapshot")
             require(not session.config()["pending_restart"] and snapshot.read_text() == initial,
                     "A subsequent edit of the new target did not repair the profile")
-            state["profile_switch"] = {"retargeted": True, "invalid_retained": True, "repaired": True}
+            (profiles / "next").symlink_to(".")
+            (profiles / "next").replace(profiles / "active")
+            events.expect("config.error")
+            require(snapshot.read_text() == initial, "A directory target replaced last-good TOML")
+            (profiles / "next").symlink_to("../files/home")
+            (profiles / "next").replace(profiles / "active")
+            events.expect("config.recovered")
+            session.wait(lambda: session.config()["recovery_persisted"], "repaired profile link")
+            require(not session.config()["error"] and snapshot.read_text() == initial,
+                    "The profile link could not recover from pointing at its own directory")
+            state["profile_switch"] = {"retargeted": True, "invalid_retained": True,
+                                       "repaired": True, "directory_target_repaired": True}
             state["completed_saves"] = check_completed_saves(session, events, files / "home",
                                                             snapshot, initial, selected)
             session.key("open")

@@ -348,6 +348,29 @@ TEST_F(LiveConfigTest, IntermediateProfileSwitchTracksTheNewTargetAndItsRepairs)
     EXPECT_EQ(snapshot(), repaired);
 }
 
+TEST_F(LiveConfigTest, ProfileLinkCanRecoverFromSelectingItsOwnWatchedDirectory) {
+    const auto profiles = directory.path() / "profiles";
+    std::filesystem::create_directories(paths.user.parent_path());
+    std::filesystem::create_directory(profiles);
+    std::filesystem::create_symlink("../../profiles/active", paths.user);
+    const auto selected = profiles / "active";
+    const std::string valid = "[window]\ngaps_outer=23\n";
+    ASSERT_TRUE(std::ofstream(profiles / "valid") << valid);
+    std::filesystem::create_symlink("valid", selected);
+    ASSERT_NO_FATAL_FAILURE(start());
+    ASSERT_TRUE(pump_until([&] { return transaction().recovery_persisted(); }));
+
+    std::filesystem::create_symlink(".", profiles / "next");
+    std::filesystem::rename(profiles / "next", selected);
+    ASSERT_TRUE(pump_until([&] { return transaction().diagnostic().has_value(); }));
+    EXPECT_EQ(snapshot(), valid);
+    std::filesystem::create_symlink("valid", profiles / "next");
+    std::filesystem::rename(profiles / "next", selected);
+    ASSERT_TRUE(pump_until(
+        [&] { return !transaction().diagnostic() && transaction().recovery_persisted(); }));
+    EXPECT_EQ(snapshot(), valid);
+}
+
 TEST_F(LiveConfigTest, PathTruncatePublishesTheShorterConfiguration) {
     const std::string prefix = "[window]\ngaps_outer=25\n";
     ASSERT_TRUE(
