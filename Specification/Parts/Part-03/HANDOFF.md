@@ -119,11 +119,8 @@ and actual-compilation-database analysis alongside the existing checks.
 | Harness regressions | Both runs executed all 52 Python self-tests, including real fixture/process cleanup; all passed |
 | Static analysis/formatting | Normal harness `code-quality` passed for the actual compilation database, including the new integration sources; sanitizer run selected runtime suites rather than repeating static analysis |
 | Dependency/source evidence | Both baseline collections reported no errors, recorded 371 supporting API/library artifacts and four session-support artifacts; tested source hashes match the final implementation |
-| Independent code review | Three implementation agents cross-reviewed lifetimes, deadlines, signals and failure paths; reproduced findings were fixed and regression-tested |
+| Independent code review | Reviewed lifetimes, deadlines, signals and failure paths; reproduced findings were fixed and regression-tested |
 
-Reports are retained under ignored `test-results/`:
-`20261120T165531Z-6eafadf0` (normal) and
-`20261120T165628Z-84593b06` (ASan/UBSan runtime).
 The sanitizer build was prepared with
 `meson setup --reconfigure build-asan -Db_sanitize=address,undefined` and
 `meson compile -C build-asan -j 2`.
@@ -144,20 +141,19 @@ regression fail, demonstrating that it protects the intended ordering.
 ## VirtualBox console checkpoint
 
 The first Arch guest harness run passed. The console reported `vmwgfx` on
-`/dev/dri/card0` with a render node, and the owner counted eight cursor-plane
+`/dev/dri/card0` with a render node, and the DRM inventory listed eight cursor-plane
 entries in `drm_info`. Those observations establish that the guest is a
 candidate for testing real cursor presentation. The watchdog reported stalls
 during that run, and the harness completed successfully.
 
 The guest built revision `b2c172f` after Ninja regenerated the build files.
 The first console attempt stopped at `stage=seat-drm-renderer` with automatic
-renderer selection. The owner reran the same fixture with
+renderer selection. The second trial ran the same fixture with
 `WLR_RENDERER=pixman build/seaside-tty-fixture`. It enabled `Virtual-1` at
 1280 × 800 and 60 Hz, with DRM connector 44 and hardware cursor plane 40.
 The report counted 5,565 presented frames and 5,564 presented position changes
 from 5,575 accepted moves, then printed `PASS stop=observation-ended` and returned
-to the same shell. The owner confirmed that the visible white cross followed
-their pointer. The explicit renderer choice applies to this VM check. Automatic
+to the same shell. The visible white cross followed pointer movement. The explicit renderer choice applies to this VM check. Automatic
 renderer selection remains a separate qualification item.
 
 `seaside-tty-fixture` is a development executable for one DRM output. It opens
@@ -187,7 +183,6 @@ Local verification for this checkpoint:
 
 - `tools/run-tests --build-dir build` passed 14 Meson entries and all 136
   GoogleTest cases. The discovery-only hardware probe reported one skip.
-  The report is `test-results/20261120T174302Z-ef6bd079/summary.txt`.
 - All seven Part 3 entries passed under ASan/UBSan with leak detection using
   `meson test -C build-asan --suite part3 --print-errorlogs`.
 - The signal regression verifies that shutdown during startup prevents later
@@ -228,8 +223,7 @@ forwarded key press and a clean exit from the owned child.
 
 The VirtualBox run at `8c47639` reported `TTY terminal PASS`,
 `stop=terminal-exited`, `mapped=yes`, `keys=56` and `cursor-plane=40` with
-Pixman. The guest returned to the original shell, and the owner confirmed
-typing in `foot` worked. The fixture sends keyboard events to the terminal
+Pixman. The guest returned to the original shell, and typing in `foot` still worked. The fixture sends keyboard events to the terminal
 and draws the cursor through DRM. Client mouse buttons and window dragging
 remain in the window and input milestone.
 
@@ -242,8 +236,7 @@ observation separately.
 
 `tools/run-tests --build-dir build` passed 15 Meson entries, all 139 GoogleTest
 cases and the formatting and static analysis checks. The discovery-only DRM
-probe reported one hardware skip. The report is
-`test-results/20261120T180118Z-a82f50db/summary.txt`. All eight Part 3 entries
+probe reported one hardware skip. All eight Part 3 entries
 also passed with ASan/UBSan and leak detection using
 `meson test -C build-asan --suite part3 --print-errorlogs`.
 
@@ -280,8 +273,7 @@ At `bd95b0d`, the Arch VirtualBox guest logged in on `tty1` and ran
 It returned `session core systemd=PASS(0) pipewire=PASS(0)` on the first run.
 
 The regression harness passed 15 entries and all 148 GoogleTest cases, with
-the DRM discovery probe skipped in WSL. The report is
-`test-results/20261120T181715Z-554be2dd/summary.txt`. All eight Part 3 entries
+the DRM discovery probe skipped in WSL. All eight Part 3 entries
 also passed with ASan/UBSan and leak detection.
 
 ### Full session startup
@@ -319,21 +311,21 @@ and routing file paths.
 
 The full WSL harness passed 19 entries and all 170 GoogleTest cases. It
 skipped DRM discovery and the portal test that looks for installed Arch
-packages. The latter passed using the unpacked packages above. The report is
-`test-results/20261120T194449Z-619cbf2b/summary.txt`. The Part 3 sanitizer
+packages. The latter passed using the unpacked packages above. The Part 3 sanitizer
 suite passed all 12 available entries and the separate real-portal run.
 
 ### Final Part 3 VM trial
 
-Run on the dedicated Arch VirtualBox guest. Type each command separately.
+The following commands record the historical Part 3 source-build trial in
+an Arch VirtualBox guest. For the current package, follow the
+[user guide](../../USER_GUIDE.md#install-on-arch).
 
-1. `cd ~/Projects/seaside`
-2. `git pull --ff-only`
-3. `sudo pacman -S --needed xdg-desktop-portal-{wlr,gtk}`
-4. `ninja -C build`
-5. `sudo meson install -C build --no-rebuild`
-6. `tools/run-tests`
-7. `WLR_RENDERER=pixman build/seaside`
+1. From the test checkout, install the historical trial's portal packages
+   with `sudo pacman -S --needed xdg-desktop-portal-{wlr,gtk}`.
+2. Build with `ninja -C build` and stage the trial's session resources
+   with `sudo meson install -C build --no-rebuild`.
+3. Run `tools/run-tests`.
+4. From the guest TTY, run `WLR_RENDERER=pixman build/seaside`.
 
 Move the pointer, open `foot` with Super+Return, then run
 `grim -c /tmp/seaside.png` and `file /tmp/seaside.png` inside it. Switch to
@@ -353,15 +345,15 @@ previous run released its resources.
 
 The Arch VirtualBox guest used Pixman with `vmwgfx`. The interactive `foot`
 session produced two valid 1280 × 839 PNGs, `seaside.png` and `seaside-vt.png`.
-After switching to TTY 2 and back to TTY 1, the owner confirmed that the same
-terminal still accepted typing and the cursor moved.
+After switching to TTY 2 and back to TTY 1, the same terminal
+still accepted typing and the cursor moved.
 
 The forced PipeWire failure printed `seaside FAIL service=pipewire
 reason=missing(-112)` and returned to the logged-in shell. A separate launch
 while a capture portal name was already owned also returned to the shell with
 `seaside FAIL service=capture-backend reason=wrong-environment(-98)`.
 
-The owner also observed intermittent pauses of about half a second before
+The trial also found intermittent pauses of about half a second before
 typed characters appeared together in `foot`. See the
 [performance investigation](../../Research/PERFORMANCE.md#virtualbox-terminal-stalls).
 

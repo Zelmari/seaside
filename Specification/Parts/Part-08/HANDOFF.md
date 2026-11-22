@@ -29,13 +29,6 @@ per-output presentation state and frame counters.
   rollback. Real headless clients check fractional-scale and presentation
   events, recovery from an injected rejected frame, fullscreen pixels and
   restoration, and popup, subsurface and pointer coordinates.
-- Run `python3 tests/session/part8_vm.py --console-ready` from the host when
-  the guest is logged in at an idle foreground TTY 1. The runner builds an
-  exact revision in an isolated checkout. It accepts `--pkg-config-path` and
-  `--runtime-prefix` for staged guest dependencies. Use `--renderer pixman`
-  with the current virtual graphics configuration. The runner retains
-  `guest.json`, summaries, logs and captures in the Council VM evidence
-  directory and guest `test-results/`.
 
 ## Arch VM evidence from 2026-11-21
 
@@ -64,20 +57,18 @@ the logged-in TTY on clean exit and on the induced PipeWire startup failure.
 The guest ran kernel `7.3.5-arch1-1`, wlroots `0.20.2`, Wayland protocols
 `1.50`, VirtualBox Guest Additions `7.2.22`, and `vmwgfx` DRM with Pixman.
 The automatic renderer trial failed to initialize EGL and Vulkan on this
-guest with 3D disabled. The passing trial selected Pixman explicitly. Its
-reports are in Council VM evidence run `20261121T215400Z-5fe6932a` and guest
-`test-results/vm-5fe6932a1fd6`.
+guest with 3D disabled. The passing trial selected Pixman explicitly.
 
 ## WSL2 software evidence
 
 The unit, integration, runner and passive hardware suites passed 39 Meson
 checks and 251 GoogleTest cases. The two installed portal tests skipped in
 WSL2 and passed in the guest. The passive inventory check skipped in both
-environments. The report is `20261121T215623Z-a774a8da`.
+environments.
 
 The separate ASan/UBSan build passed 26 Meson checks and 124 GoogleTest cases
 across Parts 3, 6, 7 and 8 with leak detection enabled. The same two portal
-tests skipped. The report is `20261121T215340Z-701b5fc9`. The initial
+tests skipped. The initial
 unfiltered WSL2 run lacked the staged `wlr-protocols` pkg-config path for
 baseline collection and reached the 240-second aggregate code-quality
 timeout. The corrected software run used that pkg-config path. Standalone
@@ -85,7 +76,7 @@ clang-tidy passed for the changed translation units.
 
 ## Native Arch qualification still open
 
-The Framework Desktop trials cover real AMD renderer startup, cursor planes
+Native AMD trials cover real AMD renderer startup, cursor planes
 and visual alignment, mixed-refresh hotplug and physical monitor identity,
 resume, DMA-BUF import and explicit fences, direct scanout and frame pacing,
 active VRR and async tearing, visible hardware night-light correction, and

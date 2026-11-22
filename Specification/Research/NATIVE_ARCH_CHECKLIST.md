@@ -1,14 +1,13 @@
 # Native Arch desktop checklist
 
-Use this checklist when Seaside becomes the main desktop on the native Arch
-installation. Start with the first-login checks, then exercise the apps,
-devices, and workflows used day to day. Run each item once its implementation
-is available. Record results here as the native trial progresses.
+Use this checklist to qualify Seaside on native Arch with AMD graphics. Start
+with first login, then exercise the relevant apps, physical devices, and
+workloads. Record results in a test report using the details below.
 [Seaside design](../SEASIDE_SPEC.md) · [Part 7 handoff](../Parts/Part-07/HANDOFF.md) · [Part 8 handoff](../Parts/Part-08/HANDOFF.md) · [Part 9 handoff](../Parts/Part-09/HANDOFF.md) · [Performance investigations](PERFORMANCE.md)
 
 ## First login
 
-- [ ] Install the Part 10 Arch package on the Framework Desktop. Record the
+- [ ] Install the candidate package on the native Arch system. Record the
   exact revision and SHA-256 checksum. Use `pacman -Q seaside` and
   `pacman -Qoq /usr/bin/seaside` to verify the installed version and owner.
   Run the first-login checks from that package. [Install on Arch](../USER_GUIDE.md#install-on-arch)
@@ -21,7 +20,7 @@ is available. Record results here as the native trial progresses.
 
 ## Part 7 checks still open
 
-The Arch VM verified the underlying sharing and playback paths. The checks
+An Arch VM verified the underlying sharing and playback paths. The checks
 below use the actual apps, receiving clients, and physical devices on native
 Arch. [Part 7 VM evidence](../Parts/Part-07/HANDOFF.md#arch-vm-verification-from-2026-11-21)
 
@@ -58,9 +57,9 @@ receiving end of a test call.
   Check that ordinary F10–F12 reach a focused app when they emit function-key
   events, and try any media-key remapping used on the main desktop.
 
-## Part 8 checks on the Framework Desktop
+## Part 8 native display checks
 
-Start Seaside from a logged-in native Arch TTY with the actual AMD renderer.
+Start Seaside from a logged-in native Arch TTY with the AMD renderer.
 Use the read-only collector inside the running session to record the display
 and presentation state around each trial. Give each run a short label, such as
 `fullscreen before sharing` or `after VT return`.
@@ -102,7 +101,7 @@ python3 tests/hardware/part8_display.py 'fullscreen before sharing' --seconds 5
   direct scanout with and without the LUT. An unsupported monitor should stay
   available with its prior colors.
 
-## Part 9 checks on the Framework Desktop
+## Part 9 native display checks
 
 - [ ] With multiple physical monitors attached, let an unfocused monitor sleep
   while a visible fullscreen client keeps its own monitor awake. Repeat with

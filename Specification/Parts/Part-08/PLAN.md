@@ -1,8 +1,8 @@
 # Part 8 plan for display and GPU behavior
 
-Part 8 completes the output and presentation paths and qualifies them on the
-Framework Desktop running native Arch with AMD DRM/KMS. Start with the existing
-output transactions, workspace migration, wlroots scene, hardware cursor checks,
+Part 8 completes the output and presentation paths and qualifies them on
+a native Arch system with AMD DRM/KMS. Start with the existing output
+transactions, workspace migration, wlroots scene, hardware cursor checks,
 and `seasidectl` status. Use the Part 7 capture clients and receiver to test
 what happens when recording or sharing starts and stops during fullscreen use.
 [Part 4 handoff](../Part-04/HANDOFF.md) · [Part 6 handoff](../Part-06/HANDOFF.md) · [Part 7 handoff](../Part-07/HANDOFF.md)
@@ -23,7 +23,7 @@ or resume returns the seat and outputs to the running session. [Seaside design](
 | 8C. Complete buffer and presentation support | Wire functional presentation-time, fractional-scale/viewport and DMA-BUF integration and capability-gated DRM syncobj into the existing wlroots scene and renderer. Track per-output frame state and results, and verify damage-aware composition and direct scanout with a safe commit fallback. | Observe real client events, buffer release, frame scheduling and correctly presented pixels. Exercise rejected commits, loss of an output with work pending and repeated scanout/composition transitions. |
 | 8D. Apply fullscreen policies | Implement preserve/stretch using the presented content geometry and keep the configured physical mode. Complete VRR policy and support client-requested asynchronous presentation only for eligible fullscreen frames on a capable output. | Check preserved ratios and bars, stretch, return to the prior window state, relative pointer and pointer lock, native and satellite clients, and actual fixed-refresh/VRR and synchronized/async outcomes. |
 | 8E. Apply hardware night light | Connect the existing global config, bindings and IPC to the qualified hardware LUT path. Report the effective setting and the per-output result through existing queries. | Verify the default off state, 4500 K when enabled by default, restoration on disable, reapplication through display changes, and unchanged color and output availability on unsupported hardware. Measure the effect on scanout. |
-| 8F. Run the harness and qualify the milestone | Register the `part8` suite in Meson, add the Arch TTY scenario, and prepare the native display trials alongside the code. Record the evidence in the Part 8 handoff. | Run the software, guest and native cases below. Publish the verified handoff revision and verify the usual guest checkout and rebuilt `build/seaside` at that revision. |
+| 8F. Run the harness and qualify the milestone | Register the `part8` suite in Meson, add the Arch TTY scenario, and prepare the native display trials alongside the code. Record the evidence in the Part 8 handoff. | Run the software, guest and native cases below. Record the exact tested revision. |
 
 ## Output and presentation acceptance
 
@@ -93,8 +93,7 @@ or resume returns the seat and outputs to the running session. [Seaside design](
   under `test-results/`. Use `tools/check-code --build-dir build` for the
   standalone formatting and analysis check.
 - Add `tests/session/part8_vm.py` and its guest scenario following the Part 7
-  runner. Reuse the existing bundle transport and Council VM controls to build
-  and test the exact revision in an isolated checkout on `Arch Seaside Testing`.
+  runner. Build and test the exact revision in an isolated Arch guest checkout.
   Run the guest software suite and the production TTY entrypoint, with real
   preflight, `foot`, a working virtual DRM cursor plane, and the supported mode,
   scale and rotation transitions. Check invalid-mode rollback, fullscreen and
@@ -102,18 +101,16 @@ or resume returns the seat and outputs to the running session. [Seaside design](
   on an unavailable required service. Require pass evidence for each applicable
   case. Report cases the virtual GPU or guest connectors cannot exercise with
   the observed capability and reason.
-- Check VM status, inspect a console screenshot and wait for an idle logged-in
-  shell on active TTY 1 before running the planned trial with `--console-ready`.
-  Use targeted VirtualBox controls with the host window focus intact. Retain
-  `guest.json`, harness summaries, the actual guest renderer/backend, logs,
-  and relevant pixel and DRM evidence in the existing VM result directories.
+- Run the trial from an idle logged-in TTY in the test guest. Retain the
+  harness summaries, actual guest renderer and backend, logs, and relevant
+  pixel and DRM evidence.
   Record whether a failure came from a test assertion, an unavailable
   capability or guest infrastructure.
 
 ## Native Arch qualification and handoff
 
-- Add opt-in checks under `tests/hardware/` for the Framework Desktop. Start
-  with a real TTY and the existing passive DRM probe. Collect actual KMS and
+- Add opt-in checks under `tests/hardware/` for native Arch with AMD graphics.
+  Start with a real TTY and the existing passive DRM probe. Collect actual KMS and
   client presentation evidence for cursor use and movement, scale/rotation,
   reconnect and workspace restore, scanout/fallback, explicit sync, VRR,
   tearing and hardware LUT. Use mixed-refresh monitors and suitable VRR/async
@@ -133,17 +130,10 @@ or resume returns the seat and outputs to the running session. [Seaside design](
   window when practical and record each app and device result against that
   checklist. [Part 7 checks still open](../../Research/NATIVE_ARCH_CHECKLIST.md#part-7-checks-still-open)
 - Record the date, exact revision, kernel, Mesa, wlroots, protocol hashes,
-  renderer/backend, GPU, monitor identities and modes, app versions, commands,
+  renderer/backend, GPU, monitor models and modes, app versions, commands,
   and bounded artifacts. Mark results by requirement and environment as pass,
   fail, skip or blocked. Record implementation, automated verification and
   pending qualification separately. Guest results qualify the virtual DRM
   path. Physical gates require native evidence. If AMD access, a display
   capability or a manual interaction is unavailable, name the exact missing
   prerequisite and keep that gate pending while independent work proceeds.
-- When the implementation is ready for owner testing, push the verified
-  revision to `origin/main`. Use the Council `vm_runner.py tty --console-ready
-  --revision <commit>` against the published revision to fast-forward the usual
-  `~/Projects/seaside` guest checkout and verify its revision and rebuilt
-  `build/seaside`. Preserve the owner's changes and config and record any
-  blocker in the handoff. The isolated VM trial supplies the Part 8 acceptance
-  evidence for the handoff revision.

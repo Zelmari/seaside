@@ -23,17 +23,10 @@ personal configuration, and raw test output stay in local test storage.
   guest scenario. `makepkg --check` runs that focused suite against the
   staged build. The broader runtime-dependent tests run through the separate
   harness, and the installed TTY trial uses a booted Arch guest.
-- The installed VM runner verifies the archive and package ownership, installs
-  it with pacman, exercises the real TTY and installed workflows, and checks
-  that reinstall and removal preserve the generated config. The runner
-  requires the source checkout and package revision to match. Use
-  `--preinstalled` for verification of an exact archive already installed in
-  the disposable test guest.
-  [Clean chroot and VM commands](../../CONTRIBUTING.md#build-in-a-clean-arch-chroot)
-
-```sh
-python3 tests/session/part10_vm.py --vm "$vm" --console-ready --disposable --package "$package"
-```
+- The installed VM trial verified package ownership, exercised the real TTY
+  and installed workflows, and checked that reinstall and removal preserved
+  generated config. Use a package and checkout built from the same revision.
+  [Reproduce the Arch build and installation checks](../../CONTRIBUTING.md#build-in-a-clean-arch-chroot)
 
 ## Package and software evidence from 2026-11-22
 
@@ -48,16 +41,13 @@ python3 tests/session/part10_vm.py --vm "$vm" --console-ready --disposable --pac
 - A clean runtime root installed the same archive from the retained package
   cache. Pacman resolved polkit `128-1` and RealtimeKit `0.14-2`. Pacman found
   zero missing package paths or dependency database errors, and both
-  installed binaries resolved all shared libraries. The package, exact Git
-  source archive, `.BUILDINFO`, `.PKGINFO`, and checksums are in the local
-  artifact directory `test-artifacts/part10-58eb8db/`.
+  installed binaries resolved all shared libraries. The package and exact source
+  archive were checked against their recorded SHA-256 sums.
 - The full WSL2 run passed 44 Meson checks including static analysis, and
-  268 GoogleTest cases (`20261122T020032Z-b48dc5aa`). The later software
-  rerun with the worker-assembly check passed 44 Meson checks and 268
-  GoogleTest cases (`20261122T023106Z-cde38d9f`). The ASan/UBSan run passed
-  34 checks and 157 GoogleTest cases (`20261122T023106Z-d50098c6`). The
-  installed portal and passive DRM checks were skipped where the WSL2
-  environment lacked those facilities.
+  268 GoogleTest cases. The later run with the worker-assembly check passed
+  44 Meson checks and 268 GoogleTest cases. The ASan/UBSan run passed 34
+  checks and 157 GoogleTest cases. Installed portal and passive DRM checks
+  skipped in WSL2 where those facilities were unavailable.
 
 ## Installed Arch VM evidence from 2026-11-22
 
@@ -86,15 +76,13 @@ python3 tests/session/part10_vm.py --vm "$vm" --console-ready --disposable --pac
 
 The guest used Arch kernel `7.3.5-arch1-1`, Mesa `26.3.1`, wlroots `0.20.2`,
 Wayland protocols `1.50`, PipeWire `1.6.11`, WirePlumber `0.5.19`,
-xdg-desktop-portal-wlr `0.8.4`, and Wofi `1.5.3`. Council VM evidence run
-`20261122T023339Z-94906c3c` retains package metadata, log files, and captured
-frames. The test used an isolated guest with its own account and package
-database. VirtualBox suspend/resume remains skipped because the runner has
+xdg-desktop-portal-wlr `0.8.4`, and Wofi `1.5.3`. The test used an isolated
+guest with its own account and package database. VirtualBox suspend/resume remains skipped because the runner has
 no verified targeted wake path.
 
 ## Native qualification
 
-The Framework Desktop release trial remains open. It covers real AMD display
+Native Arch release qualification remains open. It covers real AMD display
 and cursor behavior, native performance, suspend and hotplug, physical media
 keys and audio, and actual OBS, Discord, and Steam/Proton workflows. Keep the
 package revision and checksum with that evidence. Required native gates must

@@ -1,7 +1,7 @@
 # Verification and support
 
-Seaside targets Arch Linux on a logged-in local console. The Framework Desktop
-with AMD graphics is the native release reference. A participating output
+Seaside targets Arch Linux on a logged-in local console. Native release
+qualification uses AMD graphics on physical hardware. A participating output
 needs a driver that can put the cursor on a hardware plane. The native release
 checks remain open. [Install prerequisites](USER_GUIDE.md#install-on-arch) · [Native Arch desktop checklist](Research/NATIVE_ARCH_CHECKLIST.md)
 
@@ -10,9 +10,9 @@ checks remain open. [Install prerequisites](USER_GUIDE.md#install-on-arch) · [N
 | Environment | Evidence recorded | Release context |
 |---|---|---|
 | Arch development builds | Unit tests and real clients on offscreen Wayland outputs. Coverage includes configuration, layouts, IPC, sharing, layer-shell, idle inhibition, and trace export. | The source-tree fixtures exercise software behavior. |
-| Dedicated Arch VirtualBox guest | Real TTY start and exit, virtual cursor placement, application/workspace behavior, portal capture and audio routing with test clients, live config, display sleep and wake, and service recovery. The guest uses `vmwgfx` with the Pixman renderer. | Coverage is scoped to the virtual device and the cases recorded in the guest reports. |
+| Arch VirtualBox guest | Real TTY start and exit, virtual cursor placement, application/workspace behavior, portal capture and audio routing with test clients, live config, display sleep and wake, and service recovery. The guest uses `vmwgfx` with the Pixman renderer. | Coverage is scoped to the virtual device and the cases recorded in the guest reports. |
 | Disposable Arch package-test guest | The installed Part 10 package passed first use, VT return, media keys and playback, monitor and chosen-window capture, X11 restart, bounded stability, and package reinstall and removal. | The independently rebuilt candidate is ready for native testing. |
-| Native Framework Desktop on Arch | Test actions and the read-only display collector are available. | Real AMD renderer and cursor paths, DMA-BUF and explicit sync, scanout, VRR and tearing, night light, mixed outputs and hotplug, suspend/resume, physical audio and input, Steam/Proton, and OBS/Discord compatibility remain in the native checklist. |
+| Native Arch with AMD graphics | Test actions and the read-only display collector are available. | Real AMD renderer and cursor paths, DMA-BUF and explicit sync, scanout, VRR and tearing, night light, mixed outputs and hotplug, suspend/resume, physical audio and input, Steam/Proton, and OBS/Discord compatibility remain in the native checklist. |
 
 The [Part 7 handoff](Parts/Part-07/HANDOFF.md) records the underlying sharing
 and audio trials. The [Part 8 handoff](Parts/Part-08/HANDOFF.md) records the

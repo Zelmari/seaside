@@ -39,6 +39,6 @@ session baseline.
   configure/ack/commit, keyboard enter/leave, and pointer delivery. Exercise two
   visible client windows in the VM for click focus, scroll without focus change,
   MRU, workspace select and move-with-follow, and maximize/fullscreen/pin
-  restoration. Use the Council Seaside VM runner against the exact tested
+  restoration. Use an isolated Arch guest at the exact tested
   revision and retain its guest report, logs, and relevant artifacts. Record
   each unavailable case with the exact missing guest or hardware capability.

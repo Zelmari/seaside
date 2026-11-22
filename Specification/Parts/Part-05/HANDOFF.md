@@ -39,13 +39,8 @@ fixed seed for repeated layout operation sequences. The desktop fixture
 checks configure, ack, late commits, resize and detach, viewport clipping
 against an adjacent composed output, and pointer targets.
 
-For the real Arch TTY trial, use the Council Seaside VM skill. Once its
-background screenshot confirms an idle shell on TTY 1, run
-`python3 tests/session/part5_vm.py --console-ready`. The trial uses an isolated
-bundle of the current commit and a temporary guest config. It runs the
-existing TTY/VT checks and both layout scenarios, recording terminal sizes,
-focus and input results, and captures. The normal guest checkout is used for
-the final build verification after publication.
+The Arch guest TTY trial used the exact Git revision and temporary config.
+It checked both layouts, terminal sizes, focus, input, and a VT round trip.
 
 ## Local verification
 
@@ -54,15 +49,15 @@ and wayland-protocols 1.50. The harness reports are under `test-results/`.
 The first clean build caught two fixture initializers that needed updating.
 The subsequent runs compiled and exercised the corrected fixtures.
 
-| Command | Result | Report directory |
-|---|---|---|
-| `tools/run-tests --build-dir build-part5-final --timeout 420` | 26 entries passed, including formatting and static analysis. All 207 GoogleTest cases passed. The real portal and passive DRM probes were skipped in WSL2. | `20261121T153552Z-e5b068f6` |
-| `tools/run-tests --build-dir build-part5-clean --suite part5 --timeout 420` | Four entries and all 23 GoogleTest cases passed. | `20261121T153526Z-487cc7ff` |
-| `ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 tools/run-tests --build-dir build-asan --suite unit --suite integration --timeout 420` | 24 entries and all 207 GoogleTest cases passed with no sanitizer findings. The real portal probe was skipped in WSL2. | `20261121T153552Z-8fb0ff5c` |
+| Command | Result |
+|---|---|
+| `tools/run-tests --build-dir build-part5-final --timeout 420` | 26 entries passed, including formatting and static analysis. All 207 GoogleTest cases passed. The real portal and passive DRM probes were skipped in WSL2. |
+| `tools/run-tests --build-dir build-part5-clean --suite part5 --timeout 420` | Four entries and all 23 GoogleTest cases passed. |
+| `ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 tools/run-tests --build-dir build-asan --suite unit --suite integration --timeout 420` | 24 entries and all 207 GoogleTest cases passed with no sanitizer findings. The real portal probe was skipped in WSL2. |
 
 ## Arch VirtualBox verification
 
-The Council runner built `f3d7bb9435f76a486c5020fbe9fcecb43b8dee06` on
+The Arch guest built `f3d7bb9435f76a486c5020fbe9fcecb43b8dee06` on
 Arch Linux `7.3.5-arch1-1` using Pixman. The guest harness passed 26 entries,
 including the real portal smoke test, and all 207 GoogleTest cases. The
 passive DRM capability probe was skipped.
@@ -80,10 +75,7 @@ passive DRM capability probe was skipped.
   forced PipeWire startup failure reported `missing(-112)` and exited with
   status 1.
 
-The guest report, screenshots, input events, and logs are in
-`test-results/part5-vm/20261121T153553Z-776cd892/`. The guest retained its
-reports under `~/Projects/seaside/test-results/vm-776cd892cda0/`. The VM
-exposed one usable connector. Adjacent-output clipping was checked in the
+The VM exposed one usable connector. Adjacent-output clipping was checked in the
 headless fixture. Native multi-monitor and GPU qualification remain Part 8
 work.
 
@@ -93,12 +85,10 @@ The headless fixture at `3d5c0fc` checked that focus and viewport geometry
 stay in place at both strip ends. The unit, integration, and runner suites
 passed 25 entries and all 207 GoogleTest cases. The real portal test was
 skipped in WSL2. The Part 5 sanitizer run passed four entries and 23
-GoogleTest cases. Reports are under `test-results/20261121T155543Z-ebdd1d62/`
-and `test-results/20261121T155543Z-f174ec3b/`.
+GoogleTest cases.
 
 The focused Arch TTY trial at the same revision opened three scrolling
 terminals. `Super+Right` at the third and `Super+Left` at the first kept
 their respective shell PIDs focused. Two intervening left presses visited
 the middle and first terminals in order. The trial also passed the existing
-resize, workspace, and VT checks. Its guest report, input events, and captures
-are under `test-results/part5-vm/20261121T155635Z-e0f8260d/`.
+resize, workspace, and VT checks.

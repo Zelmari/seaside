@@ -56,7 +56,7 @@ the strict external-service preflight.
 
 The available development environment on 2026-11-19 is Arch Linux on the
 `6.18.58.1-microsoft-standard-WSL2` kernel. Results from it are labeled
-`arch-wsl2`; they are not full Arch-VM or native Framework/AMD qualification.
+`arch-wsl2`; they are not full Arch-VM or native AMD qualification.
 The original VM-first test plan still requires those environments' evidence.
 Available software verification can proceed without representing that evidence
 as present.
@@ -100,7 +100,7 @@ driver state.
 Cursor-plane discovery is only a capability observation. A working hardware
 cursor across scale/rotation/VT/resume still needs real display tests. The
 currently exposed `card0` resolves to a `vgem`/faux sysfs device; it is not native
-Framework/AMD evidence. Never interpret a blocked probe as proof that a device
+physical AMD evidence. Never interpret a blocked probe as proof that a device
 lacks cursors, and never replace it with a software-cursor qualification.
 
 ## Verification status
@@ -129,11 +129,8 @@ Checks run on 2026-11-19:
   and passes. `WAYLAND_SOCKET=999999` does not redirect the fixture from its
   private socket; all three lifecycle rounds still pass.
 
-The normal and sanitizer run IDs are `20261119T232903Z-32b23218` and
-`20261119T232915Z-caee4a00`. Each run's ignored `test-results/<run-id>/`
-directory contains `summary.json`, `summary.txt`, `baseline.json` and bounded
-logs. Rerun the commands to generate evidence on another machine; these local
-artifacts are not required source files.
+Each run's results directory contains `summary.json`, `summary.txt`,
+`baseline.json` and bounded logs.
 
 ## C++23 migration — 2026-11-20
 
@@ -175,8 +172,6 @@ Verification:
   standard-library hash, GoogleTest/tool versions and check-configuration hashes,
   with no collection errors.
 
-Normal run: `20261120T125935Z-3278cedc`; sanitizer run:
-`20261120T125939Z-2634efa4`. Evidence remains under ignored `test-results/`.
 Initial legacy-build compilation failed because Meson retained `cpp_std=none`;
 the runner now explicitly reconfigures it to C++23. Initial static analysis
 flagged ordinary C `fprintf`/`memset` calls under its blanket Annex K migration

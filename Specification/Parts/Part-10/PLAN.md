@@ -3,8 +3,8 @@
 Turn the Parts 1–9 implementation into a clean Arch installation and qualify
 the package for v1. The Part 9 guest trial provides a working source-built
 reference for the real TTY, portal recovery, and virtual display power. The
-native Framework Desktop evidence remains a release requirement.
-[Roadmap](../../SEASIDE_SPEC.md#14-ten-development-parts-and-coding-agent-handoff) · [Part 9 handoff](../Part-09/HANDOFF.md)
+native AMD evidence remains a release requirement.
+[Roadmap](../../SEASIDE_SPEC.md#14-ten-development-parts-and-acceptance-checks) · [Part 9 handoff](../Part-09/HANDOFF.md)
 
 ## Delivery steps
 
@@ -13,7 +13,7 @@ native Framework Desktop evidence remains a release requirement.
 | 10A. Build the Arch package | Add a `PKGBUILD` around the existing Meson/Ninja release build. Audit every installed file and directly required command, library and service. Separate runtime requirements from build, check and optional tools. | An unprivileged clean Arch chroot builds the package from the candidate source. Inspect the package manifest, dependencies, paths and licences. Install with pacman into a clean runtime environment and verify required files and commands resolve there. |
 | 10B. Verify the installed session | Run the packaged binaries from a logged-in foreground TTY. Exercise generated defaults, ordinary desktop use, strict service preflight, actual portal capture and failure recovery. | The installed binary starts with package-owned defaults, launches `foot` on demand, survives a VT round trip and returns to the same TTY on exit. Induced preflight failure returns a useful error to that TTY. A real chooser and receiver verify installed capture paths. |
 | 10C. Extend the regression and stability harness | Add a requirement-tagged `part10` package suite and an installed-package leg for the existing Arch VM runner. Run the full Meson harness, code-quality checks, sanitizers and bounded repeat scenarios. | Reports include exact source and package IDs, commands, test outcomes, relevant logs and visual evidence, and cleanup observations. Prior parts' suites still run through the normal harness. |
-| 10D. Qualify the native Framework Desktop | Install the candidate on native Arch and work through the carried-forward desktop checklist. Automate measurements and assertions where the native session allows them. | Record actual AMD display/input behavior, playback and capture in the intended applications, gaming, recovery, and reproducible performance measurements. Mark unavailable checks with their specific blocker. |
+| 10D. Qualify native Arch with AMD graphics | Install the candidate on native Arch and work through the carried-forward desktop checklist. Automate measurements and assertions where the native session allows them. | Record actual AMD display/input behavior, playback and capture in the intended applications, gaming, recovery, and reproducible performance measurements. Mark unavailable checks with their specific blocker. |
 | 10E. Make the README and documentation usable | Review the whole public documentation tree, organize it around reader tasks, and audit what belongs in Git, release assets, and local test output. | A clean-checkout reader can find and follow the install, use, troubleshoot and contribute paths. Links, documented commands, and tracked/ignored examples are checked. |
 | 10F. Document the candidate and close release gates | Reconcile actual results against the v1 gates. Record decisions, supported environments and evidence in `HANDOFF.md`, and prepare release notes matched to the package. | Report package readiness and release qualification using observed evidence. Required failures or unavailable native evidence keep v1 release qualification open. |
 
@@ -54,11 +54,8 @@ native Framework Desktop evidence remains a release requirement.
   parser, service and IPC cases under ASan/UBSan. Keep sanitizer builds
   separate from optimized performance runs.
 - Use a clean chroot for the build and a disposable VM snapshot or dedicated
-  package-test guest for package installation. Use the dedicated Arch
-  VirtualBox console and the existing Council runner workflow for the real
-  foreground TTY trial. Verify an idle guest shell by screenshot before
-  sending targeted VirtualBox input. Keep host focus, the owner's normal
-  checkout, and guest config and state intact.
+  package-test guest for installation. Run the foreground TTY trial with a
+  test account and isolated config and state.
 - Exercise repeated packaged startup and shutdown, VT return with live
   clients, one controlled mandatory-service failure at startup, and
   post-ready service interruption with a fresh monitor and chosen-window
@@ -71,10 +68,8 @@ native Framework Desktop evidence remains a release requirement.
 - Preserve `pass`, `fail`, `skip` and `blocked` results with the requirement,
   actual environment and a concrete reason for each gap. Make the test
   duration or cycle count explicit for each stability scenario and retain
-  the machine-readable and human-readable reports. Once the tested changes
-  are ready for owner testing, push the verified commits, fast-forward the
-  VM's usual checkout, rebuild `build/seaside`, and verify its exact revision
-  and TTY startup through the Council runner.
+  the machine-readable and human-readable reports. Match the published
+  acceptance report to the tested revision and package.
   [Harness contract](../../SEASIDE_SPEC.md#122b-incremental-test-harness-and-minimum-human-involvement)
 
 ## README, navigation, and what to share
@@ -114,7 +109,7 @@ native Framework Desktop evidence remains a release requirement.
 
 ## Native evidence and release decision
 
-- Complete the carried-forward Parts 7–9 checks on the Framework Desktop.
+- Complete the carried-forward Parts 7–9 checks on native Arch with AMD graphics.
   Verify monitor and chosen-window sharing in actual OBS and Discord,
   desktop audio and microphone routing, physical media/Fn keys, Steam/Proton,
   hardware cursors, DMA-BUF and explicit sync, direct scanout, VRR/tearing,
@@ -126,7 +121,7 @@ native Framework Desktop evidence remains a release requirement.
   settings and app versions. Physical input-to-photon claims require external
   measurement.
 - Publish an accurate install/support guide and a gate-by-gate handoff.
-  Continue packaging and guest verification while owner-deferred native
+  Continue packaging and guest verification while native
   testing is pending. A passing guest package can be handed off for testing.
   Declare v1 release-qualified only when the required checks pass in their
   specified environments. Isolated selected-application audio remains scoped

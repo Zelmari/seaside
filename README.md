@@ -6,7 +6,7 @@ configuration, and the `seasidectl` command-line client. Dwindle is the default
 tiling layout. Scrolling columns are also available. You can add your own
 Wayland panel or keep the default empty desktop.
 
-Seaside is in development. The dedicated Arch VirtualBox guest has verified
+Seaside is in development. An Arch VirtualBox guest has verified
 TTY startup, window management, virtual display power, and real portal capture.
 Native AMD display, gaming, and application compatibility checks are still
 open. [Verification and support status](Specification/PUBLIC_DOCUMENTATION.md)

@@ -103,23 +103,13 @@ The final implementation passed these checks in Arch WSL2:
 | Earlier real-client/probe regressions | Three headless lifecycle rounds and six DRM probe contract cases retained |
 | Code and dependency evidence | Formatting/static analysis and independent GoogleTest discovery passed; baseline collection reported no errors and recorded 56 supporting API/library artifacts |
 
-Final full reports: `20261120T142054Z-c7c4e35d` (normal) and
-`20261120T142054Z-8589a042` (ASan/UBSan), under ignored `test-results/`.
 The initial implementation is committed as `3de2b18`; subsequent fixes are
 `964577b` (snapshot/worker lifetime) and `937562c` (harness/process cleanup).
-The earlier pre-review reports remain available as
-`20261120T135108Z-cca9ed02` and `20261120T135109Z-b1b7b0d8`.
 
 GCC coverage was inspected using `-Db_coverage=true` and native `gcov` JSON
 output to identify untested parser error propagation and graph-rejection cases;
 those cases were added as targeted regressions. Coverage is diagnostic evidence,
 not a claim of exhaustive correctness or a substitute for behavior assertions.
-
-The requested external static review was completed through
-`agy --model gemini-4-neon-high --effort high`, using fixed source/requirements
-packets. Its first attempt could not read files because headless command
-permission was denied; direct packets required no tool access or CLI permission
-changes. This was static inspection, separate from the automated test evidence.
 
 Confirmed findings were fixed and regression-tested: overlapping snapshot writes
 now serialize; failed admission does not cancel an older accepted save; callback
@@ -132,11 +122,6 @@ Harness fixes cover alternate filter/output environments, contradictory counts
 and exit statuses, global failure propagation, threaded descendants and safe
 process signaling. Linux pidfds pin live process identities and are retired
 as processes finish, avoiding both PID-reuse signaling and descriptor buildup.
-
-Follow-up runtime and harness responses reported **no confirmed remaining
-P0/P1/P2 findings in the reviewed code**. Prompts, source hashes and responses
-are retained under ignored `test-results/part2-review/`; this is scoped review
-evidence, not a guarantee that no defects remain.
 
 The first full integrated runs timed out at the previous 180-second command
 limit during serial static analysis. Runtime C++ cases had passed. Analysis now

@@ -35,8 +35,8 @@ service activation stay pending rather than receiving fake successful results.
 
 ## Stop and test the VM
 
-Before building further on the graphical session, choose the Windows-hosted
-Arch VM and run the existing `seaside-probe-drm` there. Record its DRM/output/
+Before building further on the graphical session, run the existing
+`seaside-probe-drm` in an Arch guest. Record its DRM/output/
 cursor capabilities and exact environment, including explicit failures/skips.
 Then qualify the real TTY/backend, renderer/output/input and one on-demand
 `foot` window, together with strict asynchronous service activation and clean

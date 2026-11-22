@@ -15,7 +15,7 @@ from `WAYLAND_DISPLAY` in the running session.
 ## Manual checks in the Arch VM
 
 At the VirtualBox guest's logged-in TTY, run
-`WLR_RENDERER=pixman ./build/seaside` from `~/Projects/seaside`.
+`WLR_RENDERER=pixman ./build/seaside` from the test checkout.
 To make temporary edits away from the normal config, launch with separate XDG
 config and state directories. Open `foot` with `Super+Return`, then edit the
 generated `$XDG_CONFIG_HOME/seaside/config.toml` from there.
@@ -40,10 +40,7 @@ WLR_RENDERER=pixman XDG_CONFIG_HOME="$trial/config" XDG_STATE_HOME="$trial/state
 
 - Run `tools/run-tests --suite part6` for the reload, appearance, pointer
   geometry, attention, protocol, and CLI fixtures.
-- Confirm an idle TTY in the background screenshot, then run
-  `python3 tests/session/part6_vm.py --console-ready` for the isolated Arch VM
-  trial. It uses an exact Git bundle and temporary config, checks a real TTY,
-  and retains the reports and captures in the Council VM evidence directory.
+
 
 ## Evidence from 2026-11-21
 
@@ -57,8 +54,7 @@ WLR_RENDERER=pixman XDG_CONFIG_HOME="$trial/config" XDG_STATE_HOME="$trial/state
   active mode and snapshot. A valid edit moved the output to `[64, 32]` while
   retaining its mode and cursor. It also verified Super+Return removal,
   Super+F2 remapping, IPC event watermarks, and the requested per-monitor mode
-  after restart. The guest report and captures are under
-  `test-results/vm-5e3b0c5ce6fc` in the usual guest checkout.
+  after restart.
 - The host ASan/UBSan run passed all 13 Part 4–6 Meson tests. The VM trial used
   Arch Linux `7.3.5-arch1-1`, Pixman, nlohmann/json `3.12.0`, PangoCairo
   `1.58.2`, libpng `1.6.59`, TurboJPEG `3.2.1`, and libwebp `1.6.0`. The VM
@@ -79,8 +75,7 @@ of two output commits and checked rollback and snapshot preservation. They
 also exercised the rollback failure path, queried output and workspace
 state over a Unix socket across loss and return of the last headless output,
 and verified a TOML binding reload canceled an active drag. All 15 Part 4–6
-Meson checks passed under ASan/UBSan on the host. The expanded guest reports
-are in `test-results/vm-e22c5125dcd4`.
+Meson checks passed under ASan/UBSan on the host.
 
 ## Remaining qualification
 

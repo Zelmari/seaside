@@ -53,12 +53,6 @@ chooser_cmd=wofi -d -n --no-custom-entry
 
 - Run `tools/run-tests --suite part7` for the satellite, seat, and capture
   cases. Run the Part 3 suite for the original session and capture checks.
-- From an idle TTY in the dedicated guest, run
-  `python3 tests/session/part7_vm.py --console-ready` from the host checkout.
-  The runner builds an exact bundle in an isolated guest checkout, uses its
-  own config and state, and records its evidence under the Council VM state
-  directory. Use `--pkg-config-path` for staged build dependencies and
-  `--runtime-prefix` or `--recorder-prefix` for extracted guest runtime packages.
 - Use `tools/run-tests --jobs 2` to cap build and test concurrency. The guest
   trial samples Seaside's resident memory and file descriptors during its real
   TTY checks. It retains intermediate results if a later step is interrupted.
@@ -91,20 +85,19 @@ The guest used kernel `7.3.5-arch1-1`, wlroots `0.20.2`, Wayland protocols
 `1.50`, Pixman, portal `1.22.1`, xdpw `0.8.4`, PipeWire `1.6.11`, and
 WirePlumber `0.5.19`. The user-local signed packages supplied satellite
 `0.8.3`, Xwayland `24.1.15`, Wofi `1.5.3`, `wf-recorder` `0.6.0`, and
-FFmpeg `9.1`. Reports are in `test-results/vm-932e00cac307` in the usual
-guest checkout and in Council VM evidence run `20261121T203557Z-932e00ca`.
+FFmpeg `9.1`.
 
 The WSL2 ASan/UBSan run used `tools/run-tests --jobs 2 --suite part7 --suite
 part3`. It passed 15 checks and 88 GoogleTest cases with leak detection
 enabled. Both installed-portal checks were skipped on that host and passed
-in the Arch VM. The host sanitizer report is `20261121T204126Z-4a99f18b`.
+in the Arch VM.
 
 The normal WSL2 run used `tools/run-tests --jobs 2 --timeout 440` and passed
 36 checks and 246 GoogleTest cases. The two portal checks and passive DRM
 probe were skipped. The aggregate code-quality test reached its 240-second
 limit after formatting and most static checks completed. Running clang-tidy
 on its 10 remaining translation units with the same compilation database
-passed. The normal report is `20261121T204203Z-dc54b3d5`.
+passed.
 
 ## Memory observation
 

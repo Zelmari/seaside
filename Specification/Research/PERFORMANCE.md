@@ -2,7 +2,7 @@
 
 Updated: 2026-11-20
 
-These notes preserve possible future optimizations requested by the owner.
+These notes describe candidates for performance investigation.
 The [design](../SEASIDE_SPEC.md), especially §§2, 6, 7, 12 and 14, remains the
 product contract. Each item below is an unmeasured investigation candidate.
 It is not a promise of lower latency or a request for additional functionality.
@@ -31,7 +31,7 @@ input-to-screen response. No comparative latency results are available yet.
 
 ## Measurements needed first
 
-Use native Arch on the target Framework Desktop/AMD hardware for graphics and
+Use native Arch on physical AMD graphics hardware for graphics and
 latency conclusions. Headless/VM cases remain useful for functional regression
 tests and controlled failure cases.
 
@@ -77,7 +77,7 @@ remaining entries as the corresponding modules exist and profiles justify it.
 | P10 | **Layout, scene updates and allocations** | Profile layout/focus/workspace operations with representative window counts. Consider fewer redundant scene updates, bounded caching or allocation reduction only where measured. Verify existing geometry, focus/lifetime invariants, config reload and client-observed events; do not introduce different layout policies. |
 | P11 | **IPC and diagnostic overhead** | Test slow subscribers, output floods and temporary tracing under load. Measure event-loop delay and allocation/serialization costs. Preserve bounded queues, accurate overflow reporting and opt-in traces; performance work must not add continuous monitoring. |
 | P12 | **Compiler optimization and dependency revisions** | Compare supported release optimization levels, link-time optimization or representative profile-guided optimization after identifying CPU costs. Record flags and keep the supported CPU baseline. Separately compare kernel/Mesa/wlroots revisions with reproducible before/after results and regression tests. No compiler or dependency change is selected by this entry. |
-| P13 | **More specialized rendering infrastructure** | Revisit a targeted upstream fix or custom rendering component only if profiles identify a limitation that the selected wlroots APIs cannot adequately address. Estimate maintenance and compatibility costs alongside any demonstrated gain. Replacing the scene graph, renderer or backend is a new architecture decision for the owner; it is not an automatic next optimization. |
+| P13 | **More specialized rendering infrastructure** | Revisit a targeted upstream fix or custom rendering component only if profiles identify a limitation that the selected wlroots APIs cannot adequately address. Estimate maintenance and compatibility costs alongside any demonstrated gain. Replacing the scene graph, renderer or backend requires a separate architecture decision. |
 
 ## Recording a result
 
@@ -94,7 +94,7 @@ internal fixes that preserve the contract follow the normal development rules.
 
 ### VirtualBox terminal stalls
 
-During the Part 3 VM trial at `ae05938`, the owner reported intermittent
+During the Part 3 VM trial at `ae05938`, a tester observed intermittent
 pauses of about half a second while typing in `foot`. The entered characters
 then appeared together. The Arch VirtualBox guest used `vmwgfx`, Pixman and
 a 1280 × 839 mode near 60 Hz. The duration is a user estimate. The cursor and

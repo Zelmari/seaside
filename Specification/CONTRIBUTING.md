@@ -92,20 +92,25 @@ build directory it is run against. Describe any missing build inputs.
 
 Install the package in a clean or disposable Arch environment to verify
 package ownership and runtime dependencies independently of the build.
-The maintainer's VirtualBox console runner requires the Council test setup,
-an idle foreground guest shell on TTY 1, and a `.pkg.tar.zst` archive built
-from the checkout's exact Git `HEAD`. Inspect the idle console before invoking
-the runner. Use `--disposable` for the install, reinstall and removal checks
-on a disposable guest with noninteractive `sudo` for pacman. Use
-`--preinstalled` to verify the matching archive already installed in the
-test guest. `--pkg-config-path` only affects guest fixture builds.
+Copy the archive into that environment and set `package` to its path. Compare
+the first command’s digest with the published SHA-256 checksum before running
+the installation commands.
 
 ```sh
-python3 tests/session/part10_vm.py --vm "$vm" --console-ready --disposable --package "$package"
+sha256sum "$package"
+sudo pacman -U "$package"
+pacman -Qk seaside
+pacman -Qoq /usr/bin/seaside /usr/bin/seasidectl
 ```
 
-Set `vm` to the disposable guest's name and `package` to the absolute archive
-path. Keep the guest reports with the candidate's other evidence.
+Use a test account on the guest's logged-in local console and follow the
+[user guide](USER_GUIDE.md#start-and-exit). Verify first launch, `foot`,
+return to the same terminal across a VT switch, and a clean exit. Use the
+[sharing steps](USER_GUIDE.md#use-applications-and-sharing) to exercise the
+portal. For package lifecycle tests, record the generated config's checksum
+and compare it after reinstall and removal in the disposable environment.
+Record the exact package revision, guest driver and renderer with the results.
+The test plan covers further acceptance cases.
 [Part 10 test plan](Parts/Part-10/PLAN.md#harness-and-arch-vm-acceptance) · [Native desktop checklist](Research/NATIVE_ARCH_CHECKLIST.md)
 
 ## Share changes and evidence
@@ -116,7 +121,7 @@ practical. Use a short Conventional Commit subject such as
 
 Explain what the change fixes, how to reproduce or verify it, and what
 remains open. Include the revision, package version when installed, exact
-commands, relevant test IDs and results, and the versions of the dependencies
+commands, relevant test case names and results, and the versions of the dependencies
 or apps involved. For display issues also include the output mode, kernel,
 renderer, backend, and GPU. Use a short local trace only for a relevant
 problem. [Troubleshooting and trace export](USER_GUIDE.md#troubleshoot)
@@ -125,12 +130,13 @@ problem. [Troubleshooting and trace export](USER_GUIDE.md#troubleshoot)
 |---|---|
 | Git | Source, tests and intentional fixtures, the package recipe, project assets, canonical configuration, guides, dated handoffs, and concise evidence with reproduction steps |
 | Package handoff or release assets | The built archive, checksum, exact source revision, and build provenance needed to check or reproduce that candidate |
-| Local or approved test storage | Build trees, generated archives, test reports and captures, working traces and logs, personal agent/editor settings, user config, state, and credentials |
+| Local or approved test storage | Build trees, generated archives, test reports and captures, working traces and logs, maintainer-specific instructions, machine inventories, user config, and state |
 
 Use `git status --short` and `git check-ignore -v PATH` to check which paths
 would be shared and which rule ignored an output. Store generated work under
 an ignored build, `test-results/`, or `test-artifacts/` directory, or use a
 temporary directory. Before sharing a log, trace or screenshot, inspect it
-and keep the excerpt relevant to the issue. Remove private paths, tokens,
-user or device identifiers, and unrelated desktop content where appropriate.
+and keep the excerpt relevant to the issue. Remove tokens,
+user or device identifiers, machine-specific paths, and unrelated desktop
+content. Keep credentials out of documentation and shared test evidence.
 Keep reusable anonymized inputs as intentional test fixtures.

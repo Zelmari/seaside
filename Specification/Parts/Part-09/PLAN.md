@@ -86,7 +86,7 @@ An empty autostart list still starts a complete Seaside session.
   failures for fast coverage. Retain real protocol events and pixel samples
   where they can establish the result. Record test and code-quality outcomes
   and any deadline or environment blocker.
-- Extend the Part 8 bundle-based scenario on `Arch Seaside Testing`. Build the
+- Extend the Part 8 bundle-based scenario in an Arch guest. Build the
   exact revision in an isolated guest checkout with private config and state.
   Verify the real TTY, virtual hardware cursor, shell-less startup, a test
   panel and fullscreen restoration, idle/wake, trace export, and external
@@ -94,16 +94,8 @@ An empty autostart list still starts a complete Seaside session.
   for the real-DRM trial. Exercise VT return and both clean and forced-failure
   exit. Try guest suspend/resume only where the runner has a reliable targeted
   wake path. Record actual renderer and backend, using Pixman on the current
-  guest configuration. [Part 8 VM commands](../Part-08/HANDOFF.md#automated-checks)
-- Check VM status and inspect a console screenshot for an idle logged-in
-  foreground shell on TTY 1 before sending input. Use targeted VirtualBox
-  controls so host window focus stays intact. Save guest results, logs, trace
-  artifacts and display evidence. Mark each check as pass, fail, skip or
-  blocked with the specific reason. Keep physical AMD display sleep/wake,
+  guest configuration. [Part 8 automated checks](../Part-08/HANDOFF.md#automated-checks)
+- Save guest results, logs, trace artifacts and display evidence. Mark each
+  check as pass, fail, skip or blocked with the specific reason. Keep physical AMD display sleep/wake,
   resume and device changes in the native checklist when still pending, along
   with the existing Parts 7 and 8 checks. [Native Arch checklist](../../Research/NATIVE_ARCH_CHECKLIST.md)
-- When the implementation is ready for owner testing, push the verified
-  revision to `origin/main`, fast-forward the usual `~/Projects/seaside`
-  guest checkout, rebuild `build/seaside`, and verify the revision and TTY
-  launch through the Council runner. Preserve the owner's config and local
-  changes. Record the tested revision and any blockers in the handoff.

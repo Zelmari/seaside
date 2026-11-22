@@ -48,10 +48,10 @@ The Part 4 fixtures run with `tools/run-tests --suite part4`. A full
 The Arch WSL2 build used GCC 16.2.1, wlroots 0.20.2, Wayland 1.26.0,
 wayland-protocols 1.50, and GoogleTest 1.18.0.
 
-| Command | Result | Report directory under `test-results/` |
-|---|---|---|
-| `tools/run-tests --build-dir build-part4-clean --timeout 330` | 22 passed, including formatting and static analysis. All 184 GoogleTest cases passed. The real portal and DRM probes were skipped in WSL2. | `20261121T020938Z-d6b3d6b9` |
-| `ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 tools/run-tests --build-dir build-asan --suite unit --suite integration --timeout 330` | 20 passed. All 184 GoogleTest cases passed with no sanitizer findings. The real portal test was skipped in WSL2. | `20261121T021028Z-c2fab361` |
+| Command | Result |
+|---|---|
+| `tools/run-tests --build-dir build-part4-clean --timeout 330` | 22 passed, including formatting and static analysis. All 184 GoogleTest cases passed. The real portal and DRM probes were skipped in WSL2. |
+| `ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 tools/run-tests --build-dir build-asan --suite unit --suite integration --timeout 330` | 20 passed. All 184 GoogleTest cases passed with no sanitizer findings. The real portal test was skipped in WSL2. |
 
 Earlier local runs identified static-analysis issues in DRM output cleanup and
 coordinate conversions. The final normal run includes the corrections.
@@ -81,11 +81,7 @@ the first guest analyzer run encountered kernel soft lockups.
   failure reported `missing(-112)` and returned with status 1.
 
 The earlier TTY run exposed the Shift+digit shortcut mismatch, which is now
-covered by the keyboard fixture and the final guest trial. The VM controls
-targeted the guest directly. The runner artifacts, including `guest.json`,
-`summary.txt`, input and VT evidence, and session logs, are under
-`test-results/part4-vm/20261121T020951Z-6745fa1a/`. The guest retains its own
-reports under `~/Projects/seaside/test-results/vm-6745fa1aa421/`.
+covered by the keyboard fixture and the final guest trial.
 
 Multi-output migration and zero-output survival are verified with headless
 outputs. The VM exposed one usable connector. Physical multi-monitor hotplug
