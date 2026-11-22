@@ -29,6 +29,72 @@ WindowId open(WindowManager &windows) {
     return *id;
 }
 
+TEST(Part5WindowManager, InitialTilePreviewLeavesExistingLayoutAndFocusUntouched) {
+    WindowManager windows(layout_config());
+    ASSERT_TRUE(windows.add_output("main", output, output));
+    const auto left = open(windows);
+    const auto pending = windows.create_window();
+    ASSERT_TRUE(pending);
+    EXPECT_FALSE(windows.initial_tile_geometry(*pending));
+    ASSERT_TRUE(windows.set_size_limits(*pending, 650, 0, 0, 0));
+    ASSERT_TRUE(windows.initialize_window(*pending));
+    const auto initial = windows.initial_tile_geometry(*pending);
+    ASSERT_TRUE(initial);
+    EXPECT_EQ(*initial, (WindowRect{350, 0, 650, 600}));
+    EXPECT_EQ(windows.view(left).geometry, output);
+    EXPECT_EQ(windows.focused_window(), left);
+    EXPECT_FALSE(windows.view(*pending).visible);
+
+    ASSERT_TRUE(windows.map_window(*pending, *initial));
+    EXPECT_EQ(windows.view(*pending).geometry, *initial);
+    EXPECT_EQ(windows.focused_window(), pending);
+    EXPECT_FALSE(windows.initial_tile_geometry(*pending));
+}
+
+TEST(Part5WindowManager, InitialTilePreviewRequiresTilingAndAnOutput) {
+    WindowManager windows(layout_config(Layout::scrolling));
+    const auto pending = windows.create_window();
+    ASSERT_TRUE(pending);
+    ASSERT_TRUE(windows.initialize_window(*pending));
+    EXPECT_FALSE(windows.initial_tile_geometry(*pending));
+    ASSERT_TRUE(windows.add_output("main", output, output));
+    const auto initial = windows.initial_tile_geometry(*pending);
+    ASSERT_TRUE(initial);
+    EXPECT_EQ(*initial, (WindowRect{0, 0, 500, 600}));
+    const auto parent = open(windows);
+    const auto dialog = windows.create_window(parent);
+    ASSERT_TRUE(dialog);
+    ASSERT_TRUE(windows.initialize_window(*dialog));
+    EXPECT_FALSE(windows.initial_tile_geometry(*dialog));
+
+    auto floating = layout_config(Layout::scrolling);
+    floating.window.tiling = false;
+    windows.apply_layout_config(floating);
+    EXPECT_FALSE(windows.initial_tile_geometry(*pending));
+}
+
+TEST(Part5WindowManager, InitialTiledBufferDoesNotSetAFloatingSize) {
+    WindowManager windows(layout_config());
+    ASSERT_TRUE(windows.add_output("main", output, output));
+    const auto id = windows.create_window();
+    ASSERT_TRUE(id);
+    ASSERT_TRUE(windows.initialize_window(*id));
+    ASSERT_EQ(windows.initial_tile_geometry(*id), output);
+    ASSERT_TRUE(windows.map_window(*id, output, false));
+    ASSERT_TRUE(windows.toggle_tiling(*id));
+    EXPECT_EQ(windows.view(*id).geometry, (WindowRect{500, 300, 0, 0}));
+
+    ASSERT_TRUE(windows.commit_geometry(*id, client));
+    const WindowRect floating{340, 220, client.width, client.height};
+    EXPECT_EQ(windows.view(*id).geometry, floating);
+
+    ASSERT_TRUE(windows.toggle_tiling(*id));
+    ASSERT_TRUE(windows.unmap_window(*id));
+    ASSERT_TRUE(windows.map_window(*id, output, false));
+    ASSERT_TRUE(windows.toggle_tiling(*id));
+    EXPECT_EQ(windows.view(*id).geometry, floating);
+}
+
 TEST(Part5WindowManager, TileRestoresFloatingGeometryAndSpecialStatePreservesMembership) {
     WindowManager windows(layout_config());
     ASSERT_TRUE(windows.add_output("main", output, output));

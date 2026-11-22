@@ -45,7 +45,8 @@ class WindowManager final {
 
     std::optional<WindowId> create_window(std::optional<WindowId> parent = {});
     bool initialize_window(WindowId id);
-    bool map_window(WindowId id, WindowRect committed);
+    std::optional<WindowRect> initial_tile_geometry(WindowId id) const;
+    bool map_window(WindowId id, WindowRect committed, bool ordinary_buffer = true);
     bool unmap_window(WindowId id);
     bool destroy_window(WindowId id);
     bool set_parent(WindowId id, std::optional<WindowId> parent);

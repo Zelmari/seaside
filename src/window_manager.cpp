@@ -539,6 +539,25 @@ bool WindowManager::initialize_window(WindowId id) {
     return state_.initialize_window(id).has_value();
 }
 
+std::optional<WindowRect> WindowManager::initial_tile_geometry(WindowId id) const {
+    const auto *entry = state_.window(id);
+    if (!entry || !entry->initialized || entry->mapped || !window_output(id)) {
+        return {};
+    }
+    const auto &window = windows_.at(id);
+    if (!is_tiled(id, window) || window.maximized || window.fullscreen) {
+        return {};
+    }
+    // Preview the insertion without shrinking mapped tiles or changing focus.
+    const auto workspace = entry->home_workspace;
+    auto layout = workspaces_.at(workspace).layout;
+    if (!layout.add({id, entry->initial_mapping_seq, window.limits}, layout_focus(workspace))) {
+        return {};
+    }
+    const auto geometry = layout.geometry(id);
+    return geometry && geometry->width > 0 && geometry->height > 0 ? geometry : std::nullopt;
+}
+
 void WindowManager::position_window(WindowId id, Window &window) {
     auto output = window_output(id);
     if (!output || window.positioned || window.ordinary.width <= 0 || window.ordinary.height <= 0) {
@@ -555,13 +574,14 @@ void WindowManager::position_window(WindowId id, Window &window) {
     window.positioned = true;
 }
 
-bool WindowManager::map_window(WindowId id, WindowRect committed) {
+bool WindowManager::map_window(WindowId id, WindowRect committed, bool ordinary_buffer) {
     if (!state_.map_window(id)) {
         return false;
     }
     auto &window = windows_.at(id);
     window.stacking = ++sequence_;
-    if (!window.fullscreen && !window.maximized &&
+    // A buffer drawn for the initial tile does not establish a floating size.
+    if (ordinary_buffer && !window.fullscreen && !window.maximized &&
         (!is_tiled(id, window) || window.ordinary.width == 0 || window.ordinary.height == 0)) {
         commit_geometry(id, committed);
     }
