@@ -30,6 +30,9 @@ class PortalActivation final {
     std::expected<void, ServiceReport> recover(SessionBus &bus, Completion completion,
                                                std::chrono::milliseconds timeout) noexcept;
 
+    // Abandon work on a disconnected bus, preserving ownership of the private units.
+    void replace_bus(SessionBus &replacement) noexcept;
+
     // Call outside dispatch, after cancelling other portal requests.
     bool stop() noexcept;
 

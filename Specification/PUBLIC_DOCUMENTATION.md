@@ -24,9 +24,9 @@ qualification.
 
 The installed session provides compositing, layouts, local control, Wayland
 layer-shell support, and integrations for external clients. An optional panel
-or launcher can run separately. Seaside validates the required login services
-at startup and returns to the TTY when a required service fails. The same
-session can report and recover from later portal and PipeWire failures.
+or launcher can run separately. Seaside starts checking login services when the Wayland desktop becomes usable.
+The session reports and retries portal, user bus and PipeWire failures at startup
+and during operation.
 [How to start and exit](USER_GUIDE.md#start-and-exit)
 
 ## Feature boundaries

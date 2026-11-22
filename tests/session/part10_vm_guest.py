@@ -168,7 +168,7 @@ class InstalledSession(helpers["Session"]):
         try:
             wait_for(lambda: re.search(r"^seaside READY cursor-plane=([1-9][0-9]*)$",
                                        self.log.read_text(errors="replace"), re.MULTILINE),
-                     25, "the installed session's mandatory startup gate", self.process)
+                     25, "the installed session's first usable output", self.process)
             require(Path(f"/proc/{self.process.pid}/exe").resolve() == SEASIDE,
                     "The running compositor is not the package-owned executable")
             runtime = Path(self.env["XDG_RUNTIME_DIR"])
@@ -633,18 +633,13 @@ def starts_and_failure(repo, results, env, state):
                     output.write(session.log.read_bytes())
     state["repeated_starts"] = STARTS
 
-    failure_log = results / "failure.log"
-    failure = startup(dict(env, PIPEWIRE_REMOTE="seaside-part10-missing"), failure_log)
-    try:
-        code = failure.wait(timeout=25)
-        output = failure_log.read_text(errors="replace")
-        error = re.search(r"^seaside FAIL service=pipewire reason=missing\((-\d+)\)", output, re.MULTILINE)
-        require(code == 1 and error is not None and "portal cleanup incomplete" not in output and
-                "seaside READY" not in output and standard["active"]() == "tty1" and
-                os.tcgetpgrp(0) == os.getpgrp(), "Installed strict startup did not fail cleanly to the same TTY")
-        state["forced_failure"] = {"exit": code, "line": error[0]}
-    finally:
-        stop(failure)
+    with InstalledSession(repo, results, dict(env, PIPEWIRE_REMOTE="seaside-part10-missing"),
+                          label="missing-pipewire") as session:
+        session.wait(lambda: session.ctl("status")["integrations"]["pipewire"].get("reason") == "missing",
+                     "the installed session to report missing PipeWire")
+        require(session.ctl("status")["ready"], "Missing PipeWire disabled window management")
+        session.close()
+        state["missing_pipewire"] = {"ready": True, "reported_missing": True, "clean_exit": True}
 
 
 def missing_audio_device(repo, runtime, results, state):

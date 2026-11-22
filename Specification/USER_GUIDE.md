@@ -71,11 +71,13 @@ In a VirtualBox guest with 3D acceleration disabled, run
 `WLR_RENDERER=pixman seaside` from the TTY. Pixman renders the desktop on the
 CPU. The virtual display still needs a usable DRM cursor plane.
 
-After required session services pass startup checks, expect a black desktop
-with no windows. A panel is optional. Press **Super+Enter** to open `foot`.
+At startup, expect a black desktop with no windows. A panel is optional. Press **Super+Enter** to open `foot`.
 In that terminal, run `seasidectl status` to confirm the session is ready or
 `seasidectl exit` to return to the same logged-in TTY. Close or save your work
-before ending the desktop session.
+before ending the desktop session. Seaside checks PipeWire, the user service
+manager and portals in the background. The `integrations` field in
+`seasidectl status` shows which are checking, available or unavailable.
+You can use windows and workspaces while Seaside retries an unavailable service.
 
 ## Configure Seaside
 
@@ -228,7 +230,7 @@ local IPC socket. [JSONL protocol](../src/ipc_protocol.cpp)
 | `seaside FAIL: start on the active Linux console as a foreground job` | Log in on the currently visible virtual console and run `seaside` there as your normal user. `tty` should print a numbered `/dev/ttyN`. |
 | The login has no standard Arch user runtime directory | Check that the normal systemd-managed login set `XDG_RUNTIME_DIR` to `/run/user/` followed by your user ID. Sign into a fresh local TTY if the login environment is stale. |
 | `seaside` starts an older version | Run `type -a seaside seasidectl` to check for executables earlier on `PATH`, such as a previous source install under `/usr/local/bin`. Compare `seaside --version` with `/usr/bin/seaside --version`, and check the package version with `pacman -Q seaside`. |
-| `seaside FAIL service=...` | Note the named service and reason. Use `systemctl --user status pipewire.socket wireplumber.service` and `journalctl --user -b` to inspect the relevant login services. If a portal name already belongs to another graphical session, exit that session normally or use another account. Seaside keeps the existing owner. |
+| A service is unavailable in `seasidectl status` | Note the named service and reason. Use `systemctl --user status pipewire.socket wireplumber.service` and `journalctl --user -b` to inspect the relevant login services. If a portal name already belongs to another graphical session, exit that session normally or use another account. Seaside keeps the existing owner. |
 | `seaside FAIL stage=seat-drm-renderer` in VirtualBox with 3D disabled | Run `WLR_RENDERER=pixman seaside` from the logged-in console. |
 | The console reports a seat, DRM, or hardware-cursor error | Check the `seaside FAIL` line and earlier graphics messages. Seaside requires placement on a hardware cursor plane. On a running output, inspect `seasidectl outputs` and `seasidectl debug render`. |
 | The screen is black after launch | Press **Super+Enter**. A working terminal on a black background is the default empty desktop. If the screen remains dark, press a key or move the pointer to wake it and check the console log on exit. |

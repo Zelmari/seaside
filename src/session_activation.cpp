@@ -643,6 +643,15 @@ PortalActivation::recover(SessionBus &bus, Completion completion,
     return {};
 }
 
+void PortalActivation::replace_bus(SessionBus &replacement) noexcept {
+    impl_->remove_timer();
+    impl_->completion = {};
+    if (auto id = std::exchange(impl_->pending, std::nullopt)) {
+        (void)impl_->bus->cancel(*id);
+    }
+    impl_->bus = &replacement;
+}
+
 bool PortalActivation::stop() noexcept {
     const auto impl = impl_;
     return impl->stop();

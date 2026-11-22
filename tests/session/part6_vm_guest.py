@@ -622,7 +622,7 @@ def run_preflight(repo, directory, result_dir, state):
     marker = directory / "autostart.txt"
     replace(config, with_autostart(baseline_config, marker))
     # Give the production PipeWire client a reachable test socket with no
-    # replies. The session remains in preflight without touching user services.
+    # replies. Ordinary actions and autostart must be usable during the probe.
     silent_path = directory / "silent-pipewire"
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as silent:
         silent.bind(str(silent_path))
@@ -633,18 +633,16 @@ def run_preflight(repo, directory, result_dir, state):
             connection, _ = silent.accept()
             with connection, Events(session):
                 status = session.ctl("status")["result"]
-                require(status["phase"] == "starting" and not status["ready"],
-                        "A silent PipeWire peer advanced the readiness gate")
+                require(status["ready"] and status["integrations"]["pipewire"]["state"] == "checking",
+                        "The Wayland session did not become usable during its PipeWire probe")
                 mutation = session.request("action.workspace_select", {"workspace_id": 41})
-                require(not mutation["ok"] and mutation["error"]["code"] == "not_ready",
-                        "IPC accepted a mutation during preflight")
-                workspaces = session.ctl("workspaces")["result"]["workspaces"]
-                require(all(workspace["id"] != 41 for workspace in workspaces),
-                        "A rejected preflight action changed workspace state")
+                require(mutation["ok"] and session.ctl("focus")["result"]["workspace_id"] == 41,
+                        "Workspace selection did not work during the silent PipeWire probe")
+                session.wait(marker.is_file, "autostart during the PipeWire probe")
                 session.exit()
-                require(not marker.exists(), "Exiting during preflight ran an autostart command")
-                state["preflight_ipc"] = {"queries": True, "subscription": True,
-                                          "mutation_error": "not_ready", "clean_exit": True}
+                require(len(marker.read_text().splitlines()) == 1, "Autostart did not run exactly once")
+                state["preflight_ipc"] = {"queries": True, "subscription": True, "actions": True,
+                                          "clean_exit": True}
 
 
 def trial():

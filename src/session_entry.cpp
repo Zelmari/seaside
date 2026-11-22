@@ -53,9 +53,7 @@ using seaside::ServiceReport;
 using seaside::StartupService;
 
 constexpr auto appearance_timeout = 5s;
-constexpr auto preflight_timeout = 30s;
 constexpr auto probe_timeout = 10s;
-constexpr auto recovery_timeout = 4s;
 
 struct RecoveryRetry {
     void request() noexcept {
@@ -212,7 +210,6 @@ class Commands {
 
 struct Outcome {
     const char *failure_stage = nullptr;
-    std::optional<seaside::StartupResult> preflight_failure;
     bool cleanup_failed = false;
 };
 
@@ -408,7 +405,6 @@ class Session {
         portal_.reset();
         systemd_.reset();
         pipewire_.reset();
-        gate_.reset();
         if (activation_) {
             outcome_.cleanup_failed = !activation_->stop();
             activation_.reset();
@@ -418,7 +414,7 @@ class Session {
         commands_->reap();
         config_.reset();
         ipc_.reset();
-        if (!clean_exit_ && !ready_ && !outcome_.failure_stage && !outcome_.preflight_failure) {
+        if (!clean_exit_ && !ready_ && !outcome_.failure_stage) {
             outcome_.failure_stage = "interrupted-before-ready";
         }
         return outcome_;
@@ -625,11 +621,29 @@ class Session {
             if (const auto &diagnostic = config_->transaction().diagnostic()) {
                 last_error = seaside::ipc_diagnostic(*diagnostic);
             }
-            return control_.query(method, *config_, *trace_, paths_.user.string(),
-                                  ending   ? "stopping"
-                                  : ready_ ? "ready"
-                                           : "starting",
-                                  last_error);
+            auto result = control_.query(method, *config_, *trace_, paths_.user.string(),
+                                         ending   ? "stopping"
+                                         : ready_ ? "ready"
+                                                  : "starting",
+                                         last_error);
+            if (result && method == "query.status") {
+                auto &services = (*result)["integrations"] = IpcJson::object();
+                for (std::size_t i = 0; i < integrations_.size(); ++i) {
+                    const auto &detail = integrations_[i];
+                    auto &status =
+                        services[seaside::startup_service_name(static_cast<StartupService>(i))];
+                    if (!detail) {
+                        status = {{"state", "checking"}};
+                    } else if (detail->failure == ServiceFailure::none) {
+                        status = {{"state", "available"}};
+                    } else {
+                        status = {{"state", "unavailable"},
+                                  {"reason", seaside::service_result_name(detail->failure)},
+                                  {"native_error", detail->native_error}};
+                    }
+                }
+            }
+            return result;
         }
         if (method == "action.exit") {
             const bool changed = !ending;
@@ -795,19 +809,6 @@ class Session {
         }
     }
 
-    void startup_result(seaside::StartupResult result) noexcept {
-        if (ipc_exiting_) {
-            return;
-        }
-        if (result.phase != seaside::StartupPhase::ready) {
-            stopping_ = true;
-            outcome_.preflight_failure = result;
-            server_.terminate();
-            return;
-        }
-        preflight_passed_ = true;
-    }
-
     void mark_ready(uint32_t cursor_plane) noexcept {
         double x, y;
         if (seaside_tty_drm_cursor_position(drm_, &x, &y)) {
@@ -828,27 +829,8 @@ class Session {
         }
     }
 
-    void report(StartupService service, ServiceReport detail) noexcept {
-        if (stopping_ || ipc_exiting_) {
-            return;
-        }
-        const auto delivered = gate_->report(service, detail);
-        if (!delivered && delivered.error() != seaside::StartupError::stopped) {
-            fail("preflight-report");
-        }
-    }
-
     void report_external_fault(StartupService service, ServiceReport detail) noexcept {
         if (stopping_ || ipc_exiting_) {
-            return;
-        }
-        if (!ready_) {
-            // Another mandatory check may still be pending after this
-            // service first replied. Losing it now invalidates preflight.
-            stopping_ = true;
-            outcome_.preflight_failure =
-                seaside::StartupResult{seaside::StartupPhase::failed, service, detail};
-            server_.terminate();
             return;
         }
         mark_integration_failed(service, detail);
@@ -856,7 +838,11 @@ class Session {
     }
 
     void mark_integration_failed(StartupService service, ServiceReport detail) noexcept {
-        if (std::exchange(integration_failed_[static_cast<std::size_t>(service)], true)) {
+        auto &current = integrations_[static_cast<std::size_t>(service)];
+        const bool changed = !current || current->failure != detail.failure ||
+                             current->native_error != detail.native_error;
+        current = detail;
+        if (!changed) {
             return;
         }
         const auto name = seaside::startup_service_name(service);
@@ -870,7 +856,9 @@ class Session {
     }
 
     void mark_integration_recovered(StartupService service) noexcept {
-        if (!std::exchange(integration_failed_[static_cast<std::size_t>(service)], false)) {
+        const auto before =
+            std::exchange(integrations_[static_cast<std::size_t>(service)], ServiceReport{});
+        if (!before || before->failure == ServiceFailure::none) {
             return;
         }
         const auto name = seaside::startup_service_name(service);
@@ -898,33 +886,17 @@ class Session {
         }
     }
 
-    std::chrono::milliseconds probe_budget() const noexcept {
-        const auto remaining =
-            std::chrono::ceil<std::chrono::milliseconds>(preflight_deadline_ - Clock::now());
-        return std::min(remaining,
-                        std::chrono::duration_cast<std::chrono::milliseconds>(probe_timeout));
-    }
-
-    void start_portal_probe(bool recovery = false) noexcept {
-        const auto complete = [this, recovery](StartupService service, ServiceReport detail) {
-            if (recovery) {
-                finish_portal_recovery(service, detail);
-            } else {
-                report(service, detail);
-            }
+    void start_portal_probe() noexcept {
+        const auto complete = [this](StartupService service, ServiceReport detail) {
+            finish_portal_recovery(service, detail);
         };
-        const auto timeout = recovery ? recovery_timeout : probe_budget();
-        if (timeout <= 0ms) {
-            complete(StartupService::portal_frontend, {ServiceFailure::timeout, -ETIMEDOUT});
-            return;
-        }
         auto portal = seaside::PortalProbe::start(
             *bus_, getuid(),
             [this](pid_t pid, uid_t uid) {
                 return seaside_output_capture_client_ready(capture_.get(), pid, uid) &&
                        scene_.window_capture_client_ready(pid, uid);
             },
-            complete, timeout,
+            complete, probe_timeout,
             [this](StartupService service, ServiceReport detail) {
                 report_external_fault(service, detail);
             });
@@ -935,44 +907,72 @@ class Session {
         }
     }
 
+    void start_activation() noexcept {
+        const auto complete = [this](StartupService service, ServiceReport detail) {
+            if (stopping_ || ipc_exiting_) {
+                return;
+            }
+            if (detail.failure == ServiceFailure::none) {
+                start_portal_probe();
+            } else {
+                finish_portal_recovery(service, detail);
+            }
+        };
+        if (activation_) {
+            if (const auto result = activation_->recover(*bus_, complete, probe_timeout); !result) {
+                finish_portal_recovery(StartupService::capture_backend, result.error());
+            }
+            return;
+        }
+        auto activation = seaside::PortalActivation::start(*bus_, socket_, complete, probe_timeout);
+        if (activation) {
+            activation_ = std::move(*activation);
+        } else {
+            finish_portal_recovery(StartupService::capture_backend, activation.error());
+        }
+    }
+
     void retry_portal() noexcept {
         portal_.reset();
-        std::unique_ptr<seaside::SessionBus> retired;
-        if (bus_->last_error() != seaside::BusError::none) {
+        systemd_.reset();
+        if (!bus_ || bus_->last_error() != seaside::BusError::none) {
             auto replacement = seaside::open_login_bus(loop_, getuid());
             if (!replacement) {
                 finish_portal_recovery(StartupService::systemd_user, replacement.error());
                 return;
             }
-            systemd_.reset();
-            retired = std::exchange(bus_, std::move(*replacement));
+            if (activation_) {
+                activation_->replace_bus(**replacement);
+            }
+            bus_ = std::move(*replacement);
         }
-        const auto started = activation_->recover(
-            *bus_,
-            [this](StartupService service, ServiceReport detail) {
+        auto systemd = seaside::SystemdUserProbe::start(
+            *bus_, getuid(),
+            [this](ServiceReport detail) {
                 if (stopping_ || ipc_exiting_) {
                     return;
                 }
                 if (detail.failure == ServiceFailure::none) {
-                    start_portal_probe(true);
+                    mark_integration_recovered(StartupService::systemd_user);
+                    start_activation();
                 } else {
-                    finish_portal_recovery(service, detail);
+                    finish_portal_recovery(StartupService::systemd_user, detail);
                 }
             },
-            recovery_timeout);
-        if (!started) {
-            finish_portal_recovery(StartupService::capture_backend, started.error());
+            probe_timeout);
+        if (!systemd) {
+            finish_portal_recovery(StartupService::systemd_user, systemd.error());
+        } else {
+            systemd_ = std::move(*systemd);
         }
     }
 
-    void start_pipewire(bool recovery) noexcept {
-        const auto complete = [this, recovery](ServiceReport detail) {
+    void start_pipewire() noexcept {
+        const auto complete = [this](ServiceReport detail) {
             if (stopping_ || ipc_exiting_) {
                 return;
             }
-            if (!recovery) {
-                report(StartupService::pipewire, detail);
-            } else if (detail.failure != ServiceFailure::none) {
+            if (detail.failure != ServiceFailure::none) {
                 mark_integration_failed(StartupService::pipewire, detail);
                 pipewire_retry_.failed();
             } else {
@@ -980,13 +980,8 @@ class Session {
                 pipewire_retry_ = {};
             }
         };
-        const auto timeout = recovery ? recovery_timeout : probe_budget();
-        if (timeout <= 0ms) {
-            complete({ServiceFailure::timeout, -ETIMEDOUT});
-            return;
-        }
         auto probe = seaside::PipeWireProbe::create(
-            loop_, {.timeout = timeout},
+            loop_, {.timeout = probe_timeout},
             [complete](seaside::PipeWireResult result) {
                 complete(seaside::pipewire_service_report(result));
             },
@@ -1003,7 +998,7 @@ class Session {
     }
 
     void recover_integrations() noexcept {
-        if (bus_->last_error() != seaside::BusError::none) {
+        if (bus_ && bus_->last_error() != seaside::BusError::none) {
             constexpr ServiceReport disconnected{ServiceFailure::disconnected, -ENOTCONN};
             report_external_fault(StartupService::systemd_user, disconnected);
             report_external_fault(StartupService::portal_frontend, disconnected);
@@ -1015,66 +1010,8 @@ class Session {
         }
         if (pipewire_retry_.begin(now)) {
             pipewire_.reset();
-            start_pipewire(true);
+            start_pipewire();
         }
-    }
-
-    void start_activation() noexcept {
-        const auto timeout = probe_budget();
-        if (timeout <= 0ms) {
-            report(StartupService::capture_backend, {ServiceFailure::timeout, -ETIMEDOUT});
-            return;
-        }
-        auto activation = seaside::PortalActivation::start(
-            *bus_, socket_,
-            [this](StartupService service, ServiceReport detail) {
-                if (detail.failure == ServiceFailure::none && !stopping_ && !ipc_exiting_ &&
-                    gate_->result().phase == seaside::StartupPhase::checking) {
-                    start_portal_probe();
-                } else if (detail.failure != ServiceFailure::none) {
-                    report(service, detail);
-                }
-            },
-            timeout);
-        if (!activation) {
-            report(StartupService::capture_backend, activation.error());
-        } else {
-            activation_ = std::move(*activation);
-        }
-    }
-
-    void begin_preflight() noexcept {
-        preflight_deadline_ = Clock::now() + preflight_timeout;
-        auto gate = seaside::StartupGate::create(
-            loop_, [this](seaside::StartupResult result) { startup_result(result); },
-            preflight_timeout);
-        if (!gate) {
-            fail("preflight-gate");
-            return;
-        }
-        gate_ = std::move(*gate);
-        auto bus = seaside::open_login_bus(loop_, getuid());
-        if (!bus) {
-            report(StartupService::systemd_user, bus.error());
-            return;
-        }
-        bus_ = std::move(*bus);
-        auto systemd = seaside::SystemdUserProbe::start(
-            *bus_, getuid(),
-            [this](ServiceReport detail) {
-                report(StartupService::systemd_user, detail);
-                if (detail.failure == ServiceFailure::none && !stopping_ && !ipc_exiting_ &&
-                    gate_->result().phase == seaside::StartupPhase::checking) {
-                    start_activation();
-                }
-            },
-            probe_budget());
-        if (!systemd) {
-            report(StartupService::systemd_user, systemd.error());
-            return;
-        }
-        systemd_ = std::move(*systemd);
-        start_pipewire(false);
     }
 
     bool attach_desktop_output(const seaside::OutputConfig::Output &output,
@@ -1186,11 +1123,8 @@ class Session {
             // Wayland server can still run the same mandatory service checks.
             if (display.cursor_presented || (!has_output && !display.output_pending)) {
                 session.appearance_deadline_.reset();
-                if (!session.gate_) {
-                    session.begin_preflight();
-                } else if (session.preflight_passed_) {
-                    session.mark_ready(display.cursor_plane_id);
-                }
+                session.mark_ready(display.cursor_plane_id);
+                session.portal_retry_.due = session.pipewire_retry_.due = Clock::now();
             } else if (has_output) {
                 const auto now = Clock::now();
                 if (!session.appearance_deadline_) {
@@ -1236,15 +1170,13 @@ class Session {
     std::unique_ptr<seaside_output_capture, decltype(&seaside_output_capture_destroy)> capture_{
         nullptr, seaside_output_capture_destroy};
     std::unique_ptr<seaside::SessionBus> bus_;
-    std::unique_ptr<seaside::StartupGate> gate_;
     std::unique_ptr<seaside::SystemdUserProbe> systemd_;
     std::unique_ptr<seaside::PipeWireProbe> pipewire_;
     std::unique_ptr<seaside::PortalActivation> activation_;
     std::unique_ptr<seaside::PortalProbe> portal_;
-    std::array<bool, 4> integration_failed_{};
+    std::array<std::optional<ServiceReport>, 4> integrations_{};
     RecoveryRetry portal_retry_, pipewire_retry_;
     std::optional<Clock::time_point> appearance_deadline_;
-    Clock::time_point preflight_deadline_;
     Outcome outcome_;
     bool attaching_startup_ = true;
     bool applying_config_ = false;
@@ -1252,7 +1184,6 @@ class Session {
     bool config_error_visible_ = false;
     bool ipc_exiting_ = false;
     bool clean_exit_ = false;
-    bool preflight_passed_ = false;
     bool ready_ = false;
     bool stopping_ = false;
 };
@@ -1335,12 +1266,6 @@ int report_exit(const std::expected<Outcome, const char *> &result) noexcept {
     if (!result || result->failure_stage) {
         std::fprintf(stderr, "seaside FAIL stage=%s\n",
                      result ? result->failure_stage : result.error());
-    } else if (result->preflight_failure) {
-        const auto &failure = *result->preflight_failure;
-        std::fprintf(
-            stderr, "seaside FAIL service=%s reason=%s(%d)\n",
-            failure.service ? seaside::startup_service_name(*failure.service) : "preflight",
-            seaside::service_result_name(failure.detail.failure), failure.detail.native_error);
     } else if (!result->cleanup_failed) {
         std::fputs("seaside STOP clean\n", stderr);
         return EXIT_SUCCESS;
