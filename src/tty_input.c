@@ -301,12 +301,16 @@ static void handle_cursor_shape_request(struct wl_listener *listener, void *data
     input->callbacks.cursor_shape(input->data, wlr_cursor_shape_v1_name(event->shape));
 }
 
-static void handle_cursor_shapes_destroy(struct wl_listener *listener, void *data) {
-    (void)data;
-    struct seaside_tty_input *input = wl_container_of(listener, input, cursor_shapes_destroy);
+static void forget_cursor_shapes(struct seaside_tty_input *input) {
     wl_list_remove(&input->cursor_shapes_destroy.link);
     wl_list_remove(&input->request_cursor_shape.link);
     input->cursor_shapes = NULL;
+}
+
+static void handle_cursor_shapes_destroy(struct wl_listener *listener, void *data) {
+    (void)data;
+    struct seaside_tty_input *input = wl_container_of(listener, input, cursor_shapes_destroy);
+    forget_cursor_shapes(input);
 }
 
 void seaside_tty_input_cursor_presented(struct seaside_tty_input *input, struct wlr_output *output,
@@ -1323,7 +1327,7 @@ void seaside_tty_input_destroy(struct seaside_tty_input *input) {
             wl_list_remove(&input->relative_pointer_destroy.link);
         }
         if (input->cursor_shapes) {
-            handle_cursor_shapes_destroy(&input->cursor_shapes_destroy, NULL);
+            forget_cursor_shapes(input);
         }
         if (input->constraints) {
             wl_list_remove(&input->constraints_destroy.link);

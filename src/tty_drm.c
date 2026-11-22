@@ -881,9 +881,9 @@ static bool cursor_should_show(const struct seaside_tty_drm *drm) {
     return drm->cursor_visible && !drm->client_cursor_hidden;
 }
 
-static struct cursor_buffer *scale_cursor_buffer(struct wlr_buffer *buffer, float scale) {
-    const int width = (int)ceilf(buffer->width * scale);
-    const int height = (int)ceilf(buffer->height * scale);
+static struct cursor_buffer *scale_cursor_buffer(struct wlr_buffer *buffer, double scale) {
+    const int width = (int)ceil(buffer->width * scale);
+    const int height = (int)ceil(buffer->height * scale);
     struct cursor_buffer *image = new_cursor_buffer(width, height);
     if (!image) {
         return NULL;
@@ -916,15 +916,14 @@ static struct cursor_buffer *scale_cursor_buffer(struct wlr_buffer *buffer, floa
 
 static bool stage_cursor_buffer(struct tty_output *view, struct wlr_buffer *buffer, int hotspot_x,
                                 int hotspot_y) {
-    const float scale = view->output->scale;
-    if (!view->owner->fixture_mode && scale != 1.0f) {
+    const double scale = view->output->scale;
+    if (!view->owner->fixture_mode && scale != 1.0) {
         struct cursor_buffer *scaled = scale_cursor_buffer(buffer, scale);
         if (scaled) {
-            const bool displayed =
-                wlr_output_cursor_set_buffer(view->cursor, &scaled->base,
-                                             (int32_t)ceilf(hotspot_x * scale),
-                                             (int32_t)ceilf(hotspot_y * scale)) &&
-                has_hardware_cursor(view);
+            const bool displayed = wlr_output_cursor_set_buffer(view->cursor, &scaled->base,
+                                                                (int32_t)ceil(hotspot_x * scale),
+                                                                (int32_t)ceil(hotspot_y * scale)) &&
+                                   has_hardware_cursor(view);
             wlr_buffer_drop(&scaled->base);
             if (displayed) {
                 return true;
