@@ -38,30 +38,52 @@ parse_candidate(const std::filesystem::path &path, std::uint64_t generation,
 } // namespace
 
 LoadedConfig load_startup_config(const ConfigStore &store, const ConfigPaths &paths) {
-    auto user = store.read(paths.user, false, WriterCheck::when_available);
+    auto user = store.read(paths.user, false, WriterCheck::required);
     if (user && !*user) {
         auto created = store.publish(paths.user, default_template(), PublishMode::create_user_file);
         if (!created)
             return defaults_with(storage_diagnostic(created.error()));
-        user = store.read(paths.user, false, WriterCheck::when_available);
+        user = store.read(paths.user, false, WriterCheck::required);
     }
+    // A nonowned or lease-disabled config is still usable on first launch.
+    // When last-good exists, different unchecked bytes could be an open prefix.
+    const bool unchecked = !user && user.error().operation == StorageStep::check_writer &&
+                           user.error().error != std::errc::resource_unavailable_try_again;
+    if (unchecked)
+        user = store.read(paths.user);
+    std::optional<LoadedConfig> unverified;
     std::optional<Diagnostic> error;
-    if (!user)
+    if (!user) {
         error = storage_diagnostic(user.error());
-    else if (*user) {
+        if (user.error().operation == StorageStep::check_writer)
+            error->message = "configuration is busy; waiting for a completed save";
+    } else if (*user) {
         auto parsed = parse_config(**user, paths.user.string());
-        if (parsed)
-            return {std::move(*parsed), std::move(**user), ConfigSource::user, std::nullopt};
-        error = std::move(parsed.error());
-    } else
+        if (parsed) {
+            LoadedConfig loaded{std::move(*parsed), std::move(**user), ConfigSource::user, {}};
+            if (!unchecked)
+                return loaded;
+            unverified = std::move(loaded);
+            error =
+                Diagnostic{paths.user.string(), 0, 0, "",
+                           "cannot verify a completed save; retaining the last-good configuration"};
+        } else {
+            error = std::move(parsed.error());
+        }
+    } else {
         error = transaction_error("configuration disappeared while loading");
+    }
     auto recovery = store.read(paths.recovery, true);
     if (recovery && *recovery) {
+        if (unverified && unverified->text == **recovery)
+            return std::move(*unverified);
         auto parsed = parse_config(**recovery, paths.recovery.string());
         if (parsed)
             return {std::move(*parsed), std::move(**recovery), ConfigSource::recovery,
                     std::move(error)};
     }
+    if (unverified)
+        return std::move(*unverified);
     return defaults_with(std::move(error));
 }
 

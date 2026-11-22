@@ -1,5 +1,6 @@
 #include "live_config.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <cstdio>
@@ -18,7 +19,10 @@ constexpr std::size_t reload_reservation = 256 * 1024 * 1024;
 constexpr auto directory_events = IN_ONLYDIR | IN_CLOSE_WRITE | IN_CREATE | IN_DELETE | IN_MODIFY |
                                   IN_MOVED_FROM | IN_MOVED_TO | IN_MOVE_SELF | IN_DELETE_SELF |
                                   IN_ATTRIB;
-constexpr auto file_events = IN_CLOSE_WRITE | IN_MODIFY | IN_MOVE_SELF | IN_DELETE_SELF | IN_ATTRIB;
+constexpr auto open_events = IN_OPEN | IN_CLOSE_NOWRITE;
+constexpr auto file_events =
+    open_events | IN_CLOSE_WRITE | IN_MODIFY | IN_MOVE_SELF | IN_DELETE_SELF | IN_ATTRIB;
+constexpr unsigned max_symlinks = 40;
 constexpr auto lost_watch = IN_MOVE_SELF | IN_DELETE_SELF | IN_IGNORED;
 constexpr auto replaced_entry = IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO;
 using Source = std::unique_ptr<wl_event_source, decltype(&wl_event_source_remove)>;
@@ -90,7 +94,7 @@ struct LiveConfig::Impl {
         auto path = paths_.user;
         // Watch each final-component link *before* resolving its contents. A
         // profile switch in a different directory need never touch either endpoint.
-        for (unsigned hop = 0; hop <= 40; ++hop) {
+        for (unsigned hop = 0; hop <= max_symlinks; ++hop) {
             watch_directories(next, path, hop);
             std::error_code error;
             auto target = std::filesystem::read_symlink(path, error);
@@ -109,6 +113,8 @@ struct LiveConfig::Impl {
         if (file_watch_ >= 0 && file_watch_ != file && !next.contains(file_watch_))
             inotify_rm_watch(watch_fd_, file_watch_);
         directories_ = std::move(next);
+        if (file_watch_ != file)
+            forget_opens();
         file_watch_ = file;
         return !directories_.empty();
     }
@@ -138,7 +144,9 @@ struct LiveConfig::Impl {
     void drain_watch() {
         bool changed = false;
         bool rewatch = false;
-        std::optional<unsigned> replaced_hop;
+        bool file_replaced = false;
+        std::optional<WriterCheck> previous_inode_check;
+        unsigned stale_from = max_symlinks + 1;
         std::array<char, 16 * 1024> buffer{};
         // Bound the amount of input processed in one dispatch, including when
         // other applications are busy writing to the watched ancestor.
@@ -158,19 +166,28 @@ struct LiveConfig::Impl {
                 const auto *name = buffer.data() + offset + sizeof(event);
                 offset += sizeof(event) + event.len;
                 if (event.mask & IN_Q_OVERFLOW) {
+                    forget_opens();
+                    previous_inode_check.reset();
                     writer_check_ = WriterCheck::required;
                     changed = true;
                     rewatch = true;
                 } else if (event.wd == file_watch_ && !event.len) {
                     // The file watch can still deliver events from an unlinked inode.
-                    if (replaced_hop)
-                        continue;
-                    changed = true;
-                    rewatch |= (event.mask & (lost_watch | IN_ATTRIB)) != 0;
-                    record_write(event.mask);
+                    auto check = inode_write(event.mask);
+                    if (file_replaced) {
+                        // A relink to the same inode keeps its open/close history.
+                        // Reuse this evidence only if the refreshed watch agrees.
+                        if (check)
+                            previous_inode_check = check;
+                    } else {
+                        if (check)
+                            writer_check_ = *check;
+                        changed |= check.has_value() || !(event.mask & open_events);
+                        rewatch |= (event.mask & (lost_watch | IN_ATTRIB)) != 0;
+                    }
                 } else if (auto it = directories_.find(event.wd); it != directories_.end()) {
                     for (const auto &entry : it->second) {
-                        if (replaced_hop && entry.hop > *replaced_hop)
+                        if (entry.hop >= stale_from || (event.mask & open_events))
                             continue;
                         if ((event.mask & lost_watch) ||
                             (event.len && std::string_view(name) == entry.name)) {
@@ -178,11 +195,22 @@ struct LiveConfig::Impl {
                             const bool replacement =
                                 (event.mask & (lost_watch | replaced_entry)) != 0;
                             rewatch |= replacement || (event.mask & IN_ATTRIB);
-                            if (replacement)
-                                replaced_hop = entry.hop;
-                            if (!entry.ancestor)
-                                record_write(event.mask);
-                            else if (replacement)
+                            if (replacement) {
+                                file_replaced = true;
+                                // Replacing the parent invalidates this directory's
+                                // own named events as well as all downstream hops.
+                                const bool stale_parent =
+                                    entry.ancestor || (event.mask & lost_watch);
+                                const unsigned first_stale =
+                                    stale_parent ? entry.hop : entry.hop + 1;
+                                stale_from = std::min(stale_from, first_stale);
+                                writer_check_ = WriterCheck::required;
+                            }
+                            // A named close can describe an unlinked inode now
+                            // sharing its former basename with the replacement.
+                            if (!entry.ancestor && (event.mask & IN_MOVED_TO))
+                                writer_check_ = WriterCheck::when_available;
+                            else if (event.mask & IN_MODIFY)
                                 writer_check_ = WriterCheck::required;
                         }
                     }
@@ -195,17 +223,43 @@ struct LiveConfig::Impl {
                 rewatch = true;
             }
         }
-        if (rewatch)
+        if (rewatch) {
+            const int previous = file_watch_;
             refresh_watches();
+            if (previous == file_watch_ && previous_inode_check)
+                writer_check_ = *previous_inode_check;
+            if (observed_opens_ && writer_check_ == WriterCheck::when_available) {
+                writer_check_ = WriterCheck::required;
+                waiting_for_last_close_ = true;
+            }
+        }
         if (changed && !arm_reload())
             watch_failed();
     }
 
-    void record_write(std::uint32_t mask) noexcept {
-        if (mask & (IN_CLOSE_WRITE | IN_MOVED_TO))
-            writer_check_ = WriterCheck::when_available;
-        else if (mask & (IN_MODIFY | IN_CREATE | IN_DELETE | IN_MOVED_FROM | lost_watch))
-            writer_check_ = WriterCheck::required;
+    void forget_opens() noexcept {
+        observed_opens_ = 0;
+        waiting_for_last_close_ = false;
+    }
+
+    std::optional<WriterCheck> inode_write(std::uint32_t mask) noexcept {
+        if (mask & IN_OPEN) {
+            ++observed_opens_;
+        } else if (mask & (IN_CLOSE_WRITE | IN_CLOSE_NOWRITE)) {
+            if (observed_opens_)
+                --observed_opens_;
+            waiting_for_last_close_ |= (mask & IN_CLOSE_WRITE) != 0;
+            if (!observed_opens_ && waiting_for_last_close_) {
+                waiting_for_last_close_ = false;
+                return WriterCheck::when_available;
+            }
+            if (mask & IN_CLOSE_WRITE)
+                return WriterCheck::required;
+        } else if (mask & (IN_MODIFY | lost_watch)) {
+            waiting_for_last_close_ = false;
+            return WriterCheck::required;
+        }
+        return {};
     }
 
     bool arm_reload() {
@@ -361,7 +415,11 @@ struct LiveConfig::Impl {
     Source timer_{nullptr, wl_event_source_remove};
     int watch_fd_ = -1;
     int file_watch_ = -1;
-    WriterCheck writer_check_ = WriterCheck::when_available;
+    // inotify can coalesce opens and overflow loses records. These counts
+    // veto known outstanding opens; only a kernel lease proves quiescence.
+    std::uint64_t observed_opens_ = 0;
+    bool waiting_for_last_close_ = false;
+    WriterCheck writer_check_ = WriterCheck::required;
     bool ready_ = false;
     bool due_ = false;
     bool loading_ = false;

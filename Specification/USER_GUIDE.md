@@ -99,9 +99,17 @@ with `~/.local/state` as the fallback state directory.
 Seaside follows chains of symlinks such as a dotfile profile selected by an
 intermediate link. On local filesystems that allow Linux read leases on your
 config file, it also recognizes pathname truncation and hard-link publication,
-even when an inotify queue overflow drops the close notification. If leases
-are unavailable (for example, on a file owned by another user), finish the
-save by closing the writer or by renaming a completed file into place.
+and can recover when an inotify queue overflow drops a close notification.
+
+When the filesystem denies leases, for example on a system-owned dotfile,
+use a single writer and close it or rename a completed file or profile link
+into place. Seaside can confirm those events once it watches the corresponding
+inode or directory. If a save finishes before a replacement directory is
+watched, or a newly created symlink points to an edited file, save again
+after the new path is in place. At startup, a readable managed config works
+without a last-good copy. If its contents differ from an existing last-good
+copy and the file cannot be leased, Seaside keeps the last-good settings
+until it observes a completed save.
 
 ### Default shortcuts
 

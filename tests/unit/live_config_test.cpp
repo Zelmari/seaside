@@ -17,14 +17,18 @@ using Change = LiveConfig::Change;
 class SnapshotFailure : public StorageIo {
   public:
     std::error_code check(StorageStep step) noexcept override {
-        if (step == StorageStep::check_writer && leases_unavailable.load())
-            return std::make_error_code(std::errc::operation_not_supported);
+        if (step == StorageStep::check_writer) {
+            ++probes;
+            if (leases_unavailable.load())
+                return std::make_error_code(std::errc::operation_not_supported);
+        }
         if (step == StorageStep::sync_file && fail.load())
             return std::make_error_code(std::errc::no_space_on_device);
         return {};
     }
     std::atomic<bool> fail = false;
     std::atomic<bool> leases_unavailable = false;
+    std::atomic<unsigned> probes = 0;
 };
 
 class LiveConfigTest : public testing::Test {
@@ -401,7 +405,10 @@ TEST_F(LiveConfigTest, HardLinkPublicationSurvivesRemovalOfTheStagingName) {
     EXPECT_EQ(snapshot(), text);
 }
 
-TEST_F(LiveConfigTest, ACloseFromOneWriterCannotPublishAnotherWritersPrefix) {
+class WriterCloseTest : public LiveConfigTest, public testing::WithParamInterface<bool> {};
+
+TEST_P(WriterCloseTest, ACloseFromOneWriterCannotPublishAnotherWritersPrefix) {
+    io->leases_unavailable = GetParam();
     ASSERT_NO_FATAL_FAILURE(start());
     ASSERT_TRUE(pump_until([&] { return transaction().recovery_persisted(); }));
     const auto alias = directory.path() / "also-open";
@@ -421,6 +428,8 @@ TEST_F(LiveConfigTest, ACloseFromOneWriterCannotPublishAnotherWritersPrefix) {
     }));
     EXPECT_EQ(snapshot(), prefix + "[keybinds]\n");
 }
+
+INSTANTIATE_TEST_SUITE_P(LeaseSupport, WriterCloseTest, testing::Bool());
 
 TEST_F(LiveConfigTest, UnsupportedLeasesKeepUnconfirmedEditsPendingUntilAnOrdinarySave) {
     io->leases_unavailable = true;
@@ -459,6 +468,154 @@ TEST_F(LiveConfigTest, AnOpenWriterAtStartupUsesRecoveryUntilTheFirstCompletedSa
         return transaction().active().window.gaps_outer == 47 && transaction().recovery_persisted();
     }));
     EXPECT_FALSE(transaction().diagnostic());
+    EXPECT_EQ(snapshot(), prefix + "[keybinds]\n");
+}
+
+class NoLeaseLiveConfigTest : public LiveConfigTest {
+  protected:
+    void SetUp() override { io->leases_unavailable = true; }
+};
+
+TEST_F(NoLeaseLiveConfigTest, StartupKeepsDurableSnapshotWhenDifferentUserBytesCannotBeVerified) {
+    const std::string prior = "[window]\ngaps_outer=23\n";
+    ASSERT_TRUE(store.publish(paths.recovery, prior, PublishMode::replace_snapshot));
+    std::filesystem::create_directories(paths.user.parent_path());
+    auto writer = std::ofstream(paths.user);
+    const std::string prefix = "[window]\ngaps_outer=41\n";
+    ASSERT_TRUE(writer << prefix << std::flush);
+    ASSERT_NO_FATAL_FAILURE(start());
+    EXPECT_EQ(live->source(), ConfigSource::recovery);
+    ASSERT_TRUE(transaction().diagnostic());
+    EXPECT_NE(transaction().diagnostic()->message.find("cannot verify a completed save"),
+              std::string::npos);
+    EXPECT_FALSE(pump_until([&] { return transaction().active().window.gaps_outer != 23; }, 500ms));
+    EXPECT_EQ(snapshot(), prior);
+    writer << "[keybinds]\n";
+    writer.close();
+    ASSERT_TRUE(pump_until([&] {
+        return live->source() == ConfigSource::user && transaction().recovery_persisted();
+    }));
+    EXPECT_FALSE(transaction().diagnostic());
+    EXPECT_EQ(snapshot(), prefix + "[keybinds]\n");
+}
+
+TEST_F(NoLeaseLiveConfigTest, RetiredDirectoryCloseCannotAuthorizeItsReplacement) {
+    ASSERT_NO_FATAL_FAILURE(start());
+    ASSERT_TRUE(pump_until([&] { return transaction().recovery_persisted(); }));
+    auto old = std::ofstream(paths.user);
+    ASSERT_TRUE(old << "[window]\ngaps_outer=29\n" << std::flush);
+    std::filesystem::rename(paths.user.parent_path(), directory.path() / "retired");
+    std::filesystem::create_directory(paths.user.parent_path());
+    auto writer = std::ofstream(paths.user);
+    const std::string prefix = "[window]\ngaps_outer=49\n";
+    ASSERT_TRUE(writer << prefix << std::flush);
+    old.close();
+    EXPECT_FALSE(pump_until([&] { return transaction().active().window.gaps_outer == 49; }, 500ms));
+    EXPECT_EQ(snapshot(), default_template());
+    writer << "[keybinds]\n";
+    writer.close();
+    ASSERT_TRUE(pump_until([&] {
+        return transaction().active().window.gaps_outer == 49 && transaction().recovery_persisted();
+    }));
+    EXPECT_EQ(snapshot(), prefix + "[keybinds]\n");
+}
+
+TEST_F(NoLeaseLiveConfigTest, UnlinkedInodeCloseCannotAuthorizeRecreatedName) {
+    ASSERT_NO_FATAL_FAILURE(start());
+    ASSERT_TRUE(pump_until([&] { return transaction().recovery_persisted(); }));
+    auto old = std::ofstream(paths.user);
+    ASSERT_TRUE(old << "[window]\ngaps_outer=36\n" << std::flush);
+    std::filesystem::remove(paths.user);
+    auto writer = std::ofstream(paths.user);
+    const std::string prefix = "[window]\ngaps_outer=48\n";
+    ASSERT_TRUE(writer << prefix << std::flush);
+    EXPECT_FALSE(pump_until([&] { return transaction().active().window.gaps_outer == 48; }, 400ms));
+    old.close();
+    EXPECT_FALSE(pump_until([&] { return transaction().active().window.gaps_outer == 48; }, 400ms));
+    EXPECT_EQ(snapshot(), default_template());
+    writer << "[keybinds]\n";
+    writer.close();
+    ASSERT_TRUE(pump_until([&] {
+        return transaction().active().window.gaps_outer == 48 && transaction().recovery_persisted();
+    }));
+    EXPECT_EQ(snapshot(), prefix + "[keybinds]\n");
+}
+
+TEST_F(NoLeaseLiveConfigTest, AnUnobservedSaveInANewDirectoryRecoversOnTheNextWatchedRename) {
+    ASSERT_NO_FATAL_FAILURE(start());
+    ASSERT_TRUE(pump_until([&] { return transaction().recovery_persisted(); }));
+    std::filesystem::rename(paths.user.parent_path(), directory.path() / "retired");
+    ASSERT_TRUE(pump_until([&] { return transaction().diagnostic().has_value(); }));
+    std::filesystem::create_directory(paths.user.parent_path());
+    const std::string candidate = "[window]\ngaps_outer=37\n";
+    const auto previous = io->probes.load();
+    ASSERT_NO_FATAL_FAILURE(replace(candidate));
+    ASSERT_TRUE(pump_until([&] { return io->probes.load() > previous; }));
+    const auto deferred = io->probes.load();
+    EXPECT_FALSE(pump_until([&] { return transaction().active().window.gaps_outer == 37; }, 500ms));
+    EXPECT_EQ(snapshot(), default_template());
+    EXPECT_EQ(io->probes.load(), deferred);
+    ASSERT_NO_FATAL_FAILURE(replace(candidate));
+    ASSERT_TRUE(pump_until(
+        [&] { return !transaction().diagnostic() && transaction().recovery_persisted(); }));
+    EXPECT_EQ(snapshot(), candidate);
+}
+
+TEST_F(NoLeaseLiveConfigTest, AnUnverifiedNewSymlinkRecoversOnWatchedLinkAndTargetRenames) {
+    const auto target = directory.path() / "target";
+    const std::string first = "[window]\ngaps_outer=34\n";
+    const std::string second = "[window]\ngaps_outer=44\n";
+    std::filesystem::create_directories(paths.user.parent_path());
+    ASSERT_TRUE(std::ofstream(target) << first);
+    std::filesystem::create_symlink(target, paths.user);
+    ASSERT_NO_FATAL_FAILURE(start());
+    ASSERT_TRUE(pump_until([&] { return transaction().recovery_persisted(); }));
+    ASSERT_EQ(snapshot(), first);
+    std::filesystem::remove(paths.user);
+    ASSERT_TRUE(pump_until([&] { return transaction().diagnostic().has_value(); }));
+    ASSERT_TRUE(std::ofstream(target) << second);
+    std::filesystem::create_symlink(target, paths.user);
+    EXPECT_FALSE(pump_until([&] { return !transaction().diagnostic(); }, 500ms));
+    EXPECT_EQ(snapshot(), first);
+    auto staged = paths.user.parent_path() / "profile.next";
+    std::filesystem::create_symlink(target, staged);
+    std::filesystem::rename(staged, paths.user);
+    ASSERT_TRUE(pump_until(
+        [&] { return !transaction().diagnostic() && transaction().recovery_persisted(); }));
+    EXPECT_EQ(snapshot(), second);
+    staged = directory.path() / "target.next";
+    ASSERT_TRUE(std::ofstream(staged) << first);
+    std::filesystem::rename(staged, target);
+    ASSERT_TRUE(pump_until([&] {
+        return transaction().active().window.gaps_outer == 34 && transaction().recovery_persisted();
+    }));
+    EXPECT_EQ(snapshot(), first);
+}
+
+TEST_F(NoLeaseLiveConfigTest, RelinkingTheSameInodePreservesObservedWriterActivity) {
+    const auto target = directory.path() / "target";
+    std::filesystem::create_directories(paths.user.parent_path());
+    ASSERT_TRUE(std::ofstream(target) << default_template());
+    std::filesystem::create_symlink(target, paths.user);
+    ASSERT_NO_FATAL_FAILURE(start());
+    ASSERT_TRUE(pump_until([&] { return transaction().recovery_persisted(); }));
+    auto writer = std::ofstream(target);
+    const std::string prefix = "[window]\ngaps_outer=32\n";
+    ASSERT_TRUE(writer << prefix << std::flush);
+    EXPECT_FALSE(pump_until([&] { return transaction().active().window.gaps_outer == 32; }, 400ms));
+    const auto next = paths.user.parent_path() / "next";
+    std::filesystem::create_symlink(target, next);
+    std::filesystem::rename(next, paths.user);
+    EXPECT_FALSE(pump_until([&] { return transaction().active().window.gaps_outer == 32; }, 400ms));
+    EXPECT_EQ(snapshot(), default_template());
+    writer << "[keybinds]\n" << std::flush;
+    // Both events land in the same batch with the same inode still selected.
+    std::filesystem::create_symlink(target, next);
+    std::filesystem::rename(next, paths.user);
+    writer.close();
+    ASSERT_TRUE(pump_until([&] {
+        return transaction().active().window.gaps_outer == 32 && transaction().recovery_persisted();
+    }));
     EXPECT_EQ(snapshot(), prefix + "[keybinds]\n");
 }
 

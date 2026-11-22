@@ -80,6 +80,29 @@ TEST_F(StoreTest, MissingEmptyAndBoundedRegularFiles) {
     ASSERT_EQ(::mkfifo((root / "fifo").c_str(), 0600), 0);
     EXPECT_FALSE(store.read(root / "fifo"));
 }
+TEST_F(StoreTest, NonownedSystemFileCanBeReadWithPublicationEvidence) {
+    using namespace seaside;
+    // The Arch release file is world-readable and owned by the system. This
+    // exercises real EPERM as the ordinary desktop user without creating files
+    // under another user's identity or requiring filesystem capabilities.
+    const std::filesystem::path path = "/etc/os-release";
+    struct stat status{};
+    ASSERT_EQ(stat(path.c_str(), &status), 0);
+    if (status.st_uid == geteuid())
+        GTEST_SKIP() << "Run as a user who does not own /etc/os-release";
+    ConfigStore store;
+    auto strict = store.read(path, false, WriterCheck::required);
+    if (strict)
+        GTEST_SKIP() << "The runner can lease nonowned files";
+    ASSERT_EQ(strict.error().operation, StorageStep::check_writer);
+    EXPECT_TRUE(strict.error().error == std::errc::permission_denied ||
+                strict.error().error == std::errc::operation_not_permitted);
+    auto normal = store.read(path);
+    auto published = store.read(path, false, WriterCheck::when_available);
+    ASSERT_TRUE(normal && *normal && published && *published);
+    EXPECT_TRUE(**normal == **published);
+}
+
 TEST_F(StoreTest, ReadLeaseRoutesBreakToReaderAndPreservesPendingSignal) {
     using namespace seaside;
     const auto path = root / "lease";
