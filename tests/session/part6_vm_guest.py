@@ -176,7 +176,16 @@ class Session:
         return self.ctl("status")["result"]["config"]
 
     def windows(self):
-        return [window for window in self.ctl("windows")["result"]["windows"] if window["mapped"]]
+        rows = self.ctl("windows")["result"]["windows"]
+        ids = [row["id"] for row in rows]
+        require(ids == sorted(set(ids)), "Window query returned duplicate or out-of-order IDs")
+        for row in rows:
+            require(type(row["id"]) is int and type(row["workspace_id"]) is int and
+                    isinstance(row["app_id"], str) and isinstance(row["title"], str) and
+                    all(type(row[key]) is bool for key in
+                        ("mapped", "floating", "fullscreen", "maximized", "pinned")),
+                    f"Unexpected window metadata: {row}")
+        return [row for row in rows if row["mapped"]]
 
     def focused_output(self):
         outputs = self.ctl("outputs")["result"]["outputs"]

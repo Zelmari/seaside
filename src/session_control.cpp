@@ -231,15 +231,16 @@ IpcJson SessionControl::windows() const {
     for (const auto &[id, state] : desktop.state().windows()) {
         const auto view = desktop.view(id);
         const auto metadata = scene_.window_metadata(id);
-        result.push_back({{"id", id},
-                          {"workspace_id", state.home_workspace},
-                          {"app_id", bounded_utf8(metadata.app_id, 1024)},
-                          {"title", bounded_utf8(metadata.title, 4096)},
-                          {"mapped", state.mapped},
-                          {"floating", !view.tiled},
-                          {"fullscreen", view.fullscreen},
-                          {"maximized", view.maximized},
-                          {"pinned", view.pinned}});
+        auto &row = result.emplace_back();
+        row["id"] = id;
+        row["workspace_id"] = state.home_workspace;
+        row["app_id"] = bounded_utf8(metadata.app_id, 1024);
+        row["title"] = bounded_utf8(metadata.title, 4096);
+        row["mapped"] = state.mapped;
+        row["floating"] = !view.tiled;
+        row["fullscreen"] = view.fullscreen;
+        row["maximized"] = view.maximized;
+        row["pinned"] = view.pinned;
     }
     return result;
 }
