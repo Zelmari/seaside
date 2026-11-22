@@ -25,6 +25,11 @@ class PortalActivation final {
     PortalActivation(const PortalActivation &) = delete;
     PortalActivation &operator=(const PortalActivation &) = delete;
 
+    // Recheck ownership and asynchronously restart missing owned units.
+    // A replacement bus must outlive this object even if admission fails.
+    std::expected<void, ServiceReport> recover(SessionBus &bus, Completion completion,
+                                               std::chrono::milliseconds timeout) noexcept;
+
     // Call outside dispatch, after cancelling other portal requests.
     bool stop() noexcept;
 

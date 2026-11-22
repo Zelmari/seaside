@@ -95,21 +95,22 @@ struct PortalActivation::Impl final : std::enable_shared_from_this<Impl> {
         bool requested = false;
     };
 
-    SessionBus &bus;
+    SessionBus *bus;
     std::array<Unit, services.size()> units{};
     std::string wayland;
     std::string bus_address;
     std::string config_home;
     Completion completion;
-    const Clock::time_point deadline;
+    Clock::time_point deadline;
     std::size_t stage = 0;
     std::optional<SessionBus::CallId> pending;
     wl_event_source *timer = nullptr;
     bool stopped = false;
+    bool recovering = false;
 
     Impl(SessionBus &connection, std::string_view socket, Completion callback,
          std::chrono::milliseconds limit)
-        : bus(connection), wayland("WAYLAND_DISPLAY=" + std::string(socket)),
+        : bus(&connection), wayland("WAYLAND_DISPLAY=" + std::string(socket)),
           bus_address("DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/" + std::to_string(getuid()) +
                       "/bus"),
           config_home(config_home_environment()), completion(std::move(callback)),
@@ -212,7 +213,7 @@ struct PortalActivation::Impl final : std::enable_shared_from_this<Impl> {
                 return timeout_error;
             }
             int error = 0;
-            auto message = make(bus, manager, methods[static_cast<std::size_t>(step)], error);
+            auto message = make(*bus, manager, methods[static_cast<std::size_t>(step)], error);
             if (error >= 0) {
                 switch (step) {
                 case Step::launch:
@@ -232,12 +233,12 @@ struct PortalActivation::Impl final : std::enable_shared_from_this<Impl> {
             if (error < 0) {
                 return {ServiceFailure::internal_error, error};
             }
-            const auto call = bus.call(message.get(), remaining,
-                                       [weak = weak_from_this(), step](const BusReply &reply) {
-                                           if (auto self = weak.lock()) {
-                                               self->received(step, reply);
-                                           }
-                                       });
+            const auto call = bus->call(message.get(), remaining,
+                                        [weak = weak_from_this(), step](const BusReply &reply) {
+                                            if (auto self = weak.lock()) {
+                                                self->received(step, reply);
+                                            }
+                                        });
             if (!call) {
                 return call_error(call.error());
             }
@@ -276,7 +277,7 @@ struct PortalActivation::Impl final : std::enable_shared_from_this<Impl> {
 
     ServiceReport wait_for_owner() noexcept {
         if (!timer) {
-            timer = wl_event_loop_add_timer(bus.event_loop(), poll_owner, this);
+            timer = wl_event_loop_add_timer(bus->event_loop(), poll_owner, this);
             if (!timer) {
                 return {ServiceFailure::internal_error, -errno};
             }
@@ -324,7 +325,13 @@ struct PortalActivation::Impl final : std::enable_shared_from_this<Impl> {
         } else {
             switch (step) {
             case Step::unowned:
-                result = {ServiceFailure::wrong_environment, -EADDRINUSE};
+                if (!recovering || !units[stage].requested) {
+                    result = {ServiceFailure::wrong_environment, -EADDRINUSE};
+                } else {
+                    result = sd_bus_message_read(reply.message, "s", &value) > 0 && value[0] == ':'
+                                 ? request(Step::pid, value)
+                                 : malformed;
+                }
                 break;
             case Step::launch:
                 result = sd_bus_message_read(reply.message, "o", &value) > 0 ? request(Step::owner)
@@ -362,7 +369,7 @@ struct PortalActivation::Impl final : std::enable_shared_from_this<Impl> {
 
     bool drain(Clock::time_point limit, const unsigned &remaining) noexcept {
         while (remaining && Clock::now() < limit) {
-            if (wl_event_loop_dispatch(bus.event_loop(), 25) < 0 && errno != EINTR) {
+            if (wl_event_loop_dispatch(bus->event_loop(), 25) < 0 && errno != EINTR) {
                 return false;
             }
         }
@@ -372,7 +379,7 @@ struct PortalActivation::Impl final : std::enable_shared_from_this<Impl> {
     bool confirm_stop(const Unit &unit, Clock::time_point limit) {
         while (Clock::now() < limit) {
             sd_bus_message *raw = nullptr;
-            int error = sd_bus_message_new_method_call(bus.native_handle(), &raw, manager_name,
+            int error = sd_bus_message_new_method_call(bus->native_handle(), &raw, manager_name,
                                                        unit.path.c_str(),
                                                        "org.freedesktop.DBus.Properties", "Get");
             const Message message(raw, sd_bus_message_unref);
@@ -391,7 +398,7 @@ struct PortalActivation::Impl final : std::enable_shared_from_this<Impl> {
             bool pending_stop = false;
             const auto duration =
                 std::chrono::duration_cast<std::chrono::microseconds>(limit - Clock::now());
-            auto call = bus.call(raw, duration, [&](const BusReply &reply) {
+            auto call = bus->call(raw, duration, [&](const BusReply &reply) {
                 const char *state = nullptr;
                 inactive = unit_is_gone(reply);
                 if (reply.error == BusError::none && reply.message &&
@@ -406,7 +413,7 @@ struct PortalActivation::Impl final : std::enable_shared_from_this<Impl> {
                 return false;
             }
             if (!drain(limit, remaining)) {
-                (void)bus.cancel(*call);
+                (void)bus->cancel(*call);
                 return false;
             }
             if (inactive || !pending_stop) {
@@ -414,7 +421,7 @@ struct PortalActivation::Impl final : std::enable_shared_from_this<Impl> {
             }
             // A StopUnit reply admits the job. Inspect the unit itself before
             // releasing the display and returning to the TTY.
-            if (wl_event_loop_dispatch(bus.event_loop(), 25) < 0 && errno != EINTR) {
+            if (wl_event_loop_dispatch(bus->event_loop(), 25) < 0 && errno != EINTR) {
                 return false;
             }
         }
@@ -428,7 +435,7 @@ struct PortalActivation::Impl final : std::enable_shared_from_this<Impl> {
         remove_timer();
         completion = {};
         if (auto id = std::exchange(pending, std::nullopt)) {
-            (void)bus.cancel(*id);
+            (void)bus->cancel(*id);
         }
         std::array<SessionBus::CallId, services.size()> calls{};
         unsigned remaining = 0;
@@ -440,7 +447,7 @@ struct PortalActivation::Impl final : std::enable_shared_from_this<Impl> {
             }
             try {
                 int error = 0;
-                auto message = make(bus, true, "StopUnit", error);
+                auto message = make(*bus, true, "StopUnit", error);
                 if (error >= 0) {
                     error = sd_bus_message_append(message.get(), "ss", units[index].name.c_str(),
                                                   "replace");
@@ -450,7 +457,7 @@ struct PortalActivation::Impl final : std::enable_shared_from_this<Impl> {
                     continue;
                 }
                 auto call =
-                    bus.call(message.get(), 1500ms, [&remaining, &ok](const BusReply &reply) {
+                    bus->call(message.get(), 1500ms, [&remaining, &ok](const BusReply &reply) {
                         ok &= reply.error == BusError::none || unit_is_gone(reply);
                         --remaining;
                     });
@@ -467,7 +474,7 @@ struct PortalActivation::Impl final : std::enable_shared_from_this<Impl> {
         ok &= drain(limit, remaining);
         for (const auto id : calls) {
             if (id) {
-                (void)bus.cancel(id);
+                (void)bus->cancel(id);
             }
         }
         for (const auto &unit : units) {
@@ -510,6 +517,26 @@ PortalActivation::start(SessionBus &bus, std::string_view socket, Completion com
 
 PortalActivation::~PortalActivation() noexcept {
     (void)stop();
+}
+
+std::expected<void, ServiceReport>
+PortalActivation::recover(SessionBus &bus, Completion completion,
+                          std::chrono::milliseconds timeout) noexcept {
+    const auto &impl = *impl_;
+    if (impl.stopped || impl.completion || impl.pending || !completion || !bus.event_loop() ||
+        timeout <= 0ms || timeout > 60s) {
+        return std::unexpected(ServiceReport{ServiceFailure::internal_error, -EINVAL});
+    }
+    impl_->bus = &bus;
+    impl_->completion = std::move(completion);
+    impl_->deadline = Clock::now() + timeout;
+    impl_->stage = 0;
+    impl_->recovering = true;
+    if (const auto result = impl_->request(Step::unowned); result.failure != ServiceFailure::none) {
+        impl_->completion = {};
+        return std::unexpected(result);
+    }
+    return {};
 }
 
 bool PortalActivation::stop() noexcept {

@@ -89,6 +89,7 @@ class PortalActivationTest : public testing::Test {
     std::unique_ptr<PortalActivation> activation;
     std::optional<std::pair<StartupService, ServiceReport>> outcome;
     std::vector<RunningUnit> units;
+    std::vector<std::string> started;
     std::vector<std::string> stopped;
     bool foreign_unit = false;
     unsigned get_unit_by_pid = 0;
@@ -145,16 +146,38 @@ class PortalActivationTest : public testing::Test {
     }
 
     void start() {
-        auto started = PortalActivation::start(
+        auto result = PortalActivation::start(
             *client, "wayland-seaside-activation-test",
             [this](StartupService service, ServiceReport report) {
                 EXPECT_FALSE(outcome);
                 outcome.emplace(service, report);
             },
             2s);
-        ASSERT_TRUE(started);
-        activation = std::move(*started);
+        ASSERT_TRUE(result);
+        activation = std::move(*result);
         ASSERT_TRUE(pump_until([&] { return outcome.has_value(); }));
+    }
+
+    void recover() {
+        outcome.reset();
+        get_unit_by_pid = 0;
+        ASSERT_TRUE(activation->recover(
+            *client,
+            [this](StartupService service, ServiceReport report) {
+                EXPECT_FALSE(outcome);
+                outcome.emplace(service, report);
+            },
+            2s));
+        ASSERT_TRUE(pump_until([&] { return outcome.has_value(); }));
+    }
+
+    bool release(const Portal &portal) {
+        sd_bus_slot *raw = nullptr;
+        bool released = false;
+        const int result = sd_bus_release_name_async(manager->native_handle(), &raw, portal.name,
+                                                     on_claim, &released);
+        BusSlot slot(raw, sd_bus_slot_unref);
+        return result >= 0 && pump_until([&] { return released; });
     }
 
     static int accept_manager_call(sd_bus_message *message, void *data, sd_bus_error *) noexcept {
@@ -170,14 +193,16 @@ class PortalActivationTest : public testing::Test {
             return start_unit(message);
         }
         if (sd_bus_message_is_method_call(message, manager_interface, "GetUnitByPID") > 0) {
-            ++get_unit_by_pid;
+            const auto &portal = portals[get_unit_by_pid++ % portals.size()];
             std::uint32_t pid = 0;
-            if (sd_bus_message_read(message, "u", &pid) <= 0 || units.empty()) {
+            const auto unit = std::ranges::find_if(
+                units, [&](const RunningUnit &candidate) { return candidate.portal == &portal; });
+            if (sd_bus_message_read(message, "u", &pid) <= 0 || unit == units.end()) {
                 return -EINVAL;
             }
             EXPECT_EQ(pid, static_cast<std::uint32_t>(getpid()));
-            return sd_bus_reply_method_return(
-                message, "o", foreign_unit ? "/foreign/unit" : units.back().path.c_str());
+            return sd_bus_reply_method_return(message, "o",
+                                              foreign_unit ? "/foreign/unit" : unit->path.c_str());
         }
         if (sd_bus_message_is_method_call(message, manager_interface, "StopUnit") > 0) {
             return stop_unit(message);
@@ -261,7 +286,11 @@ class PortalActivationTest : public testing::Test {
         if (encoded < 0) {
             return encoded;
         }
-        units.push_back({name, path.get(), &*chosen});
+        started.emplace_back(name);
+        if (std::ranges::none_of(units,
+                                 [&](const RunningUnit &unit) { return unit.name == name; })) {
+            units.push_back({name, path.get(), &*chosen});
+        }
         const int claimed = sd_bus_request_name_async(manager->native_handle(), nullptr,
                                                       chosen->name, 0, nullptr, nullptr);
         if (claimed < 0) {
@@ -394,5 +423,36 @@ TEST_F(PortalActivationTest, RejectsAClaimedNameWhoseOwnerIsOutsideTheRequestedU
     EXPECT_TRUE(activation->stop());
     ASSERT_EQ(stopped.size(), 1U);
     EXPECT_EQ(stopped.front(), units.front().name);
+}
+
+TEST_F(PortalActivationTest, RecoversOnlyMissingOwnedUnits) {
+    RecordProperty("part", "9");
+    start();
+    ASSERT_EQ(outcome->second.failure, ServiceFailure::none);
+    ASSERT_EQ(started.size(), 3U);
+    const auto backend = started.front();
+    ASSERT_TRUE(release(portals.front()));
+    recover();
+    ASSERT_TRUE(outcome);
+    EXPECT_EQ(outcome->second.failure, ServiceFailure::none);
+    ASSERT_EQ(started.size(), 4U);
+    EXPECT_EQ(started.back(), backend);
+    EXPECT_EQ(get_unit_by_pid, portals.size());
+    EXPECT_TRUE(stopped.empty());
+    EXPECT_TRUE(activation->stop());
+    EXPECT_EQ(stopped.size(), portals.size());
+}
+
+TEST_F(PortalActivationTest, RuntimeRecoveryVerifiesExistingOwnerBeforeReuse) {
+    RecordProperty("part", "9");
+    start();
+    ASSERT_EQ(outcome->second.failure, ServiceFailure::none);
+    foreign_unit = true;
+    recover();
+    ASSERT_TRUE(outcome);
+    EXPECT_EQ(outcome->second.failure, ServiceFailure::wrong_environment);
+    EXPECT_EQ(outcome->second.native_error, -EPERM);
+    EXPECT_EQ(started.size(), portals.size());
+    EXPECT_TRUE(stopped.empty());
 }
 } // namespace
