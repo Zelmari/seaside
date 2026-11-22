@@ -116,14 +116,18 @@ class IdleTrial : public testing::Test {
         }
     }
 
-    void check() {
+    void wait_for_check() {
         const auto last = checks_;
-        idle_->visibility_changed();
         const auto deadline = IdlePower::Clock::now() + 1s;
         while (checks_ == last && IdlePower::Clock::now() < deadline) {
             ASSERT_GE(wl_event_loop_dispatch(loop_, 10), 0);
         }
         ASSERT_GT(checks_, last);
+    }
+
+    void check() {
+        idle_->visibility_changed();
+        wait_for_check();
     }
 
     void advance(IdlePower::Clock::duration duration) {
@@ -397,9 +401,16 @@ TEST_F(IdleTrial, RejectedPowerTransitionsRetryOnceAndRetainTheAppliedState) {
     EXPECT_EQ(changes_.size(), 2u);
     ASSERT_NO_FATAL_FAILURE(advance(1h));
     EXPECT_EQ(changes_.size(), 2u);
+    // No visibility or config change follows the input. The policy must
+    // schedule its own check, then arm the remaining idle deadline.
     idle_->activity(&left_);
-    ASSERT_NO_FATAL_FAILURE(advance(15min));
+    now_ += 15min - 10ms;
+    ASSERT_NO_FATAL_FAILURE(wait_for_check());
+    ASSERT_EQ(changes_.size(), 2u);
+    now_ += 10ms;
+    ASSERT_NO_FATAL_FAILURE(wait_for_check());
     EXPECT_EQ(std::ranges::count(changes_, PowerChange{&left_, false}), 3);
+    EXPECT_EQ(std::ranges::count(changes_, PowerChange{&right_, false}), 0);
 
     remaining_rejections_ = 1;
     idle_->activity(&left_);

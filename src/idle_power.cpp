@@ -95,6 +95,10 @@ void IdlePower::activity(wlr_output *output) noexcept {
     state.last_activity = now;
     if (state.retry &&
         (state.retry->sleep || (state.retry->exhausted && now >= state.retry->after))) {
+        if (state.retry->sleep && state.retry->exhausted) {
+            // This awake output no longer has an idle timer after both rejections.
+            visibility_changed();
+        }
         state.retry.reset();
     }
     if (state.sleeping) {
