@@ -370,7 +370,8 @@ def satellite_restart(session, state):
             "The packaged session started Xwayland without an X11 client")
     children = Path(f"/proc/{session.process.pid}/task/{session.process.pid}/children")
     with launch("part10-x11.log") as client:
-        wait_for(lambda: session.window(title), 12, "lazy X11 startup via installed packages", client)
+        previous_window = wait_for(lambda: session.window(title), 12,
+                                   "lazy X11 startup via installed packages", client)
         found = re.search(r"xwayland-satellite started pid=([0-9]+)", session.log.read_text())
         require(found is not None, "The package did not log an owned satellite startup")
         previous = int(found[1])
@@ -381,8 +382,13 @@ def satellite_restart(session, state):
         finally:
             os.close(descriptor)
         wait_for(lambda: not note(previous), 8, "reaping the terminated Xwayland satellite", session.process)
+    session.wait(lambda: not session.window(title), "unmapping the original X11 window")
     with launch("part10-x11-restart.log") as client:
-        wait_for(lambda: session.window(title), 12, "an X11 client after satellite restart", client)
+        def restarted_window():
+            window = session.window(title)
+            return window and window["id"] != previous_window["id"]
+
+        wait_for(restarted_window, 12, "a new X11 client after satellite restart", client)
         pids = re.findall(r"xwayland-satellite started pid=([0-9]+)", session.log.read_text())
         require(len(pids) == 2 and pids[0] != pids[1], "Xwayland did not restart exactly once")
         client.stdin.write("quit\n")
@@ -550,7 +556,7 @@ def installed_trial(source, runtime, results, state):
             event("package", "pacman install on the disposable guest")
             pacman(["-U", "--noconfirm", archive], package_log, env)
         verify_installed(archive, version, results, env)
-        packages = checked(["/usr/bin/pacman", "-Q", "systemd", "polkit", "mesa", "wlroots0.20",
+        packages = checked(["/usr/bin/pacman", "-Q", "systemd", "polkit", "rtkit", "mesa", "wlroots0.20",
                             "wayland-protocols", "pipewire", "wireplumber", "xdg-desktop-portal",
                             "xdg-desktop-portal-wlr", "wofi", "foot", "xwayland-satellite"], env=env)
         state["guest_packages"] = dict(line.split(maxsplit=1) for line in packages.decode().splitlines())
