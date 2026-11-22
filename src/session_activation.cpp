@@ -370,9 +370,9 @@ struct PortalActivation::Impl final : std::enable_shared_from_this<Impl> {
 
     bool dispatch_until(Clock::time_point limit) noexcept {
         const auto delay = std::chrono::ceil<std::chrono::milliseconds>(limit - Clock::now());
-        return delay > 0ms &&
-               (wl_event_loop_dispatch(bus->event_loop(), std::min(delay, 25ms).count()) >= 0 ||
-                errno == EINTR);
+        const auto wait_ms = static_cast<int>(std::clamp(delay, 0ms, 25ms).count());
+        return wait_ms > 0 &&
+               (wl_event_loop_dispatch(bus->event_loop(), wait_ms) >= 0 || errno == EINTR);
     }
 
     void drain(Clock::time_point limit, const unsigned &remaining) noexcept {
