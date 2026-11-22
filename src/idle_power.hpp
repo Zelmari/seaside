@@ -36,7 +36,7 @@ class IdlePower {
     void set_timeout(std::chrono::minutes timeout) noexcept;
     void set_active(bool active) noexcept;
     void visibility_changed() noexcept;
-    void activity(wlr_output *output) noexcept;
+    void activity() noexcept;
 
   private:
     struct Retry {

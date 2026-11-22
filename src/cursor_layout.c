@@ -40,14 +40,17 @@ static void consider_axis(struct seaside_cursor_box current, struct seaside_curs
         // an adjacent output regardless of how far apart the boxes are.
         *coordinate += forward ? gap : -gap;
     }
-    point = seaside_cursor_clamp(destination, point);
-    const double offset = horizontal ? fabs(point.y - requested.y) : fabs(point.x - requested.x);
-    // Prefer an aligned edge. On diagonals, use the first such edge crossed,
-    // and choose the closest edge when multiple outputs are equally aligned.
-    if (!best->found || offset < best->offset ||
-        (offset == best->offset &&
-         (crossing < best->crossing || (crossing == best->crossing && gap < best->gap)))) {
-        *best = (struct seaside_cursor_gap){point, offset, crossing, gap, true};
+    const double across = horizontal ? point.y : point.x;
+    const double across_min = horizontal ? destination.y : destination.x;
+    if (across < across_min ||
+        across >= across_min + (horizontal ? destination.height : destination.width)) {
+        return;
+    }
+    // Cross an aligned edge without shifting the pointer along the other axis.
+    if (!best->found || crossing < best->crossing ||
+        (crossing == best->crossing && gap < best->gap)) {
+        *best = (struct seaside_cursor_gap){seaside_cursor_clamp(destination, point), crossing, gap,
+                                            true};
     }
 }
 

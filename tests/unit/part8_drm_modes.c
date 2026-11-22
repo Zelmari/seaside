@@ -48,6 +48,34 @@ int main(void) {
     CHECK(seaside_tty_drm_select_mode(&output, &refresh));
     CHECK(refresh.mode == &modes[1]);
 
+    modes[1].refresh = 59951;
+    modes[2].refresh = 143998;
+    modes[3].refresh = 164999;
+    const int nominal[] = {60000, 144000, 165000};
+    int matched = 0;
+    for (size_t i = 0; i < 3; ++i) {
+        struct seaside_drm_output_settings request = {.width = modes[i + 1].width,
+                                                      .height = modes[i + 1].height,
+                                                      .refresh_millihz = nominal[i]};
+        if (seaside_tty_drm_select_mode(&output, &request) && request.mode == &modes[i + 1] &&
+            request.refresh_millihz == modes[i + 1].refresh) {
+            ++matched;
+        } else {
+            fprintf(stderr, "Nominal %d mHz did not select advertised %d mHz\n", nominal[i],
+                    modes[i + 1].refresh);
+        }
+    }
+    CHECK(matched == 3);
+    modes[2].refresh = 60000;
+    refresh.refresh_millihz = 60000;
+    CHECK(seaside_tty_drm_select_mode(&output, &refresh) && refresh.mode == &modes[2]);
+    refresh.refresh_millihz = 59951;
+    CHECK(seaside_tty_drm_select_mode(&output, &refresh) && refresh.mode == &modes[1]);
+    refresh.refresh_millihz = 59950;
+    CHECK(seaside_tty_drm_select_mode(&output, &refresh) && refresh.mode == &modes[1]);
+    refresh.refresh_millihz = 61000;
+    CHECK(!seaside_tty_drm_select_mode(&output, &refresh));
+
     struct seaside_drm_output_settings unsupported = {.refresh_millihz = 240000};
     CHECK(!seaside_tty_drm_select_mode(&output, &unsupported));
     CHECK(!unsupported.mode);

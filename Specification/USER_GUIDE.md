@@ -156,9 +156,13 @@ the window aligned with the pointer while the app redraws.
 Use `seasidectl outputs` to find the identity or connector selector reported
 for each display. Use that value in a `[[monitors.output]]` override to set
 mode, scale, rotation or position for one monitor. The example shows how to
-write an override. The `power_state` field shows whether the monitor is
+write an override. Seaside selects the closest advertised refresh at the
+requested resolution within 0.5 Hz. For example, 60 Hz can select 59.951 Hz.
+The `power_state` field shows whether the monitor is
 awake, asleep, or disabled. A sleeping monitor stays logically enabled so
-its workspace remains assigned. Dwindle
+its workspace remains assigned. Keyboard or pointer activity wakes the seat's
+sleeping displays. A fullscreen app or a visible idle inhibitor keeps its own
+display awake while the seat is idle. Dwindle
 splits space around a window as new windows open. Scrolling places windows in
 horizontal columns. Set `layout = "scrolling"` in `[window]` to switch the
 layout. [Monitor settings](SEASIDE_CONFIG_EXAMPLE.toml)

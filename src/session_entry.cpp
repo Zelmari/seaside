@@ -424,13 +424,12 @@ class Session {
         return outcome_;
     }
 
-    static void input_activity(void *data, bool pointer) noexcept {
+    static void input_activity(void *data, bool) noexcept {
         auto &session = *static_cast<Session *>(data);
         if (!session.idle_ || session.stopping_ || session.ipc_exiting_) {
             return;
         }
-        auto *output = pointer ? nullptr : session.desktop_.focused_output_handle();
-        session.idle_->activity(output ? output : seaside_tty_drm_pointer_output(session.drm_));
+        session.idle_->activity();
     }
 
     static void record_frame(void *data, wlr_output *output,

@@ -19,7 +19,7 @@ seaside_cursor_point move(seaside_cursor_box current, seaside_cursor_point origi
         }
         seaside_cursor_consider_gap(current, destination, origin, requested, &best);
     }
-    return best.found ? best.point : requested;
+    return best.found ? best.point : seaside_cursor_clamp(current, requested);
 }
 
 TEST(CursorLayout, PreservesDensePlacementAndRelativeOvershoot) {
@@ -29,9 +29,12 @@ TEST(CursorLayout, PreservesDensePlacementAndRelativeOvershoot) {
     EXPECT_EQ(dense.x, 163);
     EXPECT_EQ(dense.y, 12);
     const auto shorter = move(left, {158, 80}, {163, 80}, {adjacent});
-    EXPECT_EQ(shorter.x, 163);
-    EXPECT_LT(shorter.y, 60);
-    EXPECT_GT(shorter.y, 59);
+    EXPECT_FALSE(seaside_cursor_contains(adjacent, shorter));
+    EXPECT_TRUE(seaside_cursor_contains(left, shorter));
+    EXPECT_EQ(shorter.y, 80);
+    const auto right_edge = move(adjacent, {180, 59}, {180, 63}, {left});
+    EXPECT_FALSE(seaside_cursor_contains(left, right_edge));
+    EXPECT_EQ(right_edge.x, 180);
 
     constexpr seaside_cursor_box right{400, 0, 160, 90};
     const auto forwards = move(left, {158, 35}, {161, 35.5}, {right});

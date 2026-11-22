@@ -231,15 +231,19 @@ class IdleTrial : public testing::Test {
     std::vector<PowerChange> changes_;
 };
 
-TEST_F(IdleTrial, DefaultDeadlineAndInputWakeAreIndependentPerOutput) {
+TEST_F(IdleTrial, LocalInputDelaysSleepAndWakesBothOutputs) {
     ASSERT_NO_FATAL_FAILURE(advance(15min - 1ms));
     EXPECT_TRUE(changes_.empty());
-    idle_->activity(&right_);
+    idle_->activity();
     ASSERT_NO_FATAL_FAILURE(advance(1ms));
-    EXPECT_EQ(changes_, (std::vector<PowerChange>{{&left_, false}}));
-    idle_->activity(&left_);
+    EXPECT_TRUE(changes_.empty());
+    ASSERT_NO_FATAL_FAILURE(advance(15min));
+    EXPECT_EQ(std::ranges::count(changes_, PowerChange{&left_, false}), 1);
+    EXPECT_EQ(std::ranges::count(changes_, PowerChange{&right_, false}), 1);
+    idle_->activity();
     ASSERT_NO_FATAL_FAILURE(check());
-    EXPECT_EQ(changes_, (std::vector<PowerChange>{{&left_, false}, {&left_, true}}));
+    EXPECT_EQ(std::ranges::count(changes_, PowerChange{&left_, true}), 1);
+    EXPECT_EQ(std::ranges::count(changes_, PowerChange{&right_, true}), 1);
 }
 
 TEST_F(IdleTrial, ShortenedExtendedAndDisabledTimeoutUseTheCurrentIdleTime) {
@@ -291,17 +295,19 @@ TEST_F(IdleTrial, HiddenProtocolInhibitorAndSurfaceDestructionReconcilePower) {
     ASSERT_NO_FATAL_FAILURE(roundtrip());
     ASSERT_NO_FATAL_FAILURE(check());
     EXPECT_EQ(changes_.size(), 2u);
-    idle_->activity(&left_);
+    idle_->activity();
     ASSERT_NO_FATAL_FAILURE(check());
-    EXPECT_EQ(changes_.back(), (PowerChange{&left_, true}));
+    EXPECT_EQ(std::ranges::count(changes_, PowerChange{&left_, true}), 1);
+    EXPECT_EQ(std::ranges::count(changes_, PowerChange{&right_, true}), 1);
     ASSERT_NO_FATAL_FAILURE(advance(30min));
-    EXPECT_EQ(changes_.size(), 3u);
+    EXPECT_EQ(changes_.back(), (PowerChange{&right_, false}));
+    EXPECT_EQ(changes_.size(), 5u);
     surface.reset();
     ASSERT_NO_FATAL_FAILURE(roundtrip());
     ASSERT_NO_FATAL_FAILURE(check());
     ASSERT_NO_FATAL_FAILURE(advance(15min));
     EXPECT_EQ(changes_.back(), (PowerChange{&left_, false}));
-    EXPECT_EQ(changes_.size(), 4u);
+    EXPECT_EQ(changes_.size(), 6u);
 }
 
 TEST_F(IdleTrial, InhibitingSubsurfaceMapAndUnmapScheduleTheirOwnVisibilityChecks) {
@@ -376,7 +382,7 @@ TEST_F(IdleTrial, PausedSeatDoesNotCommitPowerAndResumesIdleDeadline) {
     ASSERT_NO_FATAL_FAILURE(advance(15min));
     EXPECT_EQ(changes_.size(), 2u);
     idle_->set_active(false);
-    idle_->activity(&left_);
+    idle_->activity();
     idle_->remove(&right_);
     now_ += 1h;
     EXPECT_GE(wl_event_loop_dispatch(loop_, 0), 0);
@@ -403,7 +409,7 @@ TEST_F(IdleTrial, RejectedPowerTransitionsRetryOnceAndRetainTheAppliedState) {
     EXPECT_EQ(changes_.size(), 2u);
     // No visibility or config change follows the input. The policy must
     // schedule its own check, then arm the remaining idle deadline.
-    idle_->activity(&left_);
+    idle_->activity();
     now_ += 15min - 10ms;
     ASSERT_NO_FATAL_FAILURE(wait_for_check());
     ASSERT_EQ(changes_.size(), 2u);
@@ -413,7 +419,7 @@ TEST_F(IdleTrial, RejectedPowerTransitionsRetryOnceAndRetainTheAppliedState) {
     EXPECT_EQ(std::ranges::count(changes_, PowerChange{&right_, false}), 0);
 
     remaining_rejections_ = 1;
-    idle_->activity(&left_);
+    idle_->activity();
     ASSERT_NO_FATAL_FAILURE(check());
     ASSERT_NO_FATAL_FAILURE(advance(250ms));
     EXPECT_EQ(std::ranges::count(changes_, PowerChange{&left_, true}), 2);

@@ -13,7 +13,7 @@ struct seaside_cursor_point {
 
 struct seaside_cursor_gap {
     struct seaside_cursor_point point;
-    double offset, crossing, gap;
+    double crossing, gap;
     bool found;
 };
 

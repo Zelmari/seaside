@@ -1155,11 +1155,18 @@ bool seaside_tty_drm_select_mode(struct wlr_output *output,
     const int width = settings->width ? settings->width : preferred->width;
     const int height = settings->height ? settings->height : preferred->height;
     struct wlr_output_mode *mode, *selected = NULL;
+    int64_t best_distance = 500; // Half a Hz covers nominal rates from EDID timings.
     wl_list_for_each(mode, &output->modes, link) {
-        if (mode->width == width && mode->height == height &&
-            (!settings->refresh_millihz || mode->refresh == settings->refresh_millihz) &&
-            (!selected || selected->refresh < mode->refresh)) {
+        if (mode->width != width || mode->height != height) {
+            continue;
+        }
+        const int64_t distance = settings->refresh_millihz
+                                     ? llabs((int64_t)mode->refresh - settings->refresh_millihz)
+                                     : 0;
+        if (distance < best_distance ||
+            (distance == best_distance && (!selected || selected->refresh < mode->refresh))) {
             selected = mode;
+            best_distance = distance;
         }
     }
     if (!selected) {
@@ -1596,7 +1603,7 @@ static struct seaside_cursor_point cross_output_gap(const struct seaside_tty_drm
         }
         seaside_cursor_consider_gap(current, destination, origin, target, &best);
     }
-    return best.found ? best.point : target;
+    return best.found ? best.point : seaside_cursor_clamp(current, target);
 }
 
 bool seaside_tty_drm_move(struct seaside_tty_drm *drm, bool absolute, double x, double y) {

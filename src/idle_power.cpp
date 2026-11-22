@@ -85,24 +85,24 @@ void IdlePower::visibility_changed() noexcept {
     }
 }
 
-void IdlePower::activity(wlr_output *output) noexcept {
-    const auto found = outputs_.find(output);
-    if (!active_ || found == outputs_.end()) {
+void IdlePower::activity() noexcept {
+    if (!active_) {
         return;
     }
-    auto &state = found->second;
     const auto now = now_();
-    state.last_activity = now;
-    if (state.retry &&
-        (state.retry->sleep || (state.retry->exhausted && now >= state.retry->after))) {
-        if (state.retry->sleep && state.retry->exhausted) {
-            // This awake output no longer has an idle timer after both rejections.
+    for (auto &[output, state] : outputs_) {
+        state.last_activity = now;
+        if (state.retry &&
+            (state.retry->sleep || (state.retry->exhausted && now >= state.retry->after))) {
+            if (state.retry->sleep && state.retry->exhausted) {
+                // A display whose sleep retry expired needs a new deadline.
+                visibility_changed();
+            }
+            state.retry.reset();
+        }
+        if (state.sleeping) {
             visibility_changed();
         }
-        state.retry.reset();
-    }
-    if (state.sleeping) {
-        visibility_changed();
     }
 }
 
