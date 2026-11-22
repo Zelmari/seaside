@@ -1,6 +1,7 @@
 #include "idle_inhibit.h"
 
 #include <stdlib.h>
+#include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_idle_inhibit_v1.h>
 
 struct seaside_idle_inhibit {
@@ -13,12 +14,14 @@ struct seaside_idle_inhibit {
 
 struct inhibitor_watch {
     struct seaside_idle_inhibit *owner;
-    struct wl_listener destroy;
+    struct wl_listener destroy, map, unmap;
     struct wl_list link;
 };
 
 static void remove_watch(struct inhibitor_watch *watch) {
     wl_list_remove(&watch->destroy.link);
+    wl_list_remove(&watch->map.link);
+    wl_list_remove(&watch->unmap.link);
     wl_list_remove(&watch->link);
     free(watch);
 }
@@ -33,6 +36,18 @@ static void inhibitor_destroyed(struct wl_listener *listener, void *data) {
     owner->changed(owner->data);
 }
 
+static void surface_mapped(struct wl_listener *listener, void *data) {
+    (void)data;
+    struct inhibitor_watch *watch = wl_container_of(listener, watch, map);
+    watch->owner->changed(watch->owner->data);
+}
+
+static void surface_unmapped(struct wl_listener *listener, void *data) {
+    (void)data;
+    struct inhibitor_watch *watch = wl_container_of(listener, watch, unmap);
+    watch->owner->changed(watch->owner->data);
+}
+
 static void new_inhibitor(struct wl_listener *listener, void *data) {
     struct seaside_idle_inhibit *owner = wl_container_of(listener, owner, new_inhibitor);
     struct wlr_idle_inhibitor_v1 *inhibitor = data;
@@ -43,7 +58,12 @@ static void new_inhibitor(struct wl_listener *listener, void *data) {
     }
     watch->owner = owner;
     watch->destroy.notify = inhibitor_destroyed;
+    watch->map.notify = surface_mapped;
+    watch->unmap.notify = surface_unmapped;
     wl_signal_add(&inhibitor->events.destroy, &watch->destroy);
+    // A subsurface can change its mapped state without new desktop projection.
+    wl_signal_add(&inhibitor->surface->events.map, &watch->map);
+    wl_signal_add(&inhibitor->surface->events.unmap, &watch->unmap);
     wl_list_insert(&owner->watches, &watch->link);
     owner->changed(owner->data);
 }

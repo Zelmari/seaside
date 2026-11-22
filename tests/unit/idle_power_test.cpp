@@ -7,11 +7,22 @@
 #include <cstring>
 #include <gtest/gtest.h>
 #include <poll.h>
+#include <sys/mman.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #include <vector>
 #include <wayland-client.h>
 #include <wayland-server-core.h>
+
+// Keep the C-only wlroots headers out of the C++ fixture.
+extern "C" {
+wlr_renderer *wlr_pixman_renderer_create();
+bool wlr_renderer_init_wl_shm(wlr_renderer *renderer, wl_display *display);
+wlr_surface *wlr_surface_from_resource(wl_resource *resource);
+void wlr_surface_map(wlr_surface *surface);
+void wlr_surface_for_each_surface(wlr_surface *surface,
+                                  void (*visit)(wlr_surface *, int, int, void *), void *data);
+}
 
 // The policy only borrows these identities. The power callback is the test's
 // DRM boundary, while Wayland inhibitor creation and destruction are real.
@@ -33,7 +44,10 @@ class IdleTrial : public testing::Test {
         server_ = wl_display_create();
         ASSERT_NE(server_, nullptr);
         loop_ = wl_display_get_event_loop(server_);
-        ASSERT_NE(seaside_wlr_compositor_create(server_, nullptr), nullptr);
+        renderer_.reset(wlr_pixman_renderer_create());
+        ASSERT_NE(renderer_, nullptr);
+        ASSERT_TRUE(wlr_renderer_init_wl_shm(renderer_.get(), server_));
+        ASSERT_NE(seaside_wlr_compositor_create(server_, renderer_.get()), nullptr);
         idle_ = IdlePower::create(
             loop_, server_,
             [this](wlr_output *output, bool on) {
@@ -46,6 +60,22 @@ class IdleTrial : public testing::Test {
             },
             [this](wlr_surface *surface) {
                 EXPECT_NE(surface, nullptr);
+                if (subsurface_root_) {
+                    struct Search {
+                        wlr_surface *target;
+                        bool mapped = false;
+                    } search{surface};
+                    wlr_surface_for_each_surface(
+                        subsurface_root_,
+                        [](wlr_surface *part, int, int, void *data) {
+                            auto &search = *static_cast<Search *>(data);
+                            search.mapped |= part == search.target;
+                        },
+                        &search);
+                    ++subsurface_checks_;
+                    subsurface_visible_ = search.mapped;
+                    return search.mapped ? inhibited_ : nullptr;
+                }
                 return inhibited_;
             },
             [this](wlr_output *output) {
@@ -66,6 +96,12 @@ class IdleTrial : public testing::Test {
         }
         if (compositor_) {
             wl_compositor_destroy(compositor_);
+        }
+        if (subcompositor_) {
+            wl_subcompositor_destroy(subcompositor_);
+        }
+        if (shm_) {
+            wl_shm_destroy(shm_);
         }
         if (registry_) {
             wl_registry_destroy(registry_);
@@ -104,13 +140,20 @@ class IdleTrial : public testing::Test {
         } else if (std::strcmp(interface, zwp_idle_inhibit_manager_v1_interface.name) == 0) {
             self.manager_ = static_cast<zwp_idle_inhibit_manager_v1 *>(
                 wl_registry_bind(registry, name, &zwp_idle_inhibit_manager_v1_interface, 1));
+        } else if (std::strcmp(interface, wl_subcompositor_interface.name) == 0) {
+            self.subcompositor_ = static_cast<wl_subcompositor *>(
+                wl_registry_bind(registry, name, &wl_subcompositor_interface, 1));
+        } else if (std::strcmp(interface, wl_shm_interface.name) == 0) {
+            self.shm_ =
+                static_cast<wl_shm *>(wl_registry_bind(registry, name, &wl_shm_interface, 1));
         }
     }
 
     void connect_client() {
         int sockets[2];
         ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sockets), 0);
-        if (!wl_client_create(server_, sockets[0])) {
+        server_client_ = wl_client_create(server_, sockets[0]);
+        if (!server_client_) {
             close(sockets[0]);
             close(sockets[1]);
             FAIL() << "Could not create Wayland test client";
@@ -151,16 +194,32 @@ class IdleTrial : public testing::Test {
         ASSERT_TRUE(done);
     }
 
+    void wait_for_subsurface_check(unsigned previous) {
+        const auto deadline = IdlePower::Clock::now() + 1s;
+        while (subsurface_checks_ == previous && IdlePower::Clock::now() < deadline) {
+            ASSERT_GE(wl_event_loop_dispatch(loop_, 10), 0);
+        }
+        ASSERT_GT(subsurface_checks_, previous);
+    }
+
     wl_display *server_ = nullptr;
     wl_event_loop *loop_ = nullptr;
+    wl_client *server_client_ = nullptr;
     wl_display *client_ = nullptr;
     wl_registry *registry_ = nullptr;
     wl_compositor *compositor_ = nullptr;
+    wl_subcompositor *subcompositor_ = nullptr;
+    wl_shm *shm_ = nullptr;
     zwp_idle_inhibit_manager_v1 *manager_ = nullptr;
+    std::unique_ptr<wlr_renderer, decltype(&seaside_wlr_renderer_destroy)> renderer_{
+        nullptr, seaside_wlr_renderer_destroy};
     std::unique_ptr<IdlePower> idle_;
     wlr_output left_, right_;
     wlr_output *fullscreen_ = nullptr;
     wlr_output *inhibited_ = nullptr;
+    wlr_surface *subsurface_root_ = nullptr;
+    unsigned subsurface_checks_ = 0;
+    bool subsurface_visible_ = false;
     wlr_output *rejection_target_ = nullptr;
     unsigned remaining_rejections_ = 0;
     unsigned checks_ = 0;
@@ -239,6 +298,74 @@ TEST_F(IdleTrial, HiddenProtocolInhibitorAndSurfaceDestructionReconcilePower) {
     ASSERT_NO_FATAL_FAILURE(advance(15min));
     EXPECT_EQ(changes_.back(), (PowerChange{&left_, false}));
     EXPECT_EQ(changes_.size(), 4u);
+}
+
+TEST_F(IdleTrial, InhibitingSubsurfaceMapAndUnmapScheduleTheirOwnVisibilityChecks) {
+    ASSERT_NO_FATAL_FAILURE(connect_client());
+    ASSERT_NE(shm_, nullptr);
+    ASSERT_NE(subcompositor_, nullptr);
+    using Surface = std::unique_ptr<wl_surface, decltype(&wl_surface_destroy)>;
+    Surface parent(wl_compositor_create_surface(compositor_), wl_surface_destroy);
+    Surface child(wl_compositor_create_surface(compositor_), wl_surface_destroy);
+    ASSERT_TRUE(parent && child);
+    std::unique_ptr<wl_subsurface, decltype(&wl_subsurface_destroy)> subsurface(
+        wl_subcompositor_get_subsurface(subcompositor_, child.get(), parent.get()),
+        wl_subsurface_destroy);
+    ASSERT_NE(subsurface, nullptr);
+    wl_subsurface_set_desync(subsurface.get());
+
+    constexpr int stride = 4;
+    const int fd = memfd_create("seaside-idle-subsurface", MFD_CLOEXEC);
+    ASSERT_GE(fd, 0);
+    if (ftruncate(fd, 2 * stride) != 0) {
+        close(fd);
+        FAIL() << "Could not size the subsurface pixel buffers";
+    }
+    auto *pool = wl_shm_create_pool(shm_, fd, 2 * stride);
+    close(fd);
+    ASSERT_NE(pool, nullptr);
+    using Buffer = std::unique_ptr<wl_buffer, decltype(&wl_buffer_destroy)>;
+    Buffer parent_buffer(wl_shm_pool_create_buffer(pool, 0, 1, 1, stride, WL_SHM_FORMAT_XRGB8888),
+                         wl_buffer_destroy);
+    Buffer child_buffer(
+        wl_shm_pool_create_buffer(pool, stride, 1, 1, stride, WL_SHM_FORMAT_XRGB8888),
+        wl_buffer_destroy);
+    wl_shm_pool_destroy(pool);
+    ASSERT_TRUE(parent_buffer && child_buffer);
+    wl_surface_attach(parent.get(), parent_buffer.get(), 0, 0);
+    wl_surface_commit(parent.get());
+    ASSERT_NO_FATAL_FAILURE(roundtrip());
+    auto *resource = wl_client_get_object(
+        server_client_, wl_proxy_get_id(reinterpret_cast<wl_proxy *>(parent.get())));
+    ASSERT_NE(resource, nullptr);
+    subsurface_root_ = wlr_surface_from_resource(resource);
+    ASSERT_NE(subsurface_root_, nullptr);
+    // The fixture acts as the parent role. The child maps and unmaps through
+    // the real subsurface protocol without another commit to its parent.
+    wlr_surface_map(subsurface_root_);
+    inhibited_ = &left_;
+    const auto initial = subsurface_checks_;
+    std::unique_ptr<zwp_idle_inhibitor_v1, decltype(&zwp_idle_inhibitor_v1_destroy)> inhibitor(
+        zwp_idle_inhibit_manager_v1_create_inhibitor(manager_, child.get()),
+        zwp_idle_inhibitor_v1_destroy);
+    ASSERT_NE(inhibitor, nullptr);
+    ASSERT_NO_FATAL_FAILURE(roundtrip());
+    ASSERT_NO_FATAL_FAILURE(wait_for_subsurface_check(initial));
+    EXPECT_FALSE(subsurface_visible_);
+
+    const auto before_map = subsurface_checks_;
+    wl_surface_attach(child.get(), child_buffer.get(), 0, 0);
+    wl_surface_commit(child.get());
+    ASSERT_NO_FATAL_FAILURE(roundtrip());
+    ASSERT_NO_FATAL_FAILURE(wait_for_subsurface_check(before_map));
+    EXPECT_TRUE(subsurface_visible_);
+
+    const auto before_unmap = subsurface_checks_;
+    wl_surface_attach(child.get(), nullptr, 0, 0);
+    wl_surface_commit(child.get());
+    ASSERT_NO_FATAL_FAILURE(roundtrip());
+    ASSERT_NO_FATAL_FAILURE(wait_for_subsurface_check(before_unmap));
+    EXPECT_FALSE(subsurface_visible_);
 }
 
 TEST_F(IdleTrial, PausedSeatDoesNotCommitPowerAndResumesIdleDeadline) {
