@@ -817,7 +817,8 @@ static void handle_group_key(struct wl_listener *listener, void *data) {
         return;
     }
     const bool pressed = event->state == WL_KEYBOARD_KEY_STATE_PRESSED;
-    if (input->callbacks.activity) {
+    // A release without an XKB update can come from keyboard teardown.
+    if ((pressed || event->update_state) && input->callbacks.activity) {
         input->callbacks.activity(input->data, false);
     }
     const bool handled =

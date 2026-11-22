@@ -43,6 +43,7 @@ struct observation {
     unsigned exact_case_shortcuts;
     unsigned shadowed_case_shortcuts;
     unsigned modifier_changes;
+    unsigned keyboard_activity;
     uint8_t modifiers;
     bool absolute;
     double x, y;
@@ -109,6 +110,12 @@ static void record_modifiers(void *data, uint8_t modifiers) {
     struct observation *observation = data;
     ++observation->modifier_changes;
     observation->modifiers = modifiers;
+}
+
+static void record_keyboard_activity(void *data, bool pointer) {
+    check(!pointer, "unexpected pointer activity in the keyboard fixture");
+    struct observation *observation = data;
+    ++observation->keyboard_activity;
 }
 
 static const struct wlr_backend_impl backend_impl = {0};
@@ -504,6 +511,7 @@ static void exercise_wayland_keyboard(void) {
         .launch_requested = record_launch,
         .shortcut_pressed = record_shortcut,
         .modifiers_changed = record_modifiers,
+        .activity = record_keyboard_activity,
     };
     struct seaside_tty_input *input =
         seaside_tty_input_create(&backend, &terminal_callbacks, &observation);
@@ -562,8 +570,11 @@ static void exercise_wayland_keyboard(void) {
     key(&second, KEY_ENTER, WL_KEYBOARD_KEY_STATE_RELEASED);
     key(&first, KEY_LEFTSHIFT, WL_KEYBOARD_KEY_STATE_RELEASED);
     check(observation.launches == 1, "shortcut repeated or matched Super+Shift+Return");
+    const unsigned activity_before_removal = observation.keyboard_activity;
     wlr_keyboard_finish(&first);
     round_trip(server, client);
+    check(observation.keyboard_activity == activity_before_removal,
+          "unplugging a keyboard with a held key counted as idle activity");
     check(keyboard_client.depressed == 0, "unplugging keyboard left Super stuck");
     check(keyboard_client.key_events == 5 && keyboard_client.key == KEY_LEFTMETA &&
               keyboard_client.key_state == WL_KEYBOARD_KEY_STATE_RELEASED,
@@ -572,6 +583,8 @@ static void exercise_wayland_keyboard(void) {
     key(&second, KEY_ESC, WL_KEYBOARD_KEY_STATE_PRESSED);
     key(&second, KEY_ESC, WL_KEYBOARD_KEY_STATE_RELEASED);
     round_trip(server, client);
+    check(observation.keyboard_activity == activity_before_removal + 2,
+          "a physical key press or release did not count as idle activity");
     const struct seaside_tty_input_snapshot received = seaside_tty_input_get_snapshot(input);
     check(received.has_keyboard_focus && received.forwarded_key_events == 7 &&
               received.forwarded_key_presses == 3 && received.launch_requests == 1 &&
