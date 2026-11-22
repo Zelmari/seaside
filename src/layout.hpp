@@ -117,7 +117,7 @@ class WorkspaceLayout {
     std::pair<int, int> split_minima(const Node &node, int extent) const noexcept;
     std::optional<int> fit_children(const Node &node, int span, int requested) const noexcept;
     void project_columns();
-    bool resize_split(WindowId id, Direction direction, int distance, bool allow_opposite);
+    bool resize_split(WindowId id, Direction direction, int distance);
     bool resize_column(WindowId id, int delta);
     WindowRect tiling_area() const noexcept;
 

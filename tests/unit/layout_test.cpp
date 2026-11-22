@@ -80,6 +80,34 @@ TEST(DwindleLayout, ResizeMovesTheSplitAndRespectsBothClientMinima) {
     EXPECT_EQ(layout.geometry(2), (WindowRect{700, 0, 300, 500}));
 }
 
+TEST(DwindleLayout, KeyboardResizeMovesTheNearestDividerInEitherDirection) {
+    WorkspaceLayout layout(no_gaps());
+    layout.set_area({0, 0, 1000, 600});
+    ASSERT_TRUE(layout.add({1, 1, {}}));
+    ASSERT_TRUE(layout.add({2, 2, {}}, 1));
+    ASSERT_TRUE(layout.add({3, 3, {}}, 1));
+    const auto left = layout.geometry(1);
+    const auto right = layout.geometry(2);
+    const auto bottom = layout.geometry(3);
+
+    for (const auto id : {1U, 2U, 3U}) {
+        EXPECT_TRUE(layout.resize(id, Direction::right, 24));
+        EXPECT_EQ(layout.geometry(2)->width, right->width - 24);
+        EXPECT_TRUE(layout.resize(id, Direction::left, 24));
+        EXPECT_EQ(layout.geometry(1), left);
+        EXPECT_EQ(layout.geometry(2), right);
+        EXPECT_EQ(layout.geometry(3), bottom);
+    }
+    for (const auto id : {1U, 3U}) {
+        EXPECT_TRUE(layout.resize(id, Direction::down, 20));
+        EXPECT_EQ(layout.geometry(1)->height, left->height + 20);
+        EXPECT_TRUE(layout.resize(id, Direction::up, 20));
+        EXPECT_EQ(layout.geometry(1), left);
+        EXPECT_EQ(layout.geometry(2), right);
+        EXPECT_EQ(layout.geometry(3), bottom);
+    }
+}
+
 TEST(DwindleLayout, ShrinksInnerGapsAndSquareBordersToFitFeasibleClientMinima) {
     WorkspaceLayout layout({.outer_gap = 0, .inner_gap = 10, .border_width = 1});
     layout.set_area({0, 0, 20, 10});

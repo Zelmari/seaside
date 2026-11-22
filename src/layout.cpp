@@ -747,8 +747,7 @@ bool WorkspaceLayout::resize_column(WindowId id, int delta) {
     return true;
 }
 
-bool WorkspaceLayout::resize_split(WindowId id, Direction direction, int distance,
-                                   bool allow_opposite) {
+bool WorkspaceLayout::resize_split(WindowId id, Direction direction, int distance) {
     const auto tile = tiles_.find(id);
     if (tile == tiles_.end() || distance <= 0 || area_.width == 0 || area_.height == 0) {
         return false;
@@ -758,8 +757,7 @@ bool WorkspaceLayout::resize_split(WindowId id, Direction direction, int distanc
     auto child = tile->second.position;
     while (const auto parent = nodes_[child].parent) {
         auto &split = nodes_[parent];
-        if (split.horizontal == axis &&
-            (allow_opposite || (split.second == child) == before(direction))) {
+        if (split.horizontal == axis) {
             const auto &first = nodes_[split.first];
             const auto &second = nodes_[split.second];
             const int current = axis ? first.box.width : first.box.height;
@@ -789,7 +787,7 @@ bool WorkspaceLayout::resize(WindowId id, Direction direction, int distance) {
     if (settings_.kind == Layout::scrolling) {
         return horizontal(direction) && resize_column(id, before(direction) ? -distance : distance);
     }
-    return resize_split(id, direction, distance, false);
+    return resize_split(id, direction, distance);
 }
 
 bool WorkspaceLayout::resize_by(WindowId id, int dx, int dy) {
@@ -798,9 +796,8 @@ bool WorkspaceLayout::resize_by(WindowId id, int dx, int dy) {
     }
     const auto magnitude = [](int delta) { return coordinate(std::abs(std::int64_t{delta})); };
     const bool x =
-        dx && resize_split(id, dx < 0 ? Direction::left : Direction::right, magnitude(dx), true);
-    const bool y =
-        dy && resize_split(id, dy < 0 ? Direction::up : Direction::down, magnitude(dy), true);
+        dx && resize_split(id, dx < 0 ? Direction::left : Direction::right, magnitude(dx));
+    const bool y = dy && resize_split(id, dy < 0 ? Direction::up : Direction::down, magnitude(dy));
     return x || y;
 }
 
