@@ -56,7 +56,7 @@ def environment():
     return env
 
 
-def prepare(source, results, state, env):
+def prepare(source, results, state, env, part=8, extra_targets=()):
     limit = 64 * 1024 * 1024
     bundle = source / "revision.bundle"
     with standard["OPENER"].open(base + "/bundle", timeout=30) as response:
@@ -84,13 +84,14 @@ def prepare(source, results, state, env):
         event("build", revision[:12])
         require(not run_logged(["meson", "setup", "build", "--buildtype=debug"], repo, log, 120,
                                env=env), "Guest configure failed")
-        targets = ["seaside", "seasidectl", "seaside-part7-native-client", "seaside-portal-stream"]
+        targets = ["seaside", "seasidectl", "seaside-part7-native-client", "seaside-portal-stream",
+                   *extra_targets]
         require(not run_logged(["meson", "compile", "-C", "build", "-j2", *targets], repo, log,
                                420, env=env), "Guest compositor or fixture build failed")
     else:
         event("harness", revision[:12])
         reports = results / "harness"
-        suites = ["unit", "integration", "runner", "hardware", "part8"]
+        suites = ["unit", "integration", "runner", "hardware", f"part{part}"]
         command = ["tools/run-tests", "--jobs", "2", "--timeout", "420", "--results-dir", str(reports)]
         for suite in suites:
             command.extend(("--suite", suite))
@@ -102,19 +103,20 @@ def prepare(source, results, state, env):
             upload(path.name, path)
         report = json.loads(summary.read_text())
         state["software_checks"] = report["software_status"]
-        part8 = [row for row in report["tests"] if row["part"] == 8]
+        required = [row for row in report["tests"] if row["part"] == part]
         real_portals = [row for row in report["tests"] if row["test_id"].endswith("part3-real-portals")]
-        require(status == 0 and state["software_checks"] == "pass" and part8 and
-                all(row["status"] == "pass" for row in part8) and len(real_portals) == 1 and
+        require(status == 0 and state["software_checks"] == "pass" and required and
+                all(row["status"] == "pass" for row in required) and len(real_portals) == 1 and
                 real_portals[0]["status"] == "pass",
-                f"Guest regression, Part 8, or real portal test failed ({status})")
+                f"Guest regression, Part {part}, or real portal test failed ({status})")
     return repo
 
 
 class Session:
-    def __init__(self, repo, root, results, env):
+    def __init__(self, repo, root, results, env, label="part8"):
         self.repo, self.results = repo, results
-        self.log = results / "part8-session.log"
+        self.label = label
+        self.log = results / f"{label}-session.log"
         self.state_dir = root / "state"
         self.env = dict(env, XDG_CONFIG_HOME=str(root / "config"), XDG_STATE_HOME=str(self.state_dir))
         self.config = root / "config/seaside/config.toml"
@@ -152,7 +154,7 @@ class Session:
             wayland, socket = self.marker.read_text().splitlines()
             require(wayland and socket, "The TTY session did not provide its connection sockets")
             self.env.update(WAYLAND_DISPLAY=wayland, SEASIDE_SOCKET=socket)
-            require(self.ctl("status")["ready"], "The Part 8 session is not ready over IPC")
+            require(self.ctl("status")["ready"], f"The {self.label} session is not ready over IPC")
             return self
         except BaseException:
             stop(self.process)
@@ -179,7 +181,7 @@ class Session:
         return next(row for row in data["outputs"] if row["output_id"] == output["id"])
 
     def grab(self, output, name):
-        path = self.results / f"part8-{name}.png"
+        path = self.results / f"{self.label}-{name}.png"
         require(not checked(["grim", "-s", "1", "-o", output["connector"], path], env=self.env),
                 "grim wrote unexpected data to standard output")
         with path.open("rb") as stream:
@@ -200,9 +202,9 @@ class Session:
 
     def close(self):
         require(self.ctl("exit")["accepted"] and self.process.wait(timeout=12) == 0,
-                "The Part 8 session did not exit cleanly")
+                f"The {self.label} session did not exit cleanly")
         require(not Path(self.env["SEASIDE_SOCKET"]).exists() and standard["active"]() == "tty1",
-                "The Part 8 session did not release IPC and return to TTY 1")
+                f"The {self.label} session did not release IPC and return to TTY 1")
 
 
 @contextmanager
@@ -339,7 +341,7 @@ def run_portal(session, pattern, source_type, size, state):
     if not session.chooser:
         outcomes[source_type] = {"status": "blocked", "reason": "Wofi is unavailable in the guest trial"}
         return
-    log = session.results / f"part8-portal-{source_type}.log"
+    log = session.results / f"{session.label}-portal-{source_type}.log"
     for attempt in range(1, 4):
         with fixture(session, log, "seaside-portal-stream", source_type, "frame") as reader:
             def chooser_focused():
@@ -349,7 +351,7 @@ def run_portal(session, pattern, source_type, size, state):
                            for row in session.ctl("windows")["windows"])
 
             wait_for(chooser_focused, 10, "the focused portal chooser", reader)
-            event("part8-input", f"choose the real {source_type} for the portal receiver", key=source_type)
+            event(f"{session.label}-input", f"choose the real {source_type} for the portal receiver", key=source_type)
             next_paint = 0.0
 
             def repaint_running():
@@ -368,7 +370,7 @@ def run_portal(session, pattern, source_type, size, state):
             except RuntimeError:
                 if attempt == 3 or "PipeWire stream state streaming" not in log.read_text(errors="replace"):
                     raise
-                event("part8", f"retrying linked portal stream without frames, attempt {attempt}")
+                event(session.label, f"retrying linked portal stream without frames, attempt {attempt}")
                 state.setdefault("portal_linked_retries", {})[source_type] = attempt
                 continue
             code = reader.wait(timeout=8)
@@ -476,4 +478,5 @@ def trial():
         event("done", state.get("error", "Part 8 VM trial passed"), ok=state["ok"])
 
 
-trial()
+if __name__ == "__main__":
+    trial()
