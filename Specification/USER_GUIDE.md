@@ -11,7 +11,8 @@ by systemd and a graphics driver that exposes a working hardware cursor plane
 for your output. The package uses Arch's PipeWire audio stack, desktop portal
 services, and `foot`. The package manager resolves the runtime dependencies,
 including polkit for logind VT switching and RealtimeKit for PipeWire's audio
-and capture scheduling.
+and capture scheduling. Set up any Wi-Fi connection in Arch before installing
+Seaside. The package leaves networking to the operating system.
 
 ### Install a supplied package
 

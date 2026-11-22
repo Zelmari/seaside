@@ -33,8 +33,12 @@ makepkg -si
 
 ### Install a package archive
 
-If you have a `.pkg.tar.zst` archive, substitute its filename below. Compare
-the first command’s output with the supplied SHA-256 checksum before installing.
+Download the `.pkg.tar.zst` archive and `SHA256SUMS` from the
+[GitHub releases page](https://github.com/Zelmari/seaside/releases). Substitute
+the archive filename below and compare the first command's output with its
+entry in `SHA256SUMS` before installing. Use the same commands with a newer
+archive to upgrade. Your configuration stays in `~/.config/seaside/` unless
+you use a custom `$XDG_CONFIG_HOME`.
 
 ```sh
 sha256sum ./seaside-example-x86_64.pkg.tar.zst
