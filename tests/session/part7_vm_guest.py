@@ -538,9 +538,18 @@ def run_audio(session, state):
 
     def set_history(value):
         # Without --save this applies only to the running session manager.
-        output(["wpctl", "settings", history_key, value], env=session.env)
-        wait_for(lambda: read_metadata("sm-settings", history_key) == (value, history[1]),
-                 5, "WirePlumber history setting " + value)
+        next_attempt = 0.0
+
+        def apply():
+            nonlocal next_attempt
+            if read_metadata("sm-settings", history_key) == (value, history[1]):
+                return True
+            if time.monotonic() >= next_attempt:
+                output(["wpctl", "settings", history_key, value], env=session.env)
+                next_attempt = time.monotonic() + 0.5
+            return False
+
+        wait_for(apply, 8, "WirePlumber history setting " + value)
 
     modules = []
     sink_name = f"seaside_part7_{session.process.pid}"
