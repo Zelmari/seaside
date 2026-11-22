@@ -754,4 +754,5 @@ def trial():
         event("done", state.get("error", "Part 7 VM trial passed"), ok=state["ok"])
 
 
-trial()
+if __name__ == "__main__":
+    trial()

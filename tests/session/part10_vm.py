@@ -38,6 +38,20 @@ def helper(revision, source, namespace, context):
             f"exec(compile({code!r}, {source!r}, 'exec'), {namespace})\n")
 
 
+def worker_settings(revision, package, pkg_config_path, renderer):
+    return (
+        f"part10_package = {package!r}\n"
+        f"part10_artifacts = {tuple(sorted(ARTIFACTS))!r}\n"
+        f"part10_pkg_config_path = {str(pkg_config_path or '')!r}\n"
+        f"part10_renderer = {renderer!r}\n"
+        + helper(revision, "part8_vm_guest.py", "helpers",
+                 "standard=standard, part8_runtime_prefix='', part8_pkg_config_path='', "
+                 "part8_renderer=part10_renderer")
+        + helper(revision, "part9_vm_guest.py", "recovery", "standard=standard, helpers=helpers")
+        + helper(revision, "part7_vm_guest.py", "compatibility", "standard=standard")
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--vm", required=True, help="the isolated Arch package-test guest")
@@ -67,17 +81,7 @@ def main():
         package = dict(name=args.package.name, sha256=hashlib.sha256(archive).hexdigest(),
                        size=len(archive), preinstalled=args.preinstalled)
         with revision_bundle() as (revision, bundle):
-            settings = (
-                f"part10_package = {package!r}\n"
-                f"part10_artifacts = {tuple(sorted(ARTIFACTS))!r}\n"
-                f"part10_pkg_config_path = {str(args.pkg_config_path or '')!r}\n"
-                f"part10_renderer = {args.renderer!r}\n"
-                + helper(revision, "part8_vm_guest.py", "helpers",
-                         "standard=standard, part8_runtime_prefix='', part8_pkg_config_path='', "
-                         "part8_renderer=part10_renderer")
-                + helper(revision, "part9_vm_guest.py", "recovery", "standard=standard, helpers=helpers")
-                + helper(revision, "part7_vm_guest.py", "compatibility", "standard=standard")
-            )
+            settings = worker_settings(revision, package, args.pkg_config_path, args.renderer)
             return run(args, revision, bundle, scenario="part10", captures=ARTIFACTS,
                        send_input=send_input, settings=settings,
                        scenario_source=guest_source(revision, "part10_vm_guest.py"),

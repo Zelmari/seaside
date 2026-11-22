@@ -507,6 +507,11 @@ test('part10-installed-payload', python,
   depends: [seaside, seasidectl], suite: ['integration', 'part10'], timeout: 45,
   env: {'SEASIDE_TEST_PART': '10', 'SEASIDE_REQUIREMENTS': '3,11.1,12.2b'},
 )
+test('part10-worker-assembly', python,
+  args: files('tests/session/test_part10_worker.py'),
+  suite: ['runner', 'part10'], timeout: 15,
+  env: {'SEASIDE_TEST_PART': '10', 'SEASIDE_REQUIREMENTS': '12.2b'},
+)
 
 headless_fixture = executable(
   'seaside-headless-fixture',
