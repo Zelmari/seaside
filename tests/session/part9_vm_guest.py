@@ -99,13 +99,12 @@ def expect_integration(records, state, service, limit=16):
     return wait_for(observed, limit, f"{name} for {service}")
 
 
-def stop_owned_backend(session):
-    service = "org.freedesktop.impl.portal.desktop.wlr"
+def stop_owned_portal(session, service):
     pid_output = checked(["busctl", "--user", "call", "org.freedesktop.DBus", "/org/freedesktop/DBus",
                           "org.freedesktop.DBus", "GetConnectionUnixProcessID", "s", service],
                          env=session.env)
     match = re.fullmatch(rb"u ([1-9][0-9]*)\s*", pid_output)
-    require(match is not None, "The portal backend has no known process owner")
+    require(match is not None, f"No known process owner for {service}")
     pid = int(match[1])
     proc = Path(f"/proc/{pid}")
     descriptor = os.pidfd_open(pid)
@@ -113,7 +112,7 @@ def stop_owned_backend(session):
         require("/seaside-portal-" in (proc / "cgroup").read_text() and
                 f"WAYLAND_DISPLAY={session.env['WAYLAND_DISPLAY']}".encode() in
                 (proc / "environ").read_bytes().split(b"\0"),
-                "Refusing to stop a portal backend outside the trial's units")
+                f"Refusing to stop {service} outside the trial's units")
         signal.pidfd_send_signal(descriptor, signal.SIGTERM)
     finally:
         os.close(descriptor)
@@ -162,30 +161,35 @@ def run_trace(session, output, pattern, state):
 
 def run_recovery(session, output, pattern, client, server, state):
     focus = session.ctl("focus")
+    transitions = {}
     with subscription(session) as records:
         server.stop()
-        pipewire_down = expect_integration(records, "failed", "pipewire")
+        down = expect_integration(records, "failed", "pipewire")
         require(session.ctl("status")["ready"] and session.ctl("focus") == focus and
                 session.window(TITLE)["id"] == client["id"],
                 "The client or session was lost on private PipeWire disconnection")
         server.start()
-        pipewire_up = expect_integration(records, "recovered", "pipewire")
-        backend = stop_owned_backend(session)
-        portal_down = expect_integration(records, "failed", "capture-backend")
-        require(session.ctl("status")["ready"] and session.ctl("focus") == focus and
-                session.window(TITLE)["id"] == client["id"],
-                "The client or session was lost on portal backend disconnection")
-        portal_up = expect_integration(records, "recovered", "capture-backend")
-        require(pipewire_down["seq"] < pipewire_up["seq"] and portal_down["seq"] < portal_up["seq"],
-                "An integration recovery event preceded its failure")
-        state["recovery"] = {"status": "pass", "window": client["id"], "stopped_backend": backend,
-                             "event_sequences": [row["seq"] for row in
-                                                 (pipewire_down, pipewire_up, portal_down, portal_up)]}
+        up = expect_integration(records, "recovered", "pipewire")
+        transitions["pipewire"] = {"failed": down["seq"], "recovered": up["seq"]}
+        for name, service in (("capture-backend", "org.freedesktop.impl.portal.desktop.wlr"),
+                              ("portal-frontend", "org.freedesktop.portal.Desktop")):
+            pid = stop_owned_portal(session, service)
+            down = expect_integration(records, "failed", name)
+            require(session.ctl("status")["ready"] and session.ctl("focus") == focus and
+                    session.window(TITLE)["id"] == client["id"],
+                    f"The client or session was lost after {name} disconnected")
+            up = expect_integration(records, "recovered", name)
+            transitions[name] = {"failed": down["seq"], "recovered": up["seq"], "stopped_pid": pid}
+    require(all(pair["failed"] < pair["recovered"] for pair in transitions.values()),
+            "An integration recovery event preceded its failure")
     require(session.ctl("window", "toggle-fullscreen")["changed"], "Fullscreen did not start for sharing")
     mode = output["mode"]
     helpers["run_portal"](session, pattern, "monitor", (mode["width"], mode["height"]), state)
+    require(state["fullscreen_portal"]["monitor"]["status"] == "pass",
+            "The new monitor share requires the real chooser and a received frame")
     require(session.ctl("focus")["window_id"] == client["id"], "Sharing did not return focus to its client")
     require(session.ctl("window", "toggle-fullscreen")["changed"], "Fullscreen did not end after sharing")
+    state["recovery"] = {"status": "pass", "window": client["id"], "transitions": transitions}
 
 
 def run_idle(session, output, client, state):
