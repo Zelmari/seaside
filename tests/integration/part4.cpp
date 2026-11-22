@@ -652,6 +652,48 @@ bool run_fixture(const seaside::Config &config, bool (*scenario)(const Fixture &
     return scenario({display, **scene, desktop, backend, (*server)->allocator(), renderer});
 }
 
+bool run_sparse_view_ids(const Fixture &fixture) {
+    // Exercise two concurrent live IDs with identical low bits and a large gap.
+    constexpr WindowId low = 17, high = (WindowId{1} << 48) + low;
+    WindowId next = low;
+    fixture.scene.set_window_handler(
+        [](void *data, const seaside_scene_window_event *event) -> WindowId {
+            return event->kind == SEASIDE_WINDOW_CREATED ? *static_cast<WindowId *>(data) : 0;
+        },
+        &next);
+    Connection connection(fixture.display);
+    Client first, second;
+    REQUIRE(connection.connect(first) && connection.open(first));
+    next = high;
+    REQUIRE(connection.connect(second) && connection.open(second));
+    xdg_toplevel_set_app_id(first.toplevel, "low");
+    xdg_toplevel_set_app_id(second.toplevel, "high");
+    REQUIRE(connection.attach(first, 20, 10) && connection.attach(second, 30, 15));
+    const auto app_id = [&](WindowId id) {
+        const char *value = fixture.scene.window_metadata(id).app_id;
+        return std::string_view(value ? value : "");
+    };
+    REQUIRE(app_id(low) == "low" && app_id(high) == "high");
+    first.destroy_window();
+    REQUIRE(connection.roundtrip(first));
+    REQUIRE(!fixture.scene.window_metadata(low).app_id);
+    auto *surface = fixture.scene.window_surface(high);
+    REQUIRE(surface && !fixture.scene.window_surface(low));
+    wl_surface_attach(second.surface, nullptr, 0, 0);
+    wl_surface_commit(second.surface);
+    REQUIRE(connection.roundtrip(second) && !fixture.scene.window_surface(high));
+    xdg_toplevel_set_app_id(second.toplevel, "remapped");
+    const auto before = second.configures;
+    wl_surface_commit(second.surface);
+    REQUIRE(connection.wait(second, [&] { return second.configures > before; }));
+    REQUIRE(connection.attach(second, 24, 12) && fixture.scene.window_surface(high) == surface);
+    REQUIRE(app_id(high) == "remapped");
+    second.destroy_window();
+    REQUIRE(connection.roundtrip(second) && !fixture.scene.window_metadata(high).app_id);
+    fixture.scene.set_window_handler(nullptr, nullptr);
+    return true;
+}
+
 bool run_part4(const Fixture &fixture) {
     auto &scene = fixture.scene;
     auto &desktop = fixture.desktop;
@@ -2022,7 +2064,8 @@ int main(int argc, char **argv) {
     auto config = seaside::default_config();
     if (argc == 1) {
         config.window.tiling = false;
-        return run_fixture(config, run_part4) && run_fixture(config, run_workspace_reassignment) &&
+        return run_fixture(config, run_part4) && run_fixture(config, run_sparse_view_ids) &&
+                       run_fixture(config, run_workspace_reassignment) &&
                        run_fixture(config, run_floating_borders) &&
                        run_fixture(config, run_floating_resize_limits) &&
                        run_fixture(config, run_client_gestures)

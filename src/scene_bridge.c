@@ -4,6 +4,7 @@
 #include "window_capture.h"
 
 #include <drm_fourcc.h>
+#include <glib.h>
 #include <limits.h>
 #include <math.h>
 #include <stdio.h>
@@ -40,6 +41,7 @@ struct seaside_scene_bridge {
     double cursor_x, cursor_y;
     bool cursor_known;
     struct wl_list views;
+    GHashTable *views_by_id;
     struct wl_list popups;
     struct wl_list outputs;
     struct wl_listener new_toplevel;
@@ -188,16 +190,7 @@ void seaside_scene_drop_image(struct wlr_buffer *buffer) {
 }
 
 static struct scene_view *find_view(const struct seaside_scene_bridge *scene, uint64_t id) {
-    if (!id) {
-        return NULL;
-    }
-    struct scene_view *view;
-    wl_list_for_each(view, &scene->views, link) {
-        if (view->id == id) {
-            return view;
-        }
-    }
-    return NULL;
+    return scene && id ? g_hash_table_lookup(scene->views_by_id, &id) : NULL;
 }
 
 static struct scene_view *toplevel_view(const struct seaside_scene_bridge *scene,
@@ -877,6 +870,9 @@ static void destroy_view(struct scene_view *view) {
     wl_list_remove(&view->request_resize.link);
     wl_list_remove(&view->set_parent.link);
     wl_list_remove(&view->link);
+    if (view->id) {
+        g_hash_table_remove(view->owner->views_by_id, &view->id);
+    }
     wlr_scene_node_set_enabled(&view->tree->node, false);
     emit_window(view, SEASIDE_WINDOW_DESTROYED, false, false);
     wlr_scene_node_destroy(&view->tree->node);
@@ -936,7 +932,9 @@ static void new_toplevel(struct wl_listener *listener, void *data) {
     wl_signal_add(&toplevel->events.set_parent, &view->set_parent);
     wl_list_insert(&scene->views, &view->link);
     view->id = emit_window(view, SEASIDE_WINDOW_CREATED, false, false);
-    if (scene->window && !view->id) {
+    if (view->id) {
+        g_hash_table_insert(scene->views_by_id, &view->id, view);
+    } else if (scene->window) {
         scene->snapshot.failed = true;
         wl_client_post_no_memory(wl_resource_get_client(toplevel->resource));
     }
@@ -1546,6 +1544,7 @@ struct seaside_scene_bridge *seaside_scene_create(struct wl_display *display) {
         free(scene);
         return NULL;
     }
+    scene->views_by_id = g_hash_table_new(g_int64_hash, g_int64_equal);
     scene->new_toplevel.notify = new_toplevel;
     scene->new_popup.notify = new_popup;
     scene->shell_destroy.notify = shell_destroy;
@@ -1656,6 +1655,7 @@ void seaside_scene_move_drag_icon(struct seaside_scene_bridge *scene, int x, int
 void seaside_scene_destroy(struct seaside_scene_bridge *scene) {
     if (scene) {
         detach(scene);
+        g_hash_table_unref(scene->views_by_id);
         free(scene);
     }
 }
