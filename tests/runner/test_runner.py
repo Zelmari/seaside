@@ -917,6 +917,31 @@ class CodeCheckDiscoveryTests(unittest.TestCase):
         (self.root / "src").mkdir()
         (self.root / "src/main.cpp").write_text("int main() { return 0; }\n")
 
+    def test_analyzer_workers_respect_affinity_memory_and_ancestor_limits(self):
+        proc = self.root / 'proc'
+        (proc / 'self').mkdir(parents=True)
+        (proc / 'meminfo').write_text('MemAvailable:    7340032 kB\n')
+        (proc / 'self/cgroup').write_text('0::/slice/check\n')
+        cgroups = self.root / 'cgroup'
+        leaf = cgroups / 'slice/check'
+        leaf.mkdir(parents=True)
+        group = leaf.parent
+        with patch.object(self.check.os, 'sched_getaffinity', return_value={1, 3, 5, 7}):
+            self.assertEqual(self.check.analyzer_workers(proc, cgroups), 4)
+            (group / 'cpu.max').write_text('200000 100000')
+            self.assertEqual(self.check.analyzer_workers(proc, cgroups), 2)
+            (group / 'cpu.max').write_text('max 100000')
+            (leaf / 'memory.max').write_text(str(8 * 1024 ** 3))
+            (group / 'memory.high').write_text(str(4 * 1024 ** 3))
+            (group / 'memory.current').write_text(str(3 * 1024 ** 3))
+            self.assertEqual(self.check.analyzer_workers(proc, cgroups), 1)
+            (group / 'memory.high').unlink()
+            (proc / 'meminfo').write_text('MemAvailable:    262144 kB\n')
+            self.assertEqual(self.check.analyzer_workers(proc, cgroups), 1)
+        (proc / 'meminfo').write_text('MemAvailable:    7340032 kB\n')
+        with patch.object(self.check.os, 'sched_getaffinity', return_value={2}):
+            self.assertEqual(self.check.analyzer_workers(proc, cgroups), 1)
+
     def test_missing_empty_malformed_or_inapplicable_database_never_runs_tools(self):
         samples = [None, "[]", "{}", "[", '[{"file":"test.cpp"}]', json.dumps([
             {"directory": "/outside", "file": "test.cpp", "command": "g++ test.cpp"}])]

@@ -4,12 +4,45 @@
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
 
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+def read_limit(path):
+    try:
+        return path.read_text().strip()
+    except OSError:
+        return ''
+
+
+def analyzer_workers(proc=Path('/proc'), cgroup_root=Path('/sys/fs/cgroup')):
+    cpus = len(os.sched_getaffinity(0))
+    gib = 1024 ** 3
+    available = next((int(line.split()[1]) * 1024
+                      for line in read_limit(proc / 'meminfo').splitlines()
+                      if line.startswith('MemAvailable:')), gib)
+    # A delegated cgroup can inherit tighter limits from any ancestor.
+    membership = next((line[3:] for line in read_limit(proc / 'self/cgroup').splitlines()
+                       if line.startswith('0::')), '/')
+    group = cgroup_root / membership.lstrip('/')
+    while group.is_relative_to(cgroup_root):
+        cpu = read_limit(group / 'cpu.max').split()
+        if len(cpu) == 2 and cpu[0].isdigit() and int(cpu[1]) > 0:
+            cpus = min(cpus, int(cpu[0]) // int(cpu[1]))
+        usage = read_limit(group / 'memory.current')
+        if usage.isdigit():
+            for name in ('memory.high', 'memory.max'):
+                limit = read_limit(group / name)
+                if limit.isdigit():
+                    available = min(available, int(limit) - int(usage))
+        group = group.parent
+    # Leave half a GiB free and allow one GiB per analyzer, up to four.
+    return max(1, min(4, cpus, (available - gib // 2) // gib))
 
 
 def main():
@@ -60,7 +93,9 @@ def main():
         # Independent translation units can be analyzed concurrently. Limit the
         # process count to keep analyzer memory/CPU bounded on development guests.
         failed = False
-        with ThreadPoolExecutor(max_workers=2) as executor:
+        workers = analyzer_workers()
+        print(f'Analyzing {len(sources)} sources with {workers} worker(s)', flush=True)
+        with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = [executor.submit(run_check, ['clang-tidy', '--quiet', '-p', str(build_dir), str(path)])
                        for path in sources]
             for future in as_completed(futures):
