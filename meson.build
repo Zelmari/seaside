@@ -238,7 +238,7 @@ work_foundation = static_library(
 core = static_library(
   'seaside-core',
   ['src/server.cpp', 'src/server_c.cpp', 'src/wlroots_bridge.c',
-   'src/scene.cpp', 'src/scene_bridge.c', 'src/layer_scene.c', layer_server,
+   'src/scene.cpp', 'src/scene_bridge.c', 'src/layer_scene.c', 'src/popup_grab.c', layer_server,
    'src/window_capture.c', 'src/render_assets.cpp'],
   include_directories: include_directories('src'),
   dependencies: [wlroots, wayland_server, pixman, threads, libdrm, libpng, turbojpeg, libwebp, pangocairo, glib],

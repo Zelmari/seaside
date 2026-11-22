@@ -1,4 +1,5 @@
 #include "layer_scene.h"
+#include "popup_grab.h"
 
 #include <limits.h>
 #include <stdlib.h>
@@ -43,6 +44,7 @@ struct layer_surface {
 struct layer_popup {
     struct layer_surface *layer;
     struct wlr_xdg_popup *role;
+    struct seaside_popup_focus focus;
     struct wlr_scene_tree *tree, *surface_tree;
     struct wl_listener commit, reposition, destroy, tree_destroy;
     struct wl_list link;
@@ -572,6 +574,7 @@ static void popup_reposition(struct wl_listener *listener, void *data) {
 static void popup_tree_destroy(struct wl_listener *listener, void *data) {
     (void)data;
     struct layer_popup *popup = wl_container_of(listener, popup, tree_destroy);
+    seaside_popup_focus_finish(&popup->focus);
     wl_list_remove(&popup->commit.link);
     wl_list_remove(&popup->reposition.link);
     wl_list_remove(&popup->destroy.link);
@@ -616,6 +619,7 @@ bool seaside_layer_scene_add_popup(struct seaside_layer_scene *layers, struct wl
     }
     popup->layer = layer;
     popup->role = role;
+    seaside_popup_focus_init(&popup->focus, role);
     popup->commit.notify = popup_commit;
     popup->reposition.notify = popup_reposition;
     popup->destroy.notify = popup_destroy;

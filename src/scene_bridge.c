@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "scene_bridge.h"
 #include "layer_scene.h"
+#include "popup_grab.h"
 #include "window_capture.h"
 
 #include <drm_fourcc.h>
@@ -76,7 +77,7 @@ struct scene_view {
     struct wlr_xdg_toplevel *toplevel;
     struct seaside_window_source *capture;
     struct wlr_scene_tree *tree;
-    struct wlr_scene_tree *xdg_tree;
+    struct wlr_scene_tree *xdg_tree, *popup_tree;
     struct wlr_scene_rect *fullscreen_background;
     struct wlr_scene_rect *borders[4];
     struct wl_list link;
@@ -102,6 +103,7 @@ struct scene_view {
 struct scene_popup {
     struct scene_view *view;
     struct wlr_xdg_popup *popup;
+    struct seaside_popup_focus focus;
     struct wlr_scene_tree *tree;
     struct wlr_scene_tree *surface_tree;
     struct wlr_box source_clip;
@@ -295,7 +297,7 @@ static void source_node_position(const struct scene_view *view, const struct wlr
     *y = 0;
     /* Only buffer nodes are projected. Their tree ancestors retain the
      * unscaled positions managed by the wlroots XDG/subsurface helpers. */
-    while (node != &view->tree->node) {
+    while (node != &view->tree->node && !(view->popup_tree && node == &view->popup_tree->node)) {
         *x += node->x;
         *y += node->y;
         node = &node->parent->node;
@@ -744,6 +746,19 @@ static void view_map(struct wl_listener *listener, void *data) {
     }
 }
 
+static void place_popup_tree(struct scene_view *view) {
+    if (!view->popup_tree) {
+        return;
+    }
+    struct wlr_scene_node *node = &view->popup_tree->node;
+    const bool active = view->mapped && view->placement.visible && view->placement.activated;
+    // Menus of the active view can cross a neighboring tile. Keep their local
+    // coordinate system and leave the toplevel and other windows in place.
+    wlr_scene_node_reparent(node, active ? view->owner->windows : view->tree);
+    wlr_scene_node_set_position(node, active ? view->tree->node.x : 0,
+                                active ? view->tree->node.y : 0);
+}
+
 static void view_unmap(struct wl_listener *listener, void *data) {
     (void)data;
     struct scene_view *view = wl_container_of(listener, view, unmap);
@@ -756,6 +771,7 @@ static void view_unmap(struct wl_listener *listener, void *data) {
     }
     wlr_scene_node_set_enabled(&view->tree->node, false);
     view->placement = (struct seaside_scene_window_placement){0};
+    place_popup_tree(view);
     project_view_content(view);
     view->restore_serial = 0;
     view->size_configure_serial = 0;
@@ -878,6 +894,9 @@ static void destroy_view(struct scene_view *view) {
         g_hash_table_remove(view->owner->views_by_id, &view->id);
     }
     wlr_scene_node_set_enabled(&view->tree->node, false);
+    if (view->popup_tree) {
+        wlr_scene_node_reparent(&view->popup_tree->node, view->tree);
+    }
     emit_window(view, SEASIDE_WINDOW_DESTROYED, false, false);
     wlr_scene_node_destroy(&view->tree->node);
     free(view);
@@ -1022,6 +1041,7 @@ static void popup_reposition(struct wl_listener *listener, void *data) {
 static void popup_tree_destroy(struct wl_listener *listener, void *data) {
     (void)data;
     struct scene_popup *popup = wl_container_of(listener, popup, tree_destroy);
+    seaside_popup_focus_finish(&popup->focus);
     wl_list_remove(&popup->commit.link);
     wl_list_remove(&popup->reposition.link);
     wl_list_remove(&popup->destroy.link);
@@ -1054,7 +1074,17 @@ static void new_popup(struct wl_listener *listener, void *data) {
         toplevel_view(scene, wlr_xdg_toplevel_try_from_wlr_surface(xdg->parent));
     /* Keep ancestor movement in the scene hierarchy while giving every XDG
      * surface its own local viewport clip. A popup can extend beyond its tile. */
-    struct wlr_scene_tree *parent_tree = view ? view->tree : NULL;
+    if (view && !view->popup_tree) {
+        view->popup_tree = wlr_scene_tree_create(view->tree);
+        if (!view->popup_tree) {
+            wl_client_post_no_memory(wl_resource_get_client(xdg->resource));
+            wlr_xdg_popup_destroy(xdg);
+            return;
+        }
+        view->popup_tree->node.data = view;
+        place_popup_tree(view);
+    }
+    struct wlr_scene_tree *parent_tree = view ? view->popup_tree : NULL;
     if (!parent_tree) {
         struct scene_popup *parent = surface_popup(scene, xdg->parent);
         if (parent) {
@@ -1084,6 +1114,7 @@ static void new_popup(struct wl_listener *listener, void *data) {
     }
     popup->view = view;
     popup->popup = xdg;
+    seaside_popup_focus_init(&popup->focus, xdg);
     popup->commit.notify = popup_commit;
     popup->reposition.notify = popup_reposition;
     popup->destroy.notify = popup_destroy;
@@ -1827,6 +1858,13 @@ struct seaside_scene_rect seaside_scene_layer_work_area(struct seaside_scene_bri
     return seaside_layer_scene_work_area(scene->layers, output, fullscreen);
 }
 
+void seaside_scene_dismiss_unfocused_grabs(struct seaside_scene_bridge *scene,
+                                           struct wlr_surface *target) {
+    if (scene && scene->attached) {
+        seaside_popup_dismiss_unfocused(scene->shell, target);
+    }
+}
+
 void seaside_scene_select_layer(struct seaside_scene_bridge *scene, struct wlr_surface *surface) {
     if (scene && scene->attached) {
         seaside_layer_scene_select(scene->layers, surface);
@@ -1950,6 +1988,7 @@ void seaside_scene_place_window(struct seaside_scene_bridge *scene, uint64_t id,
     view->placement = *placement;
     const struct seaside_scene_rect box = placement->geometry;
     wlr_scene_node_set_position(&view->tree->node, box.x, box.y);
+    place_popup_tree(view);
     project_view_content(view);
     project_borders(view);
     wlr_scene_node_set_enabled(&view->tree->node, view->mapped && placement->visible);

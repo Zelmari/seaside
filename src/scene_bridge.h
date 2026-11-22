@@ -189,6 +189,8 @@ struct seaside_scene_rect seaside_scene_layer_work_area(struct seaside_scene_bri
                                                         struct wlr_output *output,
                                                         struct seaside_scene_rect bounds,
                                                         bool fullscreen);
+void seaside_scene_dismiss_unfocused_grabs(struct seaside_scene_bridge *scene,
+                                           struct wlr_surface *target);
 void seaside_scene_select_layer(struct seaside_scene_bridge *scene, struct wlr_surface *surface);
 struct wlr_surface *seaside_scene_layer_keyboard_focus(struct seaside_scene_bridge *scene,
                                                        struct wlr_output *focused_output);

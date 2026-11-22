@@ -225,6 +225,10 @@ seaside_scene_rect Scene::layer_work_area(wlr_output *output, seaside_scene_rect
     return seaside_scene_layer_work_area(bridge_, output, bounds, fullscreen);
 }
 
+void Scene::dismiss_unfocused_grabs(wlr_surface *target) noexcept {
+    seaside_scene_dismiss_unfocused_grabs(bridge_, target);
+}
+
 void Scene::select_layer(wlr_surface *surface) noexcept {
     seaside_scene_select_layer(bridge_, surface);
 }

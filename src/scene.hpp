@@ -46,6 +46,7 @@ class Scene final {
                            seaside_layer_hidden_fn hidden, void *data) noexcept;
     seaside_scene_rect layer_work_area(wlr_output *output, seaside_scene_rect bounds,
                                        bool fullscreen) noexcept;
+    void dismiss_unfocused_grabs(wlr_surface *target) noexcept;
     void select_layer(wlr_surface *surface) noexcept;
     wlr_surface *layer_keyboard_focus(wlr_output *focused_output) noexcept;
     wlr_output *visible_output(wlr_surface *surface) const noexcept;

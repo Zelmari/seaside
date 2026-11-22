@@ -309,6 +309,7 @@ void Desktop::update_keyboard_focus(wlr_surface *layer_focus, WindowId focused) 
     auto *surface = layer_focus ? layer_focus : scene_.window_surface(focused);
     keyboard_window_ = surface && !layer_focus ? std::optional{focused} : std::nullopt;
     if (input_) {
+        scene_.dismiss_unfocused_grabs(surface);
         seaside_tty_input_set_focus(input_, surface);
     }
 }

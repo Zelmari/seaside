@@ -532,16 +532,21 @@ class Connection {
         return attach(client, layer.surface, nullptr, 0, layer.width, layer.height, rgb);
     }
 
-    bool open_popup(Client &client, Popup &popup, Layer *layer = nullptr, std::uint32_t grab = 0) {
+    bool open_popup(Client &client, Popup &popup, Layer *layer = nullptr, std::uint32_t grab = 0,
+                    int anchor_x = 0, Popup *parent = nullptr) {
         popup.surface = wl_compositor_create_surface(client.compositor);
         popup.xdg = xdg_wm_base_get_xdg_surface(client.shell, popup.surface);
         xdg_surface_add_listener(popup.xdg, &popup_surface_listener, &popup);
         auto *positioner = xdg_wm_base_create_positioner(client.shell);
         xdg_positioner_set_size(positioner, 12, 8);
-        xdg_positioner_set_anchor_rect(positioner, 0, 0, 10, 10);
+        xdg_positioner_set_anchor_rect(positioner, anchor_x, 0, 10, 10);
         xdg_positioner_set_anchor(positioner, XDG_POSITIONER_ANCHOR_BOTTOM_RIGHT);
         xdg_positioner_set_gravity(positioner, XDG_POSITIONER_GRAVITY_BOTTOM_RIGHT);
-        popup.role = xdg_surface_get_popup(popup.xdg, layer ? nullptr : client.xdg, positioner);
+        popup.role = xdg_surface_get_popup(popup.xdg,
+                                           layer    ? nullptr
+                                           : parent ? parent->xdg
+                                                    : client.xdg,
+                                           positioner);
         xdg_positioner_destroy(positioner);
         xdg_popup_add_listener(popup.role, &popup_listener, &popup);
         if (layer) {
@@ -551,7 +556,7 @@ class Connection {
             xdg_popup_grab(popup.role, client.seat, grab);
         }
         wl_surface_commit(popup.surface);
-        return wait(client, [&] { return popup.serial != 0; }) &&
+        return wait(client, [&] { return popup.serial || popup.dismissed; }) && !popup.dismissed &&
                attach(client, popup.surface, popup.xdg, popup.serial, popup.geometry.width,
                       popup.geometry.height);
     }
@@ -1334,6 +1339,58 @@ struct LayerSeat {
     unsigned shortcuts = 0;
 };
 
+bool run_tile_popup(const Fixture &fixture) {
+    auto &desktop = fixture.desktop;
+    auto output = fixture.output();
+    REQUIRE(output &&
+            desktop.add_output(part3_output_handle(output.get()), "main", "", output_bounds));
+    LayerSeat seat(fixture);
+    REQUIRE(seat.start());
+    Connection connection(fixture.display);
+    Client left, right;
+    WindowId a{}, b{};
+    REQUIRE(map_tiled(fixture, connection, left, a, 160, 90, 0, red));
+    REQUIRE(map_tiled(fixture, connection, right, b, 80, 90, 0, green));
+    REQUIRE(wait_tiled(connection, left, 80, 90) && connection.attach_configured(left, red));
+    seat.click(50, 10);
+    REQUIRE(connection.wait(
+        left, [&] { return left.keyboard_surface == left.surface && left.button_serial; }));
+    Popup menu;
+    REQUIRE(connection.open_popup(left, menu, nullptr, left.button_serial, 66));
+    seaside_scene_target target{};
+    REQUIRE(fixture.scene.window_at(83, 12, target) && target.id == a &&
+            target.surface != fixture.scene.window_surface(a) && target.sx == 7 && target.sy == 2);
+    REQUIRE(wait_pixel(connection, left, output.get(), 83, 12, 0));
+    REQUIRE(left.keyboard_surface == menu.surface);
+    {
+        Popup submenu;
+        REQUIRE(connection.open_popup(left, submenu, nullptr, left.button_serial, 0, &menu));
+        REQUIRE(left.keyboard_surface == submenu.surface);
+        target = {};
+        REQUIRE(fixture.scene.window_at(88, 22, target) && target.id == a && target.sx == 2 &&
+                target.sy == 2);
+    }
+    REQUIRE(connection.roundtrip(left) && left.keyboard_surface == menu.surface);
+    auto shifted = output_bounds;
+    shifted.x = 17;
+    REQUIRE(desktop.update_output(part3_output_handle(output.get()), shifted));
+    target = {};
+    REQUIRE(fixture.scene.window_at(100, 12, target) && target.id == a && target.sx == 7 &&
+            target.sy == 2);
+    REQUIRE(wait_pixel(connection, left, output.get(), 83, 12, 0));
+
+    Popup submenu;
+    REQUIRE(connection.open_popup(left, submenu, nullptr, left.button_serial, 0, &menu));
+    REQUIRE(desktop.dispatch(action(ActionKind::cycle_focus_mru)).value_or(false));
+    seat.key(KEY_C);
+    REQUIRE(connection.roundtrip(left) && connection.roundtrip(right));
+    REQUIRE(submenu.dismissed && menu.dismissed && left.keys == 0 && right.keys == 1);
+    REQUIRE(right.keyboard_surface == right.surface && desktop.keyboard_window() == b);
+    REQUIRE(wait_pixel(connection, right, output.get(), 83, 12, green));
+    desktop.remove_output(part3_output_handle(output.get()));
+    return true;
+}
+
 bool run_pending_opening_focus(const Fixture &fixture) {
     auto &desktop = fixture.desktop;
     auto left = fixture.output();
@@ -1634,6 +1691,20 @@ bool run_layer_shell(const Fixture &fixture) {
     seat.click(4, 5);
     REQUIRE(connection.roundtrip(client) && client.pointer_surface == panel.surface &&
             client.keyboard_surface == client.surface && client.button_serial);
+    {
+        Popup menu;
+        REQUIRE(connection.open_popup(client, menu, &panel));
+        seat.click(16, 17);
+        REQUIRE(connection.roundtrip(client) && client.pointer_surface == menu.surface &&
+                client.keyboard_surface == client.surface);
+    }
+    seat.click(4, 5);
+    REQUIRE(connection.roundtrip(client));
+    {
+        Popup denied;
+        REQUIRE(!connection.open_popup(client, denied, &panel, client.button_serial));
+        REQUIRE(denied.dismissed && client.keyboard_surface == client.surface);
+    }
     zwlr_layer_surface_v1_set_keyboard_interactivity(
         panel.role, ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_ON_DEMAND);
     wl_surface_commit(panel.surface);
@@ -1645,6 +1716,7 @@ bool run_layer_shell(const Fixture &fixture) {
 
     Popup popup;
     REQUIRE(connection.open_popup(client, popup, &panel, client.button_serial));
+    REQUIRE(client.keyboard_surface == popup.surface);
     seaside_scene_target popup_hit{};
     REQUIRE(scene.window_at(16, 17, popup_hit) && popup_hit.id == 0 && popup_hit.sx == 3 &&
             popup_hit.sy == 3 && scene.visible_output(popup_hit.surface) == first);
@@ -2190,7 +2262,7 @@ int main(int argc, char **argv) {
         transaction.window.border_width = 0;
         config.window.gaps_outer = 4;
         config.window.gaps_inner = 6;
-        return run_fixture(config, run_dwindle) &&
+        return run_fixture(config, run_dwindle) && run_fixture(transaction, run_tile_popup) &&
                        run_fixture(transaction, run_opening_transaction) &&
                        run_fixture(transaction, run_workspace_during_opening) &&
                        run_fixture(transaction, run_pending_opening_focus) &&
