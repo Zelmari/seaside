@@ -634,7 +634,9 @@ PortalActivation::recover(SessionBus &bus, Completion completion,
     impl_->deadline = Clock::now() + timeout;
     impl_->stage = 0;
     impl_->recovering = true;
-    if (const auto result = impl_->request(Step::unowned); result.failure != ServiceFailure::none) {
+    const bool owns_units = std::ranges::any_of(impl.units, &Impl::Unit::requested);
+    const auto next = owns_units ? Step::unowned : Step::check_owners;
+    if (const auto result = impl_->request(next); result.failure != ServiceFailure::none) {
         impl_->completion = {};
         return std::unexpected(result);
     }

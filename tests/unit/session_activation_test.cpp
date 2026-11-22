@@ -415,6 +415,18 @@ TEST_F(PortalActivationTest, RejectsAnExistingFrontendBeforeAcquiringTheGraphica
     EXPECT_TRUE(stopped.empty());
 }
 
+TEST_F(PortalActivationTest, RetryingForeignFrontendLeavesAllExternalUnitsAlone) {
+    ASSERT_TRUE(connect(external));
+    ASSERT_TRUE(claim(*external, portals.back().name));
+    start();
+    ASSERT_EQ(outcome->second.failure, ServiceFailure::wrong_environment);
+    recover();
+    EXPECT_EQ(outcome->first, StartupService::portal_frontend);
+    EXPECT_EQ(outcome->second.failure, ServiceFailure::wrong_environment);
+    EXPECT_TRUE(started.empty());
+    EXPECT_EQ(portal_binary_checks, 0U);
+}
+
 TEST_F(PortalActivationTest, DistinguishesMissingPortalBinaryFromAnInaccessibleBinary) {
     for (const auto &[error, expected] : {std::pair{ENOENT, ServiceFailure::missing},
                                           std::pair{EACCES, ServiceFailure::activation_failed}}) {
