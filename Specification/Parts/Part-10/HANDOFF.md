@@ -77,8 +77,70 @@ personal configuration, and raw test output stay in local test storage.
 The guest used Arch kernel `7.3.5-arch1-1`, Mesa `26.3.1`, wlroots `0.20.2`,
 Wayland protocols `1.50`, PipeWire `1.6.11`, WirePlumber `0.5.19`,
 xdg-desktop-portal-wlr `0.8.4`, and Wofi `1.5.3`. The test used an isolated
-guest with its own account and package database. VirtualBox suspend/resume remains skipped because the runner has
-no verified targeted wake path.
+guest with its own account and package database. That run skipped system
+suspend because the runner lacked a verified guest wake path.
+
+## Hardening checks from 2026-11-22
+
+- Local Arch WSL2 at `cef0c9e` passed 46 checks, including formatting and
+  static analysis, and 282 GoogleTest cases. The ASan/UBSan unit and
+  integration run passed 43 checks and 282 GoogleTest cases. The installed
+  portal cases skipped locally, and the passive DRM inventory skipped in
+  the full run.
+- The usual Arch VirtualBox guest used `vmwgfx` and Pixman. Part 5 at
+  `8f52c71` exercised Dwindle split, resize and reinsert, and scrolling
+  edge navigation, resize and workspace return. Part 6 at `b76132b` passed
+  48 guest software checks and 282 GoogleTest cases, including all three
+  real portal checks. The TTY trial confirmed a recreated TOML file applied
+  only after close, with IPC ordering, recovery and restart still working.
+- The guest Part 7 trial at `cef0c9e` passed lazy X11 restart, Wayland/X11
+  clipboard transfer, real portal captures of the monitor and native and
+  X11 windows, service-loss continuity and media controls. The playback
+  monitor captured 10,800 PCM samples, and FFprobe decoded 61 H.264 frames
+  from the output recording.
+- Parts 8 and 9 passed at `1e201d4`. The guest exercised rotation,
+  fractional scaling, mode rollback, fullscreen aspect, the virtual gamma
+  LUT, layer-shell, portal and PipeWire recovery, trace export, and DRM
+  display sleep and input wake. VRR and async tearing were reported as
+  unsupported by the virtual output. The presentation sample recorded
+  32 composed and presented frames, with zero discards.
+- The resize trial at `58023b6` showed intermediate divider positions in
+  both directions while the clients withheld replacement buffers. At the
+  same revision, the disposable guest started without an active connector,
+  mapped a Wayland client, and kept the graphical target active through
+  separate portal frontend and backend restarts. A vmwgfx layout ioctl
+  delivered the reconnect event after sysfs restored the connector. The
+  original client and focus survived, the virtual cursor returned, and
+  autostart ran once.
+- The clean Arch chroot built and checked the package at `1e201d4`.
+  The disposable guest passed install, first launch, VT return, media keys,
+  portal capture, X11 restart, sleep and wake, and the 48-cycle workspace
+  workload with an unread IPC subscriber. Package reinstall and removal
+  preserved the generated config. Package SHA-256
+  `685dadf5d70eeef287f1fe60f39e054ff2fb5fbb32518298e5c356c8af6b0dfb`.
+- VirtualBox did not return a resume result after the ten-second RTC wake
+  request and targeted keyboard input. The ACPI power button powered off
+  the disposable guest. An additional virtual display also stayed unavailable
+  after applying a two-display layout. Headless checks covered two-output
+  window and workspace behavior.
+- A local headless comparison used one output and no subscribers. It
+  measured publication of unchanged state in 14 batches of 12,000
+  calls per workspace count, with the changed code compiled at `-O2`.
+  Median time per publication for 1, 8, and 64 workspaces went from
+  3.20, 15.75, and 129.08 µs to 0.39, 3.20, and 33.48 µs. The resize
+  fixture saw five output commits for five stationary pointer reports
+  before the change and zero after it. These measurements cover the
+  exercised code paths under the fixture workloads.
+
+To repeat the zero-output check in a disposable VMSVGA guest, build
+`tests/hardware/vmwgfx_layout.c` with the libdrm headers and install the
+root-owned executable as `/usr/lib/seaside-vm-test/layout`. The guest
+test account needs noninteractive sudo for that executable with the
+single argument `single` and for
+`/usr/bin/tee -- /sys/class/drm/card0-Virtual-1/status`. From the host
+checkout, verify the disposable guest is at an idle TTY 1 and run
+`tests/session/zero_output_vm.py --vm NAME --disposable --console-ready --connector card0-Virtual-1 --vmwgfx-layout-hotplug`
+with Python 3.
 
 ## Native qualification
 
