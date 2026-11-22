@@ -2,6 +2,15 @@
 
 Reviewed branch `fix/v1-vm-hardening` at `6777bd555ae2fc062b9609c2943e70d9ad1dd49e`. Two reviewers received the same task, separate checkouts at that revision and separate Arch VirtualBox guests. The checks below distinguish behavior reproduced on the baseline from candidate changes measured in disposable builds.
 
+## Implementation and verification
+
+- The keyboard, close shortcut, focus query and event subscription now agree while a new tile waits for a replacement buffer. Workspace reselection preserves the pending layout. Two-output headless tests covered both buffer arrival orders and destruction during the wait. The Arch TTY trials exercised Dwindle, scrolling, workspace reselection, resize reversal and focus before and after presentation.
+- The live config reader follows profile links and handles pathname truncation, hard-link publication and lost close notifications. The guest trial overflowed the actual 16,384-event inotify queue twice, checked that an open prefix stayed out of last-good state, and observed the completed save. It also recovered a profile that temporarily pointed to a directory. The user guide covers filesystems and ownership arrangements that restrict read leases. [Configuration guide](../USER_GUIDE.md)
+- A rejected idle power transition rearms after fresh input. Night light retries a rejected update on a synchronized composed frame. Twelve deterministic display scenarios covered enable, temperature change and disable under transient and persistent rejection. The guest exercised real sleep, wake, cursor restoration, gamma changes and captures. Over one 6.16-second idle sample the compositor used less than one reported CPU tick and its main thread made 52 voluntary context switches. The observation timer still checks for faults and deadlines.
+- Optimized DRM builds now pass GCC's warnings-as-errors checks. The default build compiles the cursor path at both `-O2` and `-O3`. Trace export created private directories and files under umasks `000`, `002` and `022`. VM diagnostics covered empty, running and stopped traces.
+- Floating resize projects the affected window and its dialogs. Window queries use a live ID index and construct each result row once. An unchanged IPC publication with a long connector name went from one measured C++ allocation to zero. An ordinary short connector already required zero. The projection and query report gives complete operation timings, including the small-desktop tradeoff. [Performance measurements](HARDENING_PERFORMANCE.md)
+- The guest captured a monitor, native window and X11 window, recorded a playable H.264 stream, retained keyboard focus across a VT switch and survived portal service restarts. A disposable Arch guest started with its only virtual connector disabled and restored the client, focus and cursor after the kernel hotplug event. Physical display latency, native AMD VRR and system suspend/resume require separate hardware qualification.
+
 ## Recommended order
 
 - Fix the optimized build first so all performance work and regression tests can run with release-like flags.
