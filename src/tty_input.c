@@ -68,6 +68,7 @@ struct seaside_tty_input {
     struct wl_listener request_drag;
     struct wl_listener drag_destroy;
     struct wl_listener drag_origin_destroy;
+    struct wlr_surface *drag_origin;
     struct tty_device *pointer_grab_device;
 };
 
@@ -316,6 +317,12 @@ void seaside_tty_input_cancel_drag(struct seaside_tty_input *input) {
     cancel_drag(input ? input->seat : NULL);
 }
 
+void seaside_tty_input_cancel_drag_from(struct seaside_tty_input *input, struct wlr_surface *root) {
+    if (input && input->drag_origin && wlr_surface_get_root_surface(input->drag_origin) == root) {
+        seaside_tty_input_cancel_drag(input);
+    }
+}
+
 static void remove_device(struct tty_device *device) {
     struct seaside_tty_input *input = device->input;
     wl_list_remove(&device->link);
@@ -464,6 +471,7 @@ static void handle_drag_destroy(struct wl_listener *listener, void *data) {
     struct seaside_tty_input *input = wl_container_of(listener, input, drag_destroy);
     wl_list_remove(&input->drag_destroy.link);
     wl_list_remove(&input->drag_origin_destroy.link);
+    input->drag_origin = NULL;
     /* wlroots ends its pointer grab before sending the data-device leave. */
     seaside_tty_input_refresh_pointer(input);
 }
@@ -488,6 +496,7 @@ static void handle_drag_request(struct wl_listener *listener, void *data) {
         wlr_seat_start_pointer_drag(seat, drag, event->serial);
         wl_signal_add(&drag->events.destroy, &input->drag_destroy);
         wl_signal_add(&event->origin->events.destroy, &input->drag_origin_destroy);
+        input->drag_origin = event->origin;
         if (drag->icon && input->callbacks.drag_icon) {
             input->callbacks.drag_icon(input->data, drag->icon);
         }
@@ -543,6 +552,9 @@ static void handle_relative_motion(struct wl_listener *listener, void *data) {
             event->delta_y, event->unaccel_dx, event->unaccel_dy);
     }
     move_pointer(input, event->time_msec, false, event->delta_x, event->delta_y);
+    if (input->callbacks.activity && isfinite(event->delta_x) && isfinite(event->delta_y)) {
+        input->callbacks.activity(input->data, true);
+    }
 }
 
 static void handle_absolute_motion(struct wl_listener *listener, void *data) {
@@ -550,6 +562,9 @@ static void handle_absolute_motion(struct wl_listener *listener, void *data) {
     const struct wlr_pointer_motion_absolute_event *event = data;
     struct seaside_tty_input *input = device->input;
     move_pointer(input, event->time_msec, true, event->x, event->y);
+    if (input->callbacks.activity && isfinite(event->x) && isfinite(event->y)) {
+        input->callbacks.activity(input->data, true);
+    }
 }
 
 static void handle_pointer_button(struct wl_listener *listener, void *data) {
@@ -562,6 +577,10 @@ static void handle_pointer_button(struct wl_listener *listener, void *data) {
     }
     const uint32_t button = event->button;
     const bool pressed = event->state == WL_POINTER_BUTTON_STATE_PRESSED;
+    /* Device removal can synthesize a release without local input. */
+    if (pressed && input->callbacks.activity) {
+        input->callbacks.activity(input->data, true);
+    }
     if (button < KEY_CNT && device->suppressed_drag_buttons[button]) {
         device->suppressed_drag_buttons[button] = pressed;
         return;
@@ -631,6 +650,9 @@ static void handle_pointer_axis(struct wl_listener *listener, void *data) {
     struct tty_device *device = wl_container_of(listener, device, axis);
     const struct wlr_pointer_axis_event *event = data;
     struct seaside_tty_input *input = device->input;
+    if (input->callbacks.activity) {
+        input->callbacks.activity(input->data, true);
+    }
     if (input->seat && input->consumed_button_count == 0) {
         update_pointer_target(input, event->time_msec);
         wlr_seat_pointer_notify_axis(input->seat, event->time_msec, event->orientation,
@@ -795,6 +817,9 @@ static void handle_group_key(struct wl_listener *listener, void *data) {
         return;
     }
     const bool pressed = event->state == WL_KEYBOARD_KEY_STATE_PRESSED;
+    if (input->callbacks.activity) {
+        input->callbacks.activity(input->data, false);
+    }
     const bool handled =
         pressed && !input->consumed[event->keycode] && configured_shortcut(input, event->keycode);
     if (input->shortcut_state) {

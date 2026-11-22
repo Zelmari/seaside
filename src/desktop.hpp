@@ -35,6 +35,8 @@ class Desktop final {
     }
     wlr_output *focused_output_handle() const noexcept;
     WindowRect output_bounds(wlr_output *output) const noexcept;
+    bool has_fullscreen(wlr_output *output) const noexcept;
+    bool layer_has_keyboard_focus() const noexcept { return layer_has_focus_; }
     bool action(const Action &action, std::uint8_t modifiers = 0) noexcept;
     std::expected<bool, DesktopActionError>
     dispatch(const Action &action, std::uint8_t modifiers = 0, std::optional<WindowId> window = {},
@@ -52,6 +54,7 @@ class Desktop final {
   private:
     struct Output {
         std::string id, connector, identity;
+        WindowRect work;
     };
     struct Drag {
         WindowId window;
@@ -62,6 +65,7 @@ class Desktop final {
     };
 
     static std::uint64_t on_window(void *self, const seaside_scene_window_event *event) noexcept;
+    static void on_layer_changed(void *self) noexcept;
     std::uint64_t window_event(const seaside_scene_window_event &event);
     void project(WindowId resize = 0);
     bool update_size_limits(WindowId id);
@@ -81,6 +85,7 @@ class Desktop final {
     std::optional<Drag> drag_;
     std::uint8_t cycle_modifiers_ = 0;
     bool failed_ = false;
+    bool layer_has_focus_ = false;
 };
 
 } // namespace seaside

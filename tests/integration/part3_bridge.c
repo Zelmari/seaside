@@ -5,6 +5,8 @@
 #include <string.h>
 #include <wayland-server-core.h>
 #include <wlr/backend/headless.h>
+#include <wlr/interfaces/wlr_keyboard.h>
+#include <wlr/interfaces/wlr_pointer.h>
 #include <wlr/render/pixman.h>
 #include <wlr/types/wlr_buffer.h>
 #include <wlr/types/wlr_output.h>
@@ -143,6 +145,64 @@ bool part3_output_set_scale(struct part3_output *output, float scale) {
     bool committed = wlr_output_commit_state(output->output, &state);
     wlr_output_state_finish(&state);
     return committed;
+}
+
+bool part3_output_set_transform(struct part3_output *output, int transform) {
+    struct wlr_output_state state;
+    wlr_output_state_init(&state);
+    wlr_output_state_set_transform(&state, (enum wl_output_transform)transform);
+    const bool committed = wlr_output_commit_state(output->output, &state);
+    wlr_output_state_finish(&state);
+    return committed;
+}
+
+struct part3_input {
+    struct wlr_keyboard keyboard;
+    struct wlr_pointer pointer;
+};
+
+static const struct wlr_keyboard_impl keyboard_impl = {.name = "fixture"};
+static const struct wlr_pointer_impl pointer_impl = {.name = "fixture"};
+
+struct part3_input *part3_input_create(struct wlr_backend *backend) {
+    struct part3_input *input = calloc(1, sizeof(*input));
+    if (!input) {
+        return NULL;
+    }
+    wlr_keyboard_init(&input->keyboard, &keyboard_impl, "fixture keyboard");
+    wlr_pointer_init(&input->pointer, &pointer_impl, "fixture pointer");
+    wl_signal_emit_mutable(&backend->events.new_input, &input->keyboard.base);
+    wl_signal_emit_mutable(&backend->events.new_input, &input->pointer.base);
+    return input;
+}
+
+void part3_input_destroy(struct part3_input *input) {
+    if (input) {
+        wlr_pointer_finish(&input->pointer);
+        wlr_keyboard_finish(&input->keyboard);
+        free(input);
+    }
+}
+
+void part3_input_key(struct part3_input *input, uint32_t code, bool pressed) {
+    struct wlr_keyboard_key_event event = {
+        .time_msec = 10,
+        .keycode = code,
+        .update_state = true,
+        .state = pressed ? WL_KEYBOARD_KEY_STATE_PRESSED : WL_KEYBOARD_KEY_STATE_RELEASED,
+    };
+    wlr_keyboard_notify_key(&input->keyboard, &event);
+}
+
+void part3_input_button(struct part3_input *input, uint32_t code, bool pressed) {
+    struct wlr_pointer_button_event event = {
+        .pointer = &input->pointer,
+        .time_msec = 10,
+        .button = code,
+        .state = pressed ? WL_POINTER_BUTTON_STATE_PRESSED : WL_POINTER_BUTTON_STATE_RELEASED,
+    };
+    wlr_pointer_notify_button(&input->pointer, &event);
+    wl_signal_emit_mutable(&input->pointer.events.frame, &input->pointer);
 }
 
 struct part3_output_snapshot part3_output_get_snapshot(struct part3_output *output) {

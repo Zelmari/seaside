@@ -21,6 +21,9 @@ typedef void (*seaside_scene_focus_fn)(void *data, struct wlr_surface *surface);
 typedef void (*seaside_scene_output_appearance_fn)(void *data, struct wlr_output *output, int width,
                                                    float scale);
 typedef void (*seaside_scene_image_release_fn)(void *data);
+typedef struct wlr_output *(*seaside_layer_output_fn)(void *data);
+typedef void (*seaside_layer_changed_fn)(void *data);
+typedef void (*seaside_layer_hidden_fn)(void *data, struct wlr_surface *root);
 
 struct seaside_scene_rect {
     int x, y, width, height;
@@ -38,6 +41,19 @@ struct seaside_scene_render_status {
     const char *tearing_reason, *night_light_reason;
     const char *backend, *frame_state, *presentation_mode, *fallback_reason;
 };
+
+struct seaside_scene_frame_observation {
+    const char *event;
+    const char *presentation_mode;
+    uint32_t commit_seq;
+    bool succeeded;
+    bool tearing;
+    /* Monotonic presentation feedback. Zero means unavailable. */
+    uint64_t presentation_ns;
+};
+
+typedef void (*seaside_scene_frame_fn)(void *data, struct wlr_output *output,
+                                       const struct seaside_scene_frame_observation *observation);
 
 enum seaside_scene_window_event_kind {
     SEASIDE_WINDOW_CREATED,
@@ -107,6 +123,8 @@ void seaside_scene_set_linux_dmabuf(struct seaside_scene_bridge *scene,
                                     struct wlr_linux_dmabuf_v1 *dmabuf);
 void seaside_scene_set_render_policy(struct seaside_scene_bridge *scene, bool direct_scanout,
                                      bool allow_tearing, bool night_light, int temperature_kelvin);
+void seaside_scene_set_frame_observer(struct seaside_scene_bridge *scene,
+                                      seaside_scene_frame_fn callback, void *data);
 struct seaside_scene_render_status
 seaside_scene_get_render_status(const struct seaside_scene_bridge *scene,
                                 struct wlr_output *output);
@@ -140,6 +158,19 @@ void seaside_scene_set_appearance_handler(struct seaside_scene_bridge *scene,
 
 void seaside_scene_set_window_handler(struct seaside_scene_bridge *scene,
                                       seaside_scene_window_fn handler, void *data);
+void seaside_scene_set_layer_handler(struct seaside_scene_bridge *scene,
+                                     seaside_layer_output_fn focused_output,
+                                     seaside_layer_changed_fn changed,
+                                     seaside_layer_hidden_fn hidden, void *data);
+struct seaside_scene_rect seaside_scene_layer_work_area(struct seaside_scene_bridge *scene,
+                                                        struct wlr_output *output,
+                                                        struct seaside_scene_rect bounds,
+                                                        bool fullscreen);
+void seaside_scene_select_layer(struct seaside_scene_bridge *scene, struct wlr_surface *surface);
+struct wlr_surface *seaside_scene_layer_keyboard_focus(struct seaside_scene_bridge *scene,
+                                                       struct wlr_output *focused_output);
+struct wlr_output *seaside_scene_visible_output(const struct seaside_scene_bridge *scene,
+                                                struct wlr_surface *surface);
 /* Install the selected-window protocols before dispatching client maps. */
 bool seaside_scene_enable_window_capture(struct seaside_scene_bridge *scene,
                                          struct wlr_allocator *allocator,

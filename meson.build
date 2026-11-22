@@ -40,6 +40,28 @@ glib = dependency('glib-2.0', include_type: 'system')
 find_program('dbus-daemon')
 find_program('pipewire')
 wayland_scanner = find_program('wayland-scanner')
+layer_xml = wlr_protocols.get_variable(pkgconfig: 'pkgdatadir') / 'unstable/wlr-layer-shell-unstable-v1.xml'
+layer_server = custom_target(
+  'layer-shell-server-header', input: layer_xml, output: 'wlr-layer-shell-unstable-v1-protocol.h',
+  command: [wayland_scanner, 'server-header', '@INPUT@', '@OUTPUT@'],
+)
+layer_client = custom_target(
+  'layer-shell-client-header', input: layer_xml, output: 'wlr-layer-shell-unstable-v1-client-protocol.h',
+  command: [wayland_scanner, 'client-header', '@INPUT@', '@OUTPUT@'],
+)
+layer_client_code = custom_target(
+  'layer-shell-client-code', input: layer_xml, output: 'wlr-layer-shell-unstable-v1-protocol.c',
+  command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'],
+)
+idle_inhibit_xml = wayland_protocols.get_variable(pkgconfig: 'pkgdatadir') / 'unstable/idle-inhibit/idle-inhibit-unstable-v1.xml'
+idle_inhibit_client = custom_target(
+  'idle-inhibit-client-header', input: idle_inhibit_xml, output: 'idle-inhibit-client-protocol.h',
+  command: [wayland_scanner, 'client-header', '@INPUT@', '@OUTPUT@'],
+)
+idle_inhibit_code = custom_target(
+  'idle-inhibit-client-code', input: idle_inhibit_xml, output: 'idle-inhibit-protocol.c',
+  command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'],
+)
 display_protocols = []
 foreach protocol : ['stable/presentation-time/presentation-time', 'staging/fractional-scale/fractional-scale-v1']
   name = protocol.split('/')[-1]
@@ -178,7 +200,8 @@ work_foundation = static_library(
 core = static_library(
   'seaside-core',
   ['src/server.cpp', 'src/server_c.cpp', 'src/wlroots_bridge.c',
-   'src/scene.cpp', 'src/scene_bridge.c', 'src/window_capture.c', 'src/render_assets.cpp'],
+   'src/scene.cpp', 'src/scene_bridge.c', 'src/layer_scene.c', layer_server,
+   'src/window_capture.c', 'src/render_assets.cpp'],
   include_directories: include_directories('src'),
   dependencies: [wlroots, wayland_server, pixman, threads, libdrm, libpng, turbojpeg, libwebp, pangocairo, glib],
   link_with: work_foundation,
@@ -377,7 +400,7 @@ session_activation_tests = executable(
   link_args: ['-Wl,--wrap=access'],
   install: false,
 )
-test('part3-session-activation', session_activation_tests, suite: ['unit', 'part3'], timeout: 30,
+test('part3-session-activation', session_activation_tests, suite: ['unit', 'part3', 'part9'], timeout: 30,
   env: {'SEASIDE_GTEST': '1', 'SEASIDE_TEST_PART': '3', 'SEASIDE_REQUIREMENTS': '3.1,12.2b'},
 )
 
@@ -412,7 +435,7 @@ ipc_tests = executable(
   include_directories: include_directories('src', 'tests/unit'),
   dependencies: [gtest, nlohmann_json, wayland_server], link_with: ipc_foundation, install: false,
 )
-test('part6-ipc', ipc_tests, suite: ['unit', 'part6'], timeout: 20,
+test('part6-ipc', ipc_tests, suite: ['unit', 'part6', 'part9'], timeout: 20,
   env: {'SEASIDE_GTEST': '1', 'SEASIDE_TEST_PART': '6', 'SEASIDE_REQUIREMENTS': '10,12.2b'},
 )
 test('part6-cli', python, args: [files('tests/integration/test_seasidectl.py'), seasidectl],
@@ -420,12 +443,49 @@ test('part6-cli', python, args: [files('tests/integration/test_seasidectl.py'), 
   env: {'SEASIDE_TEST_PART': '6', 'SEASIDE_REQUIREMENTS': '10,12.2b'},
 )
 
+idle_foundation = static_library(
+  'seaside-idle-foundation', ['src/idle_power.cpp', 'src/idle_inhibit.c'],
+  include_directories: include_directories('src'),
+  dependencies: [wlroots, wayland_server], install: false,
+)
+idle_tests = executable(
+  'seaside-part9-idle-tests',
+  ['tests/unit/idle_power_test.cpp', idle_inhibit_client, idle_inhibit_code],
+  include_directories: include_directories('src', 'tests/unit'),
+  dependencies: [gtest, wlroots, wayland_server, wayland_client],
+  link_with: [idle_foundation, core], install: false,
+)
+test('part9-idle-power', idle_tests, suite: ['unit', 'part9'], timeout: 20,
+  env: {'SEASIDE_GTEST': '1', 'SEASIDE_TEST_PART': '9', 'SEASIDE_REQUIREMENTS': '7.4,11,12.2b'},
+)
+
+trace_foundation = static_library(
+  'seaside-trace-foundation', 'src/trace.cpp',
+  include_directories: include_directories('src'),
+  dependencies: [nlohmann_json, wayland_server, threads],
+  link_with: [work_foundation, config_foundation], install: false,
+)
+trace_tests = executable(
+  'seaside-part9-trace-tests', 'tests/unit/trace_test.cpp',
+  include_directories: include_directories('src', 'tests/unit'),
+  dependencies: [gtest, nlohmann_json, wayland_server, threads],
+  link_with: trace_foundation, install: false,
+)
+test('part9-trace', trace_tests, suite: ['unit', 'part9'], timeout: 30,
+  env: {'SEASIDE_GTEST': '1', 'SEASIDE_TEST_PART': '9', 'SEASIDE_REQUIREMENTS': '10.5,10.6,12.1,12.2b'},
+)
+
+executable('seaside-part9-panel',
+  ['tests/integration/part9_panel.c', layer_client, layer_client_code, xdg_shell_private_code],
+  dependencies: wayland_client, install: false,
+)
+
 seaside = executable(
   'seaside', ['src/session_entry.cpp', 'src/session_control.cpp', 'src/output_config.cpp'],
   include_directories: include_directories('src'),
   dependencies: [wlroots, wayland_server, pixman, libdrm, systemd, pipewire, xkbcommon, xau, threads, nlohmann_json],
   link_with: [core, tty_foundation, config_foundation, capture_foundation, session_foundation,
-              desktop_foundation, ipc_foundation],
+              desktop_foundation, ipc_foundation, idle_foundation, trace_foundation],
   install: true,
 )
 install_data('packaging/seaside-portals.conf', install_dir: get_option('datadir') / 'xdg-desktop-portal')
@@ -490,7 +550,8 @@ test('part8-output-policy', part6_output_tests, suite: ['integration', 'part6', 
 part4_fixture = executable(
   'seaside-part4-fixture',
   ['tests/integration/part4.cpp', 'tests/integration/part3_bridge.c',
-   xdg_shell_client_header, xdg_shell_private_code, activation_client_header, activation_private_code],
+   xdg_shell_client_header, xdg_shell_private_code, activation_client_header, activation_private_code,
+   layer_client, layer_client_code],
   include_directories: include_directories('src', 'tests/integration', 'tests/unit'),
   dependencies: [wlroots, wayland_server, wayland_client, pixman, libdrm, xkbcommon, threads, gtest],
   link_with: [desktop_foundation, core, tty_foundation, config_foundation], install: false,
@@ -510,6 +571,9 @@ test('part6-headless-attention', part4_fixture, args: ['attention'], suite: ['in
 test('part8-fullscreen-aspect', part4_fixture, args: ['fullscreen-aspect'],
   suite: ['integration', 'part8'], timeout: 30,
   env: {'SEASIDE_TEST_PART': '8', 'SEASIDE_REQUIREMENTS': '6.1,6.2,7.2,12.2b'},
+)
+test('part9-layer-shell', part4_fixture, args: ['layer-shell'], suite: ['integration', 'part9'],
+  timeout: 30, env: {'SEASIDE_TEST_PART': '9', 'SEASIDE_REQUIREMENTS': '4.4,6.1,7.1,11,12.2b'},
 )
 
 test('part6-binding-reload-during-drag', part4_fixture, args: ['binding-reload'],

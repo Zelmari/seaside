@@ -10,6 +10,8 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <utility>
+#include <vector>
 #include <wayland-server-core.h>
 
 namespace seaside {
@@ -49,7 +51,7 @@ class IpcFixture : public ::testing::Test {
         }
     }
 
-    auto make_server(std::string_view display)
+    auto make_server(std::string_view display, IpcServer::DeferredHandler deferred = {})
         -> std::expected<std::unique_ptr<IpcServer>, std::string> {
         return IpcServer::create(
             loop, display,
@@ -66,7 +68,7 @@ class IpcFixture : public ::testing::Test {
                 }
                 return IpcJson{{"method", method}, {"params", params}};
             },
-            [this] { ++exits; });
+            [this] { ++exits; }, std::move(deferred));
     }
 
     int connect_to(std::string_view path = {}) {
@@ -300,6 +302,78 @@ TEST_F(IpcFixture, QueuesSubscriptionReplyBeforeEventsAndTracksSnapshotWatermark
     EXPECT_EQ(event["data"]["workspace_id"], 2);
     EXPECT_EQ(receive(fd)["id"], 2);
     EXPECT_EQ(receive(fd)["seq"], 2);
+}
+
+TEST_F(IpcFixture, DeferredReplyKeepsIdUntilFlushAndUsesCompletionWatermark) {
+    std::vector<IpcServer::Completion> pending;
+    auto deferred =
+        make_server("wayland-12",
+                    [&](const IpcJson &, IpcServer::Completion finish) -> std::optional<IpcResult> {
+                        pending.push_back(std::move(finish));
+                        return std::nullopt;
+                    });
+    ASSERT_TRUE(deferred);
+    server = std::move(*deferred);
+    const int fd = connect_to();
+    ASSERT_GE(fd, 0);
+    send_all(fd,
+             request(1, "events.subscribe") + request(2, "trace.export") + request(2) + request(3));
+    EXPECT_EQ(receive(fd)["id"], 1);
+    EXPECT_EQ(receive(fd)["error"]["code"], "invalid_request");
+    EXPECT_EQ(receive(fd)["id"], 3);
+    ASSERT_EQ(pending.size(), 1);
+    server->event("workspace.changed", {{"workspace_id", 2}});
+    pending[0](IpcJson{{"path", "/state/trace.jsonl"}});
+    EXPECT_EQ(receive(fd)["event"], "workspace.changed");
+    const auto completion = receive(fd);
+    EXPECT_EQ(completion["id"], 2);
+    EXPECT_EQ(completion["seq"], 1);
+    EXPECT_EQ(completion["result"]["path"], "/state/trace.jsonl");
+    send_all(fd, request(2, "trace.export"));
+    ASSERT_EQ(wl_event_loop_dispatch(loop, 0), 0);
+    ASSERT_EQ(pending.size(), 2);
+    pending[0](IpcJson{{"path", "/state/stale.jsonl"}});
+    pending[1](std::unexpected(IpcError{"internal_error", "export did not finish"}));
+    EXPECT_EQ(receive(fd)["error"]["message"], "export did not finish");
+}
+
+TEST_F(IpcFixture, DeferredPipelineStaysBoundedWithoutDisconnectingOrStarvingOtherPeers) {
+    std::vector<IpcServer::Completion> pending;
+    auto deferred =
+        make_server("wayland-12",
+                    [&](const IpcJson &, IpcServer::Completion finish) -> std::optional<IpcResult> {
+                        pending.push_back(std::move(finish));
+                        return std::nullopt;
+                    });
+    ASSERT_TRUE(deferred);
+    server = std::move(*deferred);
+    const int fd = connect_to();
+    const int other = connect_to();
+    ASSERT_GE(fd, 0);
+    ASSERT_GE(other, 0);
+    std::string burst;
+    for (std::uint64_t id = 1; id <= 33; ++id) {
+        burst += request(id, "trace.export");
+    }
+    send_all(fd, burst);
+    send_all(other, request(99));
+    EXPECT_EQ(receive(other)["id"], 99);
+    ASSERT_EQ(pending.size(), 32);
+    ASSERT_EQ(shutdown(fd, SHUT_WR), 0);
+    pending[0](IpcJson{{"path", "/state/first.jsonl"}});
+    EXPECT_EQ(receive(fd)["id"], 1);
+    ASSERT_EQ(pending.size(), 33);
+    pending[32](IpcJson{{"path", "/state/last.jsonl"}});
+    EXPECT_EQ(receive(fd)["id"], 33);
+    ASSERT_EQ(wl_event_loop_dispatch(loop, 0), 0);
+    pending[1](IpcJson{{"path", "/state/half-closed.jsonl"}});
+    EXPECT_EQ(receive(fd)["id"], 2);
+    clients.erase(fd);
+    ASSERT_EQ(close(fd), 0);
+    ASSERT_EQ(wl_event_loop_dispatch(loop, 0), 0);
+    pending[2](IpcJson{{"path", "/state/disconnected.jsonl"}});
+    server.reset();
+    pending[3](IpcJson{{"path", "/state/stopped.jsonl"}});
 }
 
 TEST_F(IpcFixture, DisconnectsSlowSubscribersAndAllowsRecoveryOnAnotherConnection) {

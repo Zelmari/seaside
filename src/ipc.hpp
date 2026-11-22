@@ -5,6 +5,7 @@
 #include <functional>
 #include <memory>
 #include <nlohmann/json.hpp>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -26,12 +27,17 @@ using IpcResult = std::expected<IpcJson, IpcError>;
 class IpcServer final {
   public:
     using Handler = std::function<IpcResult(std::string_view method, const IpcJson &params)>;
+    using Completion = std::function<void(IpcResult)>;
+    // Handles trace.export. Return an immediate result, or call the completion
+    // once on the event-loop thread when the deferred result is available.
+    using DeferredHandler =
+        std::function<std::optional<IpcResult>(const IpcJson &params, Completion)>;
 
     // The exit callback requests event-loop termination after the acknowledgement
     // has been written or its deadline expires.
     static std::expected<std::unique_ptr<IpcServer>, std::string>
     create(wl_event_loop *loop, std::string_view wayland_display, Handler handler,
-           std::function<void()> on_exit);
+           std::function<void()> on_exit, DeferredHandler deferred = {});
     ~IpcServer() noexcept;
     IpcServer(const IpcServer &) = delete;
     IpcServer &operator=(const IpcServer &) = delete;

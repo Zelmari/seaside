@@ -43,6 +43,9 @@ struct seaside_tty_input_callbacks {
     void (*pointer_cancelled)(void *data);
     /* The icon is borrowed. The scene removes its node on icon destruction. */
     void (*drag_icon)(void *data, struct wlr_drag_icon *icon);
+    /* Local input also counts when a binding or pointer constraint consumes it.
+     * Motion reports after routing so it can wake the destination output. */
+    void (*activity)(void *data, bool pointer);
 };
 
 struct seaside_tty_input_snapshot {
@@ -75,6 +78,7 @@ struct wlr_seat *seaside_tty_input_get_seat(const struct seaside_tty_input *inpu
 /* Reevaluate hover after a scene change, even when the cursor has not moved. */
 void seaside_tty_input_refresh_pointer(struct seaside_tty_input *input);
 void seaside_tty_input_cancel_drag(struct seaside_tty_input *input);
+void seaside_tty_input_cancel_drag_from(struct seaside_tty_input *input, struct wlr_surface *root);
 void seaside_tty_input_destroy(struct seaside_tty_input *input);
 struct seaside_tty_input_snapshot
 seaside_tty_input_get_snapshot(const struct seaside_tty_input *input);

@@ -177,7 +177,8 @@ IpcAction decode_ipc_action(std::string_view method, const IpcJson &params) {
 
 IpcJson SessionControl::focus() const {
     const auto &desktop = desktop_.windows();
-    return {{"window_id", nullable(desktop.focused_window())},
+    return {{"window_id", desktop_.layer_has_keyboard_focus() ? Json(nullptr)
+                                                              : nullable(desktop.focused_window())},
             {"workspace_id", nullable(desktop.focused_workspace())},
             {"output_id", nullable(desktop.focused_output())}};
 }
@@ -221,10 +222,13 @@ IpcJson SessionControl::output_rows() const {
     for (const auto &[id, output] : outputs_.outputs()) {
         const auto &state = output.status.settings;
         const auto render = scene_.render_status(output.handle);
-        auto mode = state.width > 0 && state.height > 0 && state.refresh_millihz > 0
-                        ? Json{{"width", state.width},
-                               {"height", state.height},
-                               {"refresh_millihz", state.refresh_millihz}}
+        const auto &last_mode = output.status.last_mode;
+        const auto width = output.status.sleeping ? last_mode.width : state.width;
+        const auto height = output.status.sleeping ? last_mode.height : state.height;
+        const auto refresh =
+            output.status.sleeping ? last_mode.refresh_millihz : state.refresh_millihz;
+        auto mode = width > 0 && height > 0 && refresh > 0
+                        ? Json{{"width", width}, {"height", height}, {"refresh_millihz", refresh}}
                         : Json(nullptr);
         result.push_back({
             {"id", output.id},
@@ -241,7 +245,9 @@ IpcJson SessionControl::output_rows() const {
             {"scale", state.scale > 0 ? state.scale : 1},
             {"rotation", state.rotation},
             {"mode", std::move(mode)},
-            {"hardware_cursor", output.enabled ? Json(output.status.cursor) : Json(nullptr)},
+            {"hardware_cursor", output.enabled && !output.status.sleeping
+                                    ? Json(output.status.cursor)
+                                    : Json(nullptr)},
             {"adaptive_sync",
              capability(output.adaptive_sync_supported,
                         output.enabled && output.status.adaptive_sync,

@@ -97,15 +97,16 @@ struct IpcServer::Impl {
         bool exit = false;
     };
 
-    struct Peer {
+    struct Peer : std::enable_shared_from_this<Peer> {
         Peer(Impl &server, Fd fd) noexcept : server(server), fd(std::move(fd)) {}
         static int dispatch(int fd, std::uint32_t mask, void *data) noexcept;
         void ready(std::uint32_t mask);
         void consume();
         void request(std::string_view wire);
+        void defer(std::uint64_t id, const IpcJson &params);
         bool queue(Pending next);
         void respond(std::optional<std::uint64_t> id, bool reservation, IpcResult result,
-                     bool exit = false);
+                     bool exit = false, bool already_counted = false);
         void flush();
         void disconnect() noexcept;
         void update_mask() noexcept;
@@ -123,8 +124,10 @@ struct IpcServer::Impl {
         bool closed = false;
     };
 
-    Impl(wl_event_loop *loop, Handler handler, std::function<void()> on_exit) noexcept
-        : loop(loop), handler(std::move(handler)), on_exit(std::move(on_exit)) {}
+    Impl(wl_event_loop *loop, Handler handler, std::function<void()> on_exit,
+         DeferredHandler deferred) noexcept
+        : loop(loop), handler(std::move(handler)), on_exit(std::move(on_exit)),
+          deferred(std::move(deferred)) {}
     ~Impl() noexcept;
     std::expected<void, std::string> listen(std::string_view display);
     std::expected<void, std::string> bind_socket(const sockaddr_un &socket_address);
@@ -139,6 +142,7 @@ struct IpcServer::Impl {
     wl_event_loop *loop;
     Handler handler;
     std::function<void()> on_exit;
+    DeferredHandler deferred;
     std::string path;
     std::string name;
     std::string lock_name;
@@ -344,6 +348,10 @@ void IpcServer::Impl::Peer::ready(std::uint32_t mask) {
             disconnect();
         }
     }
+    if ((mask & WL_EVENT_HANGUP) && output.empty()) {
+        disconnect();
+        return;
+    }
     update_mask();
 }
 
@@ -391,6 +399,10 @@ void IpcServer::Impl::Peer::request(std::string_view wire) {
         subscribed = !closed;
         return;
     }
+    if (method == "trace.export" && server.deferred) {
+        defer(*id, record.object["params"]);
+        return;
+    }
 
     IpcResult result = std::unexpected(IpcError{"internal_error", "IPC command did not complete"});
     try {
@@ -402,6 +414,33 @@ void IpcServer::Impl::Peer::request(std::string_view wire) {
     respond(id, true, std::move(result), exit);
     if (exit) {
         server.request_exit();
+    }
+}
+
+void IpcServer::Impl::Peer::defer(std::uint64_t id, const IpcJson &params) {
+    auto complete = [peer = weak_from_this(), once = std::make_shared<bool>(false),
+                     id](IpcResult result) noexcept {
+        if (std::exchange(*once, true)) {
+            return;
+        }
+        if (auto owner = peer.lock(); owner && !owner->closed) {
+            try {
+                // Snapshot the watermark at completion, when the asynchronous
+                // result is available, using the same output queue as other replies.
+                owner->respond(id, true, std::move(result), false, true);
+                owner->update_mask();
+            } catch (...) {
+                owner->disconnect();
+            }
+        }
+    };
+    ++requests;
+    try {
+        if (auto immediate = server.deferred(params, complete)) {
+            complete(std::move(*immediate));
+        }
+    } catch (...) {
+        complete(std::unexpected(IpcError{"internal_error", "Could not start trace export"}));
     }
 }
 
@@ -420,7 +459,7 @@ bool IpcServer::Impl::Peer::queue(Pending next) {
 }
 
 void IpcServer::Impl::Peer::respond(std::optional<std::uint64_t> id, bool reservation,
-                                    IpcResult result, bool exit) {
+                                    IpcResult result, bool exit, bool already_counted) {
     if (closed) {
         return;
     }
@@ -440,7 +479,8 @@ void IpcServer::Impl::Peer::respond(std::optional<std::uint64_t> id, bool reserv
     if (queue({.wire = std::make_shared<const std::string>(std::move(*wire)),
                .release_id = reservation ? id : std::nullopt,
                .response = true,
-               .exit = exit})) {
+               .exit = exit}) &&
+        !already_counted) {
         ++requests;
     }
 }
@@ -498,7 +538,9 @@ void IpcServer::Impl::Peer::update_mask() noexcept {
     if (!output.empty()) {
         mask |= WL_EVENT_WRITABLE;
     }
-    if (!mask || wl_event_source_fd_update(source.get(), mask) < 0) {
+    // A full deferred pipeline or a client that only shut down its writing
+    // half can have no readiness interests until a completion queues a reply.
+    if ((!mask && !requests) || wl_event_source_fd_update(source.get(), mask) < 0) {
         disconnect();
     }
 }
@@ -571,12 +613,13 @@ void IpcServer::Impl::finish_exit() noexcept {
 
 std::expected<std::unique_ptr<IpcServer>, std::string>
 IpcServer::create(wl_event_loop *loop, std::string_view wayland_display, Handler handler,
-                  std::function<void()> on_exit) {
+                  std::function<void()> on_exit, DeferredHandler deferred) {
     if (!loop || !handler || !on_exit) {
         return std::unexpected("Seaside IPC needs a Wayland loop and command and exit callbacks");
     }
     try {
-        auto impl = std::make_unique<Impl>(loop, std::move(handler), std::move(on_exit));
+        auto impl = std::make_unique<Impl>(loop, std::move(handler), std::move(on_exit),
+                                           std::move(deferred));
         if (auto result = impl->listen(wayland_display); !result) {
             return std::unexpected(std::move(result.error()));
         }

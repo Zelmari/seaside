@@ -37,7 +37,12 @@ struct seaside_drm_output_description {
 
 struct seaside_drm_output_status {
     struct seaside_drm_output_settings settings;
+    /* A sleeping output can keep a newer accepted mode for its next wake. */
+    struct {
+        int width, height, refresh_millihz;
+    } last_mode;
     int logical_width, logical_height;
+    bool sleeping;
     bool cursor;
     bool adaptive_sync;
     bool frame_pending;
@@ -96,6 +101,9 @@ bool seaside_tty_drm_check_settings(struct wlr_output *output,
                                     const struct seaside_drm_output_settings *settings);
 bool seaside_tty_drm_apply_settings(struct seaside_tty_drm *drm, struct wlr_output *output,
                                     const struct seaside_drm_output_settings *settings);
+/* Power transitions preserve the logical output, mode selection and workspace. */
+bool seaside_tty_drm_set_output_power(struct seaside_tty_drm *drm, struct wlr_output *output,
+                                      bool on);
 void seaside_tty_drm_set_direct_scanout(struct seaside_tty_drm *drm, struct wlr_output *output,
                                         bool enabled);
 void seaside_tty_drm_reject_unrestorable(struct seaside_tty_drm *drm, struct wlr_output *output);
@@ -109,6 +117,7 @@ struct wlr_output *seaside_tty_drm_enable(struct seaside_tty_drm *drm,
 /* Position and relative deltas use logical output-layout coordinates. Absolute
  * input is normalized against the bounds of the active outputs. */
 bool seaside_tty_drm_cursor_position(const struct seaside_tty_drm *drm, double *x, double *y);
+struct wlr_output *seaside_tty_drm_pointer_output(const struct seaside_tty_drm *drm);
 bool seaside_tty_drm_absolute_delta(const struct seaside_tty_drm *drm, double x, double y,
                                     double *dx, double *dy);
 bool seaside_tty_drm_set_cursor_visible(struct seaside_tty_drm *drm, bool visible);

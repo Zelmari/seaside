@@ -32,12 +32,20 @@ class Scene final {
     void set_linux_dmabuf(wlr_linux_dmabuf_v1 *dmabuf) noexcept;
     void set_render_policy(bool direct_scanout, bool allow_tearing, bool night_light,
                            int temperature_kelvin) noexcept;
+    void set_frame_observer(seaside_scene_frame_fn callback, void *data) noexcept;
     seaside_scene_render_status render_status(wlr_output *output) const noexcept;
     static std::expected<SceneImage, SceneError> prepare_wallpaper(Wallpaper wallpaper) noexcept;
     void set_wallpaper(SceneImage image) noexcept;
     void set_config_error(const std::optional<Diagnostic> &error) noexcept;
     seaside_scene_snapshot snapshot() const noexcept;
     void set_window_handler(seaside_scene_window_fn handler, void *data) noexcept;
+    void set_layer_handler(seaside_layer_output_fn focused_output, seaside_layer_changed_fn changed,
+                           seaside_layer_hidden_fn hidden, void *data) noexcept;
+    seaside_scene_rect layer_work_area(wlr_output *output, seaside_scene_rect bounds,
+                                       bool fullscreen) noexcept;
+    void select_layer(wlr_surface *surface) noexcept;
+    wlr_surface *layer_keyboard_focus(wlr_output *focused_output) noexcept;
+    wlr_output *visible_output(wlr_surface *surface) const noexcept;
     bool enable_window_capture(wlr_allocator *allocator, wlr_renderer *renderer,
                                wlr_ext_image_copy_capture_manager_v1 *copy) noexcept;
     bool window_capture_client_ready(pid_t pid, uid_t uid) const noexcept;

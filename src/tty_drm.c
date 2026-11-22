@@ -74,6 +74,8 @@ struct tty_output {
     bool commit_pending;
     bool movement_verified;
     bool render_locked;
+    bool sleeping;
+    struct seaside_drm_output_settings sleep_settings;
     uint32_t connector_id;
     uint32_t cursor_plane_id;
     uint32_t commit_seq;
@@ -362,8 +364,8 @@ static void on_output_commit(struct wl_listener *listener, void *data) {
     struct tty_output *view = wl_container_of(listener, view, commit);
     struct seaside_tty_drm *drm = view->owner;
     const struct wlr_output_event_commit *event = data;
-    if (drm->evidence.failed || !drm->evidence.active || view->rejected || !view->output->enabled ||
-        (event->state->committed & WLR_OUTPUT_STATE_BUFFER) == 0) {
+    if (drm->evidence.failed || !drm->evidence.active || view->rejected || view->sleeping ||
+        !view->output->enabled || (event->state->committed & WLR_OUTPUT_STATE_BUFFER) == 0) {
         return;
     }
     if (!has_hardware_cursor(view)) {
@@ -887,22 +889,24 @@ static bool move_cursor(struct seaside_tty_drm *drm, double x, double y, bool co
         return false;
     }
     struct tty_output *previous = drm->pointer_output;
-    if (previous != target && available(previous) && previous->cursor_visible &&
-        !load_cursor_image(previous, false)) {
+    if (previous != target && available(previous) && !previous->sleeping &&
+        previous->cursor_visible && !load_cursor_image(previous, false)) {
         reject_output(previous, "could not hide hardware cursor while leaving output");
     }
     drm->pointer_output = target;
-    const double local_x = next_x - target->x;
-    const double local_y = next_y - target->y;
-    const double scale = target->output->scale;
-    const bool pixel_changed = (int)(local_x * scale) != (int)target->cursor->x ||
-                               (int)(local_y * scale) != (int)target->cursor->y;
-    if ((pixel_changed && !wlr_output_cursor_move(target->cursor, local_x, local_y)) ||
-        !has_hardware_cursor(target) ||
-        (target->cursor_visible != drm->cursor_visible &&
-         !load_cursor_image(target, drm->cursor_visible))) {
-        reject_output(target, "the backend rejected hardware cursor motion");
-        return false;
+    if (!target->sleeping) {
+        const double local_x = next_x - target->x;
+        const double local_y = next_y - target->y;
+        const double scale = target->output->scale;
+        const bool pixel_changed = (int)(local_x * scale) != (int)target->cursor->x ||
+                                   (int)(local_y * scale) != (int)target->cursor->y;
+        if ((pixel_changed && !wlr_output_cursor_move(target->cursor, local_x, local_y)) ||
+            !has_hardware_cursor(target) ||
+            (target->cursor_visible != drm->cursor_visible &&
+             !load_cursor_image(target, drm->cursor_visible))) {
+            reject_output(target, "the backend rejected hardware cursor motion");
+            return false;
+        }
     }
     if (count_move && ((int)drm->cursor_x != (int)next_x || (int)drm->cursor_y != (int)next_y)) {
         ++drm->evidence.cursor_moves;
@@ -922,20 +926,37 @@ static struct tty_output *find_output(struct seaside_tty_drm *drm, struct wlr_ou
     return NULL;
 }
 
+static struct seaside_drm_output_settings current_settings(const struct tty_output *view) {
+    const struct wlr_output *output = view->output;
+    return (struct seaside_drm_output_settings){
+        .mode = output->current_mode,
+        .width = output->width,
+        .height = output->height,
+        .refresh_millihz = output->refresh,
+        .x = view->x,
+        .y = view->y,
+        .rotation = 90 * (int)output->transform,
+        .scale = output->scale,
+        .adaptive_sync = output->adaptive_sync_status == WLR_OUTPUT_ADAPTIVE_SYNC_ENABLED,
+    };
+}
+
 bool seaside_tty_drm_output_status(struct seaside_tty_drm *drm, struct wlr_output *output,
                                    struct seaside_drm_output_status *status) {
     struct tty_output *view = find_output(drm, output);
     if (!view) {
         return false;
     }
+    const struct seaside_drm_output_settings applied = current_settings(view);
     *status = (struct seaside_drm_output_status){
-        .settings = {output->current_mode, output->width, output->height, output->refresh, view->x,
-                     view->y, 90 * (int)output->transform, output->scale,
-                     output->adaptive_sync_status == WLR_OUTPUT_ADAPTIVE_SYNC_ENABLED},
+        .settings = view->sleeping ? view->sleep_settings : applied,
+        .last_mode = {applied.width, applied.height, applied.refresh_millihz},
         .logical_width = view->width,
         .logical_height = view->height,
+        .sleeping = view->sleeping,
         .cursor = has_hardware_cursor(view),
-        .adaptive_sync = output->adaptive_sync_status == WLR_OUTPUT_ADAPTIVE_SYNC_ENABLED,
+        .adaptive_sync =
+            !view->sleeping && output->adaptive_sync_status == WLR_OUTPUT_ADAPTIVE_SYNC_ENABLED,
         .frame_pending = view->commit_pending,
         .committed_frames = view->committed_frames,
         .presented_frames = view->presented_frames,
@@ -972,7 +993,8 @@ bool seaside_tty_drm_select_mode(struct wlr_output *output,
 }
 
 static bool configure_output(struct wlr_output *output,
-                             const struct seaside_drm_output_settings *settings, bool test) {
+                             const struct seaside_drm_output_settings *settings, bool test,
+                             bool wake) {
     struct wlr_output_state state;
     wlr_output_state_init(&state);
     if (output->current_mode != settings->mode) {
@@ -989,6 +1011,11 @@ static bool configure_output(struct wlr_output *output,
         settings->adaptive_sync) {
         wlr_output_state_set_adaptive_sync_enabled(&state, settings->adaptive_sync);
     }
+    if (wake || (test && !output->enabled && state.committed)) {
+        // A dry-run uses an enabled state to validate dormant mode changes.
+        // wlroots rejects MODE/ADAPTIVE_SYNC settings on a disabled commit.
+        wlr_output_state_set_enabled(&state, true);
+    }
     const bool ok = !state.committed || (test ? wlr_output_test_state(output, &state)
                                               : wlr_output_commit_state(output, &state));
     wlr_output_state_finish(&state);
@@ -997,7 +1024,7 @@ static bool configure_output(struct wlr_output *output,
 
 bool seaside_tty_drm_check_settings(struct wlr_output *output,
                                     const struct seaside_drm_output_settings *settings) {
-    return configure_output(output, settings, true);
+    return configure_output(output, settings, true, false);
 }
 
 bool seaside_tty_drm_apply_settings(struct seaside_tty_drm *drm, struct wlr_output *output,
@@ -1006,10 +1033,21 @@ bool seaside_tty_drm_apply_settings(struct seaside_tty_drm *drm, struct wlr_outp
     if (!available(view)) {
         return false;
     }
+    if (view->sleeping) {
+        view->sleep_settings = *settings;
+        view->x = settings->x;
+        view->y = settings->y;
+        const bool rotated = settings->rotation == 90 || settings->rotation == 270;
+        view->width =
+            (int)((float)(rotated ? settings->height : settings->width) / settings->scale);
+        view->height =
+            (int)((float)(rotated ? settings->width : settings->height) / settings->scale);
+        return true;
+    }
     const bool geometry_changed =
         output->current_mode != settings->mode || output->scale != settings->scale ||
         output->transform != (enum wl_output_transform)(settings->rotation / 90);
-    if (!configure_output(output, settings, false)) {
+    if (!configure_output(output, settings, false, false)) {
         return false;
     }
     if (geometry_changed) {
@@ -1021,6 +1059,59 @@ bool seaside_tty_drm_apply_settings(struct seaside_tty_drm *drm, struct wlr_outp
     view->y = settings->y;
     wlr_output_effective_resolution(output, &view->width, &view->height);
     wlr_output_schedule_frame(output);
+    return true;
+}
+
+bool seaside_tty_drm_set_output_power(struct seaside_tty_drm *drm, struct wlr_output *output,
+                                      bool on) {
+    struct tty_output *view = find_output(drm, output);
+    if (!available(view) || !drm->evidence.active) {
+        return false;
+    }
+    const bool sleep = !on;
+    if (sleep == view->sleeping) {
+        return true;
+    }
+    if (on) {
+        struct seaside_drm_output_settings settings = view->sleep_settings;
+        bool enabled = configure_output(output, &settings, false, true);
+        if (!enabled && settings.adaptive_sync) {
+            settings.adaptive_sync = false;
+            enabled = configure_output(output, &settings, false, true);
+            if (enabled) {
+                fprintf(stderr, "TTY DRM: %s resumed with fixed refresh\n", output->name);
+            }
+        }
+        if (!enabled) {
+            fprintf(stderr, "TTY DRM: %s rejected display wake\n", output->name);
+            return false;
+        }
+        view->sleeping = false;
+        const bool pointer_here = drm->pointer_output == view;
+        const double x = pointer_here ? drm->cursor_x - view->x : view->width / 2;
+        const double y = pointer_here ? drm->cursor_y - view->y : view->height / 2;
+        view->cursor = wlr_output_cursor_create(output);
+        if (!view->cursor || !wlr_output_cursor_move(view->cursor, x, y) ||
+            !load_cursor_image(view, pointer_here && drm->cursor_visible)) {
+            reject_output(view, "hardware cursor staging failed after display wake");
+            return false;
+        }
+        wlr_output_schedule_frame(output);
+    } else {
+        view->sleep_settings = current_settings(view);
+        if (!set_output_enabled(output, false, NULL)) {
+            fprintf(stderr, "TTY DRM: %s rejected display sleep\n", output->name);
+            return false;
+        }
+        view->sleeping = true;
+        view->cursor_presented = false;
+        view->movement_verified = false;
+        view->cursor_plane_id = 0;
+        view->commit_pending = false;
+        wlr_output_cursor_destroy(view->cursor);
+        view->cursor = NULL;
+    }
+    fprintf(stderr, "TTY DRM: output %s display power %s\n", output->name, on ? "on" : "off");
     return true;
 }
 
@@ -1110,6 +1201,12 @@ bool seaside_tty_drm_cursor_position(const struct seaside_tty_drm *drm, double *
     return true;
 }
 
+struct wlr_output *seaside_tty_drm_pointer_output(const struct seaside_tty_drm *drm) {
+    return drm && drm->evidence.active && available(drm->pointer_output)
+               ? drm->pointer_output->output
+               : NULL;
+}
+
 bool seaside_tty_drm_absolute_delta(const struct seaside_tty_drm *drm, double x, double y,
                                     double *dx, double *dy) {
     if (!drm || !drm->evidence.active || !available(drm->pointer_output) || !dx || !dy ||
@@ -1149,8 +1246,8 @@ bool seaside_tty_drm_set_cursor_visible(struct seaside_tty_drm *drm, bool visibl
     }
     drm->cursor_visible = visible;
     struct tty_output *view = drm->pointer_output;
-    if (drm->evidence.active && available(view) && view->cursor_visible != visible &&
-        !load_cursor_image(view, visible)) {
+    if (drm->evidence.active && available(view) && !view->sleeping &&
+        view->cursor_visible != visible && !load_cursor_image(view, visible)) {
         reject_output(view, "could not change hardware cursor visibility");
         return false;
     }

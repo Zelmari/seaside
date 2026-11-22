@@ -214,6 +214,29 @@ void Scene::remove_output(wlr_output *output) noexcept {
     seaside_scene_remove_output(bridge_, output);
 }
 
+void Scene::set_layer_handler(seaside_layer_output_fn focused_output,
+                              seaside_layer_changed_fn changed, seaside_layer_hidden_fn hidden,
+                              void *data) noexcept {
+    seaside_scene_set_layer_handler(bridge_, focused_output, changed, hidden, data);
+}
+
+seaside_scene_rect Scene::layer_work_area(wlr_output *output, seaside_scene_rect bounds,
+                                          bool fullscreen) noexcept {
+    return seaside_scene_layer_work_area(bridge_, output, bounds, fullscreen);
+}
+
+void Scene::select_layer(wlr_surface *surface) noexcept {
+    seaside_scene_select_layer(bridge_, surface);
+}
+
+wlr_surface *Scene::layer_keyboard_focus(wlr_output *focused_output) noexcept {
+    return seaside_scene_layer_keyboard_focus(bridge_, focused_output);
+}
+
+wlr_output *Scene::visible_output(wlr_surface *surface) const noexcept {
+    return seaside_scene_visible_output(bridge_, surface);
+}
+
 void Scene::set_linux_dmabuf(wlr_linux_dmabuf_v1 *dmabuf) noexcept {
     seaside_scene_set_linux_dmabuf(bridge_, dmabuf);
 }
@@ -222,6 +245,10 @@ void Scene::set_render_policy(bool direct_scanout, bool allow_tearing, bool nigh
                               int temperature_kelvin) noexcept {
     seaside_scene_set_render_policy(bridge_, direct_scanout, allow_tearing, night_light,
                                     temperature_kelvin);
+}
+
+void Scene::set_frame_observer(seaside_scene_frame_fn callback, void *data) noexcept {
+    seaside_scene_set_frame_observer(bridge_, callback, data);
 }
 
 seaside_scene_render_status Scene::render_status(wlr_output *output) const noexcept {

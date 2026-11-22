@@ -360,7 +360,7 @@ void OutputConfig::sync_fullscreen(const Config &config) {
             continue;
         }
         if (!seaside_tty_drm_output_status(drm_, output.handle, &output.status) ||
-            output.status.adaptive_sync == desired) {
+            output.status.settings.adaptive_sync == desired) {
             continue;
         }
         auto settings = output.status.settings;

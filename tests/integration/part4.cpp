@@ -3,11 +3,18 @@
 #include "part3_bridge.h"
 #include "server.hpp"
 #include "test_directory.hpp"
+#include "tty_input.h"
 #include "wlroots_bridge.h"
 #include "xdg-activation-v1-client-protocol.h"
 #include "xdg-shell-client-protocol.h"
 
+// The generated C function names an argument namespace.
+#define namespace layer_namespace
+#include "wlr-layer-shell-unstable-v1-client-protocol.h"
+#undef namespace
+
 #include <algorithm>
+#include <array>
 #include <cerrno>
 #include <chrono>
 #include <cstdio>
@@ -24,6 +31,7 @@
 #include <unistd.h>
 #include <wayland-client.h>
 #include <wayland-server-core.h>
+#include <xkbcommon/xkbcommon-keysyms.h>
 
 namespace {
 
@@ -64,6 +72,23 @@ struct Configure {
 struct Client {
     ~Client() {
         destroy_window();
+        if (pointer) {
+            wl_pointer_release(pointer);
+        }
+        if (keyboard) {
+            wl_keyboard_release(keyboard);
+        }
+        if (seat) {
+            wl_seat_release(seat);
+        }
+        for (auto *output : outputs) {
+            if (output) {
+                wl_output_destroy(output);
+            }
+        }
+        if (layers) {
+            zwlr_layer_shell_v1_destroy(layers);
+        }
         if (shell) {
             xdg_wm_base_destroy(shell);
         }
@@ -109,6 +134,15 @@ struct Client {
     wl_shm *shm = nullptr;
     xdg_wm_base *shell = nullptr;
     xdg_activation_v1 *activation = nullptr;
+    zwlr_layer_shell_v1 *layers = nullptr;
+    wl_seat *seat = nullptr;
+    wl_keyboard *keyboard = nullptr;
+    wl_pointer *pointer = nullptr;
+    std::array<wl_output *, 2> outputs{};
+    wl_surface *keyboard_surface = nullptr;
+    wl_surface *pointer_surface = nullptr;
+    unsigned keys = 0;
+    std::uint32_t button_serial = 0;
     wl_surface *surface = nullptr;
     xdg_surface *xdg = nullptr;
     xdg_toplevel *toplevel = nullptr;
@@ -155,6 +189,132 @@ struct Subsurface {
     wl_subsurface *role = nullptr;
 };
 
+struct Layer {
+    ~Layer() { destroy(); }
+    void destroy() {
+        if (role) {
+            zwlr_layer_surface_v1_destroy(role);
+            role = nullptr;
+        }
+        if (surface) {
+            wl_surface_destroy(surface);
+            surface = nullptr;
+        }
+    }
+    void create(Client &client, wl_output *output, std::uint32_t level, std::uint32_t anchor,
+                std::uint32_t width, std::uint32_t height, int zone) {
+        surface = wl_compositor_create_surface(client.compositor);
+        role = zwlr_layer_shell_v1_get_layer_surface(client.layers, surface, output, level,
+                                                     "seaside-test");
+        zwlr_layer_surface_v1_set_anchor(role, anchor);
+        zwlr_layer_surface_v1_set_size(role, width, height);
+        zwlr_layer_surface_v1_set_exclusive_zone(role, zone);
+    }
+    zwlr_layer_surface_v1 *role = nullptr;
+    wl_surface *surface = nullptr;
+    std::uint32_t serial = 0;
+    int width = 0;
+    int height = 0;
+    bool closed = false;
+};
+
+void layer_configure(void *data, zwlr_layer_surface_v1 *, std::uint32_t serial, std::uint32_t width,
+                     std::uint32_t height) {
+    auto &layer = *static_cast<Layer *>(data);
+    layer.serial = serial;
+    layer.width = static_cast<int>(width);
+    layer.height = static_cast<int>(height);
+}
+
+void layer_closed(void *data, zwlr_layer_surface_v1 *) {
+    static_cast<Layer *>(data)->closed = true;
+}
+
+const zwlr_layer_surface_v1_listener layer_listener{.configure = layer_configure,
+                                                    .closed = layer_closed};
+
+void keyboard_keymap(void *, wl_keyboard *, std::uint32_t, int fd, std::uint32_t) {
+    close(fd);
+}
+void keyboard_enter(void *data, wl_keyboard *, std::uint32_t, wl_surface *surface, wl_array *) {
+    static_cast<Client *>(data)->keyboard_surface = surface;
+}
+void keyboard_leave(void *data, wl_keyboard *, std::uint32_t, wl_surface *) {
+    static_cast<Client *>(data)->keyboard_surface = nullptr;
+}
+void keyboard_key(void *data, wl_keyboard *, std::uint32_t, std::uint32_t, std::uint32_t,
+                  std::uint32_t state) {
+    if (state == WL_KEYBOARD_KEY_STATE_PRESSED) {
+        ++static_cast<Client *>(data)->keys;
+    }
+}
+void keyboard_modifiers(void *, wl_keyboard *, std::uint32_t, std::uint32_t, std::uint32_t,
+                        std::uint32_t, std::uint32_t) {}
+void keyboard_repeat(void *, wl_keyboard *, std::int32_t, std::int32_t) {}
+const wl_keyboard_listener keyboard_listener{.keymap = keyboard_keymap,
+                                             .enter = keyboard_enter,
+                                             .leave = keyboard_leave,
+                                             .key = keyboard_key,
+                                             .modifiers = keyboard_modifiers,
+                                             .repeat_info = keyboard_repeat};
+
+void pointer_enter(void *data, wl_pointer *, std::uint32_t, wl_surface *surface, wl_fixed_t,
+                   wl_fixed_t) {
+    static_cast<Client *>(data)->pointer_surface = surface;
+}
+void pointer_leave(void *data, wl_pointer *, std::uint32_t, wl_surface *) {
+    static_cast<Client *>(data)->pointer_surface = nullptr;
+}
+void pointer_motion(void *, wl_pointer *, std::uint32_t, wl_fixed_t, wl_fixed_t) {}
+void pointer_button(void *data, wl_pointer *, std::uint32_t serial, std::uint32_t, std::uint32_t,
+                    std::uint32_t state) {
+    if (state == WL_POINTER_BUTTON_STATE_PRESSED) {
+        static_cast<Client *>(data)->button_serial = serial;
+    }
+}
+void pointer_axis(void *, wl_pointer *, std::uint32_t, std::uint32_t, wl_fixed_t) {}
+void pointer_frame(void *, wl_pointer *) {}
+void pointer_source(void *, wl_pointer *, std::uint32_t) {}
+void pointer_stop(void *, wl_pointer *, std::uint32_t, std::uint32_t) {}
+void pointer_discrete(void *, wl_pointer *, std::uint32_t, std::int32_t) {}
+const auto pointer_listener = [] {
+    wl_pointer_listener listener{};
+    listener.enter = pointer_enter;
+    listener.leave = pointer_leave;
+    listener.motion = pointer_motion;
+    listener.button = pointer_button;
+    listener.axis = pointer_axis;
+    listener.frame = pointer_frame;
+    listener.axis_source = pointer_source;
+    listener.axis_stop = pointer_stop;
+    listener.axis_discrete = pointer_discrete;
+    return listener;
+}();
+
+void seat_capabilities(void *data, wl_seat *seat, std::uint32_t capabilities) {
+    auto &client = *static_cast<Client *>(data);
+    if (capabilities & WL_SEAT_CAPABILITY_KEYBOARD && !client.keyboard) {
+        client.keyboard = wl_seat_get_keyboard(seat);
+        wl_keyboard_add_listener(client.keyboard, &keyboard_listener, &client);
+    }
+    if (capabilities & WL_SEAT_CAPABILITY_POINTER && !client.pointer) {
+        client.pointer = wl_seat_get_pointer(seat);
+        wl_pointer_add_listener(client.pointer, &pointer_listener, &client);
+    }
+}
+void seat_name(void *, wl_seat *, const char *) {}
+const wl_seat_listener seat_listener{.capabilities = seat_capabilities, .name = seat_name};
+
+void output_geometry(void *, wl_output *, std::int32_t, std::int32_t, std::int32_t, std::int32_t,
+                     std::int32_t, const char *, const char *, std::int32_t) {}
+void output_mode(void *, wl_output *, std::uint32_t, std::int32_t, std::int32_t, std::int32_t) {}
+const wl_output_listener output_listener{.geometry = output_geometry,
+                                         .mode = output_mode,
+                                         .done = nullptr,
+                                         .scale = nullptr,
+                                         .name = nullptr,
+                                         .description = nullptr};
+
 void ping(void *, xdg_wm_base *shell, std::uint32_t serial) {
     xdg_wm_base_pong(shell, serial);
 }
@@ -178,6 +338,20 @@ void global(void *data, wl_registry *registry, std::uint32_t name, const char *i
     } else if (std::strcmp(interface, xdg_activation_v1_interface.name) == 0) {
         client.activation = static_cast<xdg_activation_v1 *>(
             wl_registry_bind(registry, name, &xdg_activation_v1_interface, 1));
+    } else if (std::strcmp(interface, zwlr_layer_shell_v1_interface.name) == 0) {
+        client.layers = static_cast<zwlr_layer_shell_v1 *>(wl_registry_bind(
+            registry, name, &zwlr_layer_shell_v1_interface, std::min(version, 5u)));
+    } else if (std::strcmp(interface, wl_seat_interface.name) == 0 && version >= 5) {
+        client.seat =
+            static_cast<wl_seat *>(wl_registry_bind(registry, name, &wl_seat_interface, 5));
+        wl_seat_add_listener(client.seat, &seat_listener, &client);
+    } else if (std::strcmp(interface, wl_output_interface.name) == 0) {
+        const auto found = std::ranges::find(client.outputs, nullptr);
+        if (found != client.outputs.end()) {
+            *found =
+                static_cast<wl_output *>(wl_registry_bind(registry, name, &wl_output_interface, 1));
+            wl_output_add_listener(*found, &output_listener, nullptr);
+        }
     }
 }
 
@@ -341,7 +515,12 @@ class Connection {
         return attach(client, subsurface.surface, nullptr, 0, width, height, rgb);
     }
 
-    bool open_popup(Client &client, Popup &popup) {
+    bool attach_layer(Client &client, Layer &layer, std::uint32_t rgb) {
+        zwlr_layer_surface_v1_ack_configure(layer.role, layer.serial);
+        return attach(client, layer.surface, nullptr, 0, layer.width, layer.height, rgb);
+    }
+
+    bool open_popup(Client &client, Popup &popup, Layer *layer = nullptr, std::uint32_t grab = 0) {
         popup.surface = wl_compositor_create_surface(client.compositor);
         popup.xdg = xdg_wm_base_get_xdg_surface(client.shell, popup.surface);
         xdg_surface_add_listener(popup.xdg, &popup_surface_listener, &popup);
@@ -350,9 +529,15 @@ class Connection {
         xdg_positioner_set_anchor_rect(positioner, 0, 0, 10, 10);
         xdg_positioner_set_anchor(positioner, XDG_POSITIONER_ANCHOR_BOTTOM_RIGHT);
         xdg_positioner_set_gravity(positioner, XDG_POSITIONER_GRAVITY_BOTTOM_RIGHT);
-        popup.role = xdg_surface_get_popup(popup.xdg, client.xdg, positioner);
+        popup.role = xdg_surface_get_popup(popup.xdg, layer ? nullptr : client.xdg, positioner);
         xdg_positioner_destroy(positioner);
         xdg_popup_add_listener(popup.role, &popup_listener, &popup);
+        if (layer) {
+            zwlr_layer_surface_v1_get_popup(layer->role, popup.role);
+        }
+        if (grab) {
+            xdg_popup_grab(popup.role, client.seat, grab);
+        }
         wl_surface_commit(popup.surface);
         return wait(client, [&] { return popup.serial != 0; }) &&
                attach(client, popup.surface, popup.xdg, popup.serial, popup.geometry.width,
@@ -637,6 +822,208 @@ bool wait_pixel(Connection &connection, Client &client, part3_output *output, un
                      expected, pixel.rgb, pixel.frames);
     }
     return ready;
+}
+
+struct LayerSeat {
+    explicit LayerSeat(const Fixture &display) : fixture(display) {}
+    ~LayerSeat() { fixture.desktop.set_input(nullptr); }
+
+    bool start() {
+        const seaside_tty_input_callbacks callbacks{
+            .motion = nullptr,
+            .exit_requested = nullptr,
+            .launch_requested = nullptr,
+            .shortcut_pressed =
+                [](void *data, std::uint8_t mods, std::uint32_t keysym) {
+                    auto &seat = *static_cast<LayerSeat *>(data);
+                    if (keysym != XKB_KEY_F8) {
+                        return false;
+                    }
+                    ++seat.shortcuts;
+                    return seat.fixture.desktop.action(action(ActionKind::toggle_window_fullscreen),
+                                                       mods);
+                },
+            .modifiers_changed = nullptr,
+            .pointer_target =
+                [](void *data, seaside_tty_pointer_target *target) {
+                    const auto &seat = *static_cast<LayerSeat *>(data);
+                    seaside_scene_target hit{.surface = target->surface, .id = 0, .sx = 0, .sy = 0};
+                    if (!seat.fixture.scene.window_at(seat.x, seat.y, hit)) {
+                        return false;
+                    }
+                    *target = {hit.surface, hit.sx, hit.sy, hit.id};
+                    return true;
+                },
+            .pointer_button =
+                [](void *data, std::uint64_t window, std::uint32_t button, bool pressed,
+                   std::uint8_t mods) {
+                    auto &seat = *static_cast<LayerSeat *>(data);
+                    return seat.fixture.desktop.button(window, button, pressed, mods, seat.x,
+                                                       seat.y);
+                },
+            .pointer_absolute_delta = nullptr,
+            .pointer_locked = nullptr,
+            .pointer_cancelled = nullptr,
+            .drag_icon = nullptr,
+            .activity = nullptr,
+        };
+        input.reset(seaside_tty_input_create(fixture.backend, &callbacks, this));
+        if (!input || !seaside_tty_input_enable_keyboard(input.get(), fixture.display)) {
+            return false;
+        }
+        devices.reset(part3_input_create(fixture.backend));
+        fixture.desktop.set_input(input.get());
+        return devices && !seaside_tty_input_get_snapshot(input.get()).failed;
+    }
+
+    void key(std::uint32_t code) const {
+        part3_input_key(devices.get(), code, true);
+        part3_input_key(devices.get(), code, false);
+    }
+
+    void click(double px, double py) {
+        x = px;
+        y = py;
+        part3_input_button(devices.get(), BTN_LEFT, true);
+        part3_input_button(devices.get(), BTN_LEFT, false);
+    }
+
+    const Fixture &fixture;
+    std::unique_ptr<seaside_tty_input, decltype(&seaside_tty_input_destroy)> input{
+        nullptr, seaside_tty_input_destroy};
+    std::unique_ptr<part3_input, decltype(&part3_input_destroy)> devices{nullptr,
+                                                                         part3_input_destroy};
+    double x = 1, y = 1;
+    unsigned shortcuts = 0;
+};
+
+bool map_layer(Connection &connection, Client &client, Layer &layer, int width, int height,
+               std::uint32_t color) {
+    zwlr_layer_surface_v1_add_listener(layer.role, &layer_listener, &layer);
+    wl_surface_commit(layer.surface);
+    return connection.wait(client, [&] { return layer.serial != 0; }) && layer.width == width &&
+           layer.height == height && connection.attach_layer(client, layer, color);
+}
+
+bool run_layer_shell(const Fixture &fixture) {
+    auto &desktop = fixture.desktop;
+    auto &scene = fixture.scene;
+    auto primary = fixture.output();
+    auto other = fixture.output();
+    auto *first = part3_output_handle(primary.get());
+    auto *second = part3_output_handle(other.get());
+    REQUIRE(first && second && desktop.add_output(first, "HEADLESS-1", "", output_bounds) &&
+            desktop.add_output(second, "HEADLESS-2", "", {160, 0, 160, 90}));
+    LayerSeat seat(fixture);
+    REQUIRE(seat.start());
+    Connection connection(fixture.display);
+    Client client;
+    REQUIRE(connection.connect(client) && client.layers && client.outputs[0] && client.outputs[1]);
+    REQUIRE(connection.wait(client, [&] { return client.keyboard && client.pointer; }));
+
+    constexpr auto top = ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP;
+    constexpr auto bottom = ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM;
+    constexpr auto left = ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT;
+    constexpr auto right = ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT;
+
+    seat.click(190, 80);
+    Layer wallpaper;
+    wallpaper.create(client, nullptr, ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND,
+                     top | bottom | left | right, 0, 0, -1);
+    REQUIRE(map_layer(connection, client, wallpaper, 160, 90, green));
+    REQUIRE(wait_pixel(connection, client, other.get(), 3, 3, green));
+    seat.click(10, 80);
+
+    Layer underlay;
+    underlay.create(client, client.outputs[0], ZWLR_LAYER_SHELL_V1_LAYER_BOTTOM, 0, 40, 30, 0);
+    REQUIRE(map_layer(connection, client, underlay, 40, 30, blue));
+    REQUIRE(wait_pixel(connection, client, primary.get(), 80, 45, blue));
+
+    Layer panel;
+    panel.create(client, client.outputs[0], ZWLR_LAYER_SHELL_V1_LAYER_TOP, top | left | right, 0,
+                 12, 12);
+    zwlr_layer_surface_v1_set_margin(panel.role, 4, 5, 0, 3);
+    REQUIRE(map_layer(connection, client, panel, 152, 12, green));
+    seaside_scene_target panel_hit{};
+    REQUIRE(scene.window_at(4, 5, panel_hit) && !panel_hit.id && panel_hit.sx == 1 &&
+            panel_hit.sy == 1 && scene.visible_output(panel_hit.surface) == first);
+    REQUIRE(wait_pixel(connection, client, primary.get(), 4, 5, green));
+
+    REQUIRE(connection.open(client) && connection.attach(client, 50, 40, true, red));
+    const auto id = desktop.windows().focused_window().value_or(0);
+    const WindowRect reserved{0, 16, 160, 74};
+    REQUIRE(id && desktop.windows().view(id).geometry == reserved);
+    REQUIRE(connection.wait(client, [&] { return client.configured.height == reserved.height; }));
+    REQUIRE(connection.attach_configured(client, red));
+    REQUIRE(wait_pixel(connection, client, primary.get(), 80, 45, red));
+    REQUIRE(client.keyboard_surface == client.surface);
+
+    seat.click(4, 5);
+    REQUIRE(connection.roundtrip(client) && client.pointer_surface == panel.surface &&
+            client.keyboard_surface == client.surface && client.button_serial);
+    zwlr_layer_surface_v1_set_keyboard_interactivity(
+        panel.role, ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_ON_DEMAND);
+    wl_surface_commit(panel.surface);
+    REQUIRE(connection.roundtrip(client));
+    seat.click(4, 5);
+    REQUIRE(connection.wait(client, [&] { return client.keyboard_surface == panel.surface; }));
+    seat.key(KEY_A);
+    REQUIRE(connection.wait(client, [&] { return client.keys == 1; }));
+
+    Popup popup;
+    REQUIRE(connection.open_popup(client, popup, &panel, client.button_serial));
+    seaside_scene_target popup_hit{};
+    REQUIRE(scene.window_at(16, 17, popup_hit) && popup_hit.id == 0 && popup_hit.sx == 3 &&
+            popup_hit.sy == 3 && scene.visible_output(popup_hit.surface) == first);
+    seat.key(KEY_F8);
+    REQUIRE(
+        connection.wait(client, [&] { return popup.dismissed && client.configured.fullscreen; }));
+    REQUIRE(seat.shortcuts == 1 && client.keys == 1 && client.keyboard_surface == client.surface &&
+            desktop.windows().view(id).geometry == output_bounds);
+    REQUIRE(!scene.visible_output(panel_hit.surface));
+    REQUIRE(connection.attach_configured(client, red));
+    REQUIRE(wait_pixel(connection, client, primary.get(), 4, 5, red));
+    REQUIRE(wait_pixel(connection, client, other.get(), 3, 3, green));
+
+    Layer overlay;
+    overlay.create(client, client.outputs[0], ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY, top, 40, 10, 0);
+    zwlr_layer_surface_v1_set_keyboard_interactivity(
+        overlay.role, ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_EXCLUSIVE);
+    REQUIRE(map_layer(connection, client, overlay, 40, 10, blue));
+    REQUIRE(connection.wait(client, [&] { return client.keyboard_surface == overlay.surface; }));
+    REQUIRE(wait_pixel(connection, client, primary.get(), 80, 5, blue));
+    overlay.destroy();
+    REQUIRE(connection.wait(client, [&] { return client.keyboard_surface == client.surface; }));
+
+    seat.key(KEY_F8);
+    REQUIRE(connection.wait(client, [&] { return !client.configured.fullscreen; }));
+    REQUIRE(seat.shortcuts == 2 && client.keys == 1 &&
+            desktop.windows().view(id).geometry == reserved);
+    REQUIRE(wait_pixel(connection, client, primary.get(), 4, 5, green));
+    zwlr_layer_surface_v1_set_exclusive_zone(panel.role, 20);
+    wl_surface_commit(panel.surface);
+    REQUIRE(connection.wait(client, [&] { return desktop.windows().view(id).geometry.y == 24; }));
+    xdg_toplevel_set_maximized(client.toplevel);
+    REQUIRE(connection.wait(client, [&] { return client.configured.maximized; }));
+    REQUIRE(client.configured.width == 160 && client.configured.height == 66);
+
+    const auto old_serial = panel.serial;
+    REQUIRE(part3_output_set_scale(primary.get(), 1.25F) &&
+            part3_output_set_transform(primary.get(), WL_OUTPUT_TRANSFORM_90) &&
+            desktop.update_output(first, {0, 0, 72, 128}));
+    REQUIRE(
+        connection.wait(client, [&] { return panel.serial != old_serial && panel.width == 64; }));
+    REQUIRE(panel.height == 12 && desktop.windows().view(id).geometry.height == 104);
+    wl_surface_attach(panel.surface, nullptr, 0, 0);
+    wl_surface_commit(panel.surface);
+    REQUIRE(
+        connection.wait(client, [&] { return desktop.windows().view(id).geometry.height == 128; }));
+    REQUIRE(!scene.visible_output(panel_hit.surface));
+
+    desktop.remove_output(second);
+    REQUIRE(connection.wait(client, [&] { return wallpaper.closed; }));
+    REQUIRE(!desktop.failed() && !scene.snapshot().failed);
+    return true;
 }
 
 bool run_fullscreen_aspect(const Fixture &fixture) {
@@ -1036,6 +1423,12 @@ int main(int argc, char **argv) {
         return run_fixture(config, run_part4) ? EXIT_SUCCESS : EXIT_FAILURE;
     }
     const std::string_view scenario = argv[1];
+    if (argc == 2 && scenario == "layer-shell") {
+        config.window.gaps_outer = 0;
+        config.window.gaps_inner = 0;
+        config.window.border_width = 0;
+        return run_fixture(config, run_layer_shell) ? EXIT_SUCCESS : EXIT_FAILURE;
+    }
     if (argc == 2 && scenario == "fullscreen-aspect") {
         config.window.tiling = false;
         return run_fixture(config, run_fullscreen_aspect) ? EXIT_SUCCESS : EXIT_FAILURE;

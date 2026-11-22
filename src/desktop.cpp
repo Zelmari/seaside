@@ -37,10 +37,18 @@ Desktop::Desktop(Scene &scene, const Config &config)
     : scene_(scene), windows_(config), bindings_(config.keybinds),
       fullscreen_aspect_(config.render.fullscreen_aspect) {
     scene_.set_window_handler(on_window, this);
+    scene_.set_layer_handler(
+        [](void *self) { return static_cast<Desktop *>(self)->focused_output_handle(); },
+        on_layer_changed,
+        [](void *self, wlr_surface *root) {
+            seaside_tty_input_cancel_drag_from(static_cast<Desktop *>(self)->input_, root);
+        },
+        this);
 }
 
 Desktop::~Desktop() noexcept {
     scene_.set_window_handler(nullptr, nullptr);
+    scene_.set_layer_handler(nullptr, nullptr, nullptr, nullptr);
 }
 
 void Desktop::set_input(seaside_tty_input *input) noexcept {
@@ -51,7 +59,7 @@ bool Desktop::add_output(wlr_output *output, std::string_view connector, std::st
                          WindowRect bounds, std::string_view id) noexcept try {
     auto [record, inserted] =
         outputs_.try_emplace(output, Output{std::string(id.empty() ? connector : id),
-                                            std::string(connector), std::string(identity)});
+                                            std::string(connector), std::string(identity), bounds});
     if (!inserted) {
         return false;
     }
@@ -93,10 +101,15 @@ bool Desktop::update_output(wlr_output *output, WindowRect bounds) noexcept try 
         return false;
     }
     discard_drag();
-    if (!windows_.update_output(found->second.id, bounds, bounds) ||
-        !scene_.place_output(output, bounds.x, bounds.y)) {
+    if (!scene_.place_output(output, bounds.x, bounds.y)) {
         return false;
     }
+    const auto work = from_scene(scene_.layer_work_area(output, to_scene(bounds),
+                                                        windows_.has_fullscreen(found->second.id)));
+    if (!windows_.update_output(found->second.id, bounds, work)) {
+        return false;
+    }
+    found->second.work = work;
     project();
     return true;
 } catch (...) {
@@ -140,11 +153,43 @@ WindowRect Desktop::output_bounds(wlr_output *output) const noexcept {
                : windows_.output_bounds(entry->second.id).value_or(WindowRect{});
 }
 
+bool Desktop::has_fullscreen(wlr_output *output) const noexcept {
+    const auto entry = outputs_.find(output);
+    return entry != outputs_.end() && windows_.has_fullscreen(entry->second.id);
+}
+
+void Desktop::on_layer_changed(void *self) noexcept {
+    auto &desktop = *static_cast<Desktop *>(self);
+    try {
+        desktop.project();
+    } catch (...) {
+        desktop.failed_ = true;
+    }
+}
+
 void Desktop::project(WindowId resize) {
     if (drag_ && !windows_.view(drag_->window).visible) {
         discard_drag();
     }
+    for (auto &[handle, record] : outputs_) {
+        const auto bounds = windows_.output_bounds(record.id);
+        if (!bounds) {
+            continue;
+        }
+        const auto work = from_scene(
+            scene_.layer_work_area(handle, to_scene(*bounds), windows_.has_fullscreen(record.id)));
+        if (record.work != work) {
+            discard_drag();
+            if (!windows_.update_output(record.id, *bounds, work)) {
+                failed_ = true;
+                return;
+            }
+            record.work = work;
+        }
+    }
     const WindowId focused = windows_.focused_window().value_or(0);
+    auto *layer_focus = scene_.layer_keyboard_focus(focused_output_handle());
+    layer_has_focus_ = layer_focus != nullptr;
     for (const auto id : views_) {
         const auto view = windows_.view(id);
         const auto output = windows_.window_output(id);
@@ -158,7 +203,7 @@ void Desktop::project(WindowId resize) {
                 .stacking = view.stacking,
                 .border_width = view.border_width,
                 .visible = view.visible,
-                .activated = focused == id,
+                .activated = !layer_focus && focused == id,
                 .maximized = view.maximized,
                 .fullscreen = view.fullscreen,
                 .stretch_fullscreen = fullscreen_aspect_ == FullscreenAspect::stretch,
@@ -168,7 +213,8 @@ void Desktop::project(WindowId resize) {
             });
     }
     if (input_) {
-        seaside_tty_input_set_focus(input_, scene_.window_surface(focused));
+        seaside_tty_input_set_focus(input_,
+                                    layer_focus ? layer_focus : scene_.window_surface(focused));
         seaside_tty_input_refresh_pointer(input_);
     }
     if (projected_) {
@@ -516,8 +562,15 @@ bool Desktop::button(WindowId id, std::uint32_t button, bool pressed, std::uint8
         return false;
     }
     if (id) {
+        scene_.select_layer(nullptr);
         windows_.click(id);
     } else {
+        seaside_scene_target target{};
+        if (scene_.window_at(x, y, target)) {
+            scene_.select_layer(target.surface);
+        } else {
+            scene_.select_layer(nullptr);
+        }
         windows_.focus_output_at(x, y);
     }
     if (!id || (button != BTN_LEFT && button != BTN_RIGHT) || !std::isfinite(x) ||
