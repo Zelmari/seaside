@@ -870,6 +870,8 @@ struct LayerSeat {
                 },
             .pointer_absolute_delta = nullptr,
             .pointer_locked = nullptr,
+            .cursor_shape = nullptr,
+            .cursor_surface = nullptr,
             .pointer_cancelled = nullptr,
             .drag_icon = nullptr,
             .activity = nullptr,
@@ -903,6 +905,102 @@ struct LayerSeat {
     double x = 1, y = 1;
     unsigned shortcuts = 0;
 };
+
+bool run_client_gestures(const Fixture &fixture) {
+    auto &desktop = fixture.desktop;
+    auto output = fixture.output();
+    REQUIRE(output);
+    REQUIRE(desktop.add_output(part3_output_handle(output.get()), "main", "main", output_bounds));
+    LayerSeat seat(fixture);
+    REQUIRE(seat.start());
+    Connection connection(fixture.display);
+    Client client;
+    REQUIRE(connection.connect(client));
+    REQUIRE(connection.open(client));
+    REQUIRE(connection.attach(client, ordinary_width, ordinary_height));
+    const auto &windows = desktop.windows();
+    const auto id = windows.focused_window();
+    REQUIRE(id && !windows.view(*id).tiled);
+
+    const auto initial = windows.view(*id).geometry;
+    seat.x = initial.x + 10;
+    seat.y = initial.y + 10;
+    part3_input_button(seat.devices.get(), BTN_LEFT, true);
+    REQUIRE(connection.wait(client, [&] { return client.button_serial != 0; }));
+    const auto move_serial = client.button_serial;
+    xdg_toplevel_move(client.toplevel, client.seat, move_serial);
+    REQUIRE(connection.wait(client, [&] { return client.pointer_surface == nullptr; }));
+    seat.x += 12;
+    seat.y += 7;
+    desktop.motion(seat.x, seat.y);
+    const auto moved = windows.view(*id).geometry;
+    REQUIRE(moved == (WindowRect{initial.x + 12, initial.y + 7, initial.width, initial.height}));
+    part3_input_button(seat.devices.get(), BTN_LEFT, false);
+    REQUIRE(connection.wait(client, [&] { return client.pointer_surface == client.surface; }));
+
+    // A serial from a completed press cannot start another grab.
+    xdg_toplevel_move(client.toplevel, client.seat, move_serial);
+    REQUIRE(connection.roundtrip(client));
+    desktop.motion(seat.x + 5, seat.y + 5);
+    REQUIRE(windows.view(*id).geometry == moved);
+
+    xdg_toplevel_set_min_size(client.toplevel, 40, 26);
+    wl_surface_commit(client.surface);
+    REQUIRE(connection.roundtrip(client));
+    seat.x = moved.x + 6;
+    seat.y = moved.y + 6;
+    client.button_serial = 0;
+    part3_input_button(seat.devices.get(), BTN_LEFT, true);
+    REQUIRE(connection.wait(client, [&] { return client.button_serial != 0; }));
+    xdg_toplevel_resize(client.toplevel, client.seat, move_serial,
+                        XDG_TOPLEVEL_RESIZE_EDGE_TOP_LEFT);
+    REQUIRE(connection.roundtrip(client) && !client.configured.resizing &&
+            client.pointer_surface == client.surface);
+    xdg_toplevel_resize(client.toplevel, client.seat, client.button_serial,
+                        XDG_TOPLEVEL_RESIZE_EDGE_TOP_LEFT);
+    REQUIRE(connection.wait(client, [&] { return client.configured.resizing; }));
+    seat.x -= 6;
+    seat.y -= 4;
+    desktop.motion(seat.x, seat.y);
+    const auto expanded = windows.view(*id).geometry;
+    REQUIRE(expanded == (WindowRect{moved.x - 6, moved.y - 4, moved.width + 6, moved.height + 4}));
+    REQUIRE(connection.wait(client, [&] {
+        return client.configured.width == expanded.width &&
+               client.configured.height == expanded.height;
+    }));
+    REQUIRE(connection.attach_configured(client));
+    seat.x += 32;
+    seat.y += 18;
+    desktop.motion(seat.x, seat.y);
+    const auto clamped = windows.view(*id).geometry;
+    REQUIRE(clamped ==
+            (WindowRect{moved.x + moved.width - 40, moved.y + moved.height - 26, 40, 26}));
+    REQUIRE(connection.wait(
+        client, [&] { return client.configured.width == 40 && client.configured.height == 26; }));
+    REQUIRE(connection.attach_configured(client));
+    part3_input_button(seat.devices.get(), BTN_LEFT, false);
+    REQUIRE(connection.wait(client, [&] { return !client.configured.resizing; }));
+    REQUIRE(windows.view(*id).geometry == clamped);
+
+    seat.x = clamped.x + 5;
+    seat.y = clamped.y + 5;
+    client.button_serial = 0;
+    part3_input_button(seat.devices.get(), BTN_LEFT, true);
+    REQUIRE(connection.wait(client, [&] { return client.button_serial != 0; }));
+    xdg_toplevel_resize(client.toplevel, client.seat, client.button_serial,
+                        XDG_TOPLEVEL_RESIZE_EDGE_BOTTOM_RIGHT);
+    REQUIRE(connection.wait(client, [&] { return client.configured.resizing; }));
+    desktop.apply_config(seaside::default_config());
+    REQUIRE(connection.wait(client, [&] {
+        return !client.configured.resizing && client.configured.tiled_edges == all_tiled_edges;
+    }));
+    const auto tiled = windows.view(*id).geometry;
+    desktop.motion(seat.x + 8, seat.y + 8);
+    REQUIRE(windows.view(*id).geometry == tiled);
+    part3_input_button(seat.devices.get(), BTN_LEFT, false);
+    REQUIRE(!desktop.failed() && !fixture.scene.snapshot().failed);
+    return true;
+}
 
 bool map_layer(Connection &connection, Client &client, Layer &layer, int width, int height,
                std::uint32_t color) {
@@ -1169,7 +1267,26 @@ bool run_dwindle(const Fixture &fixture) {
     REQUIRE(wait_pixel(connection, first, output.get(), 100, 45, green));
     seaside_scene_target border{};
     REQUIRE(fixture.scene.window_at(75, 45, border) && border.id == a && !border.surface);
-    REQUIRE(connection.attach_configured(first));
+    REQUIRE(connection.attach_configured(first, red));
+    constexpr std::uint32_t inactive_border = 0x595959;
+    constexpr std::uint32_t active_border = 0xbfbfbf;
+    REQUIRE(wait_pixel(connection, first, output.get(), 5, 45, inactive_border));
+    REQUIRE(wait_pixel(connection, first, output.get(), 84, 45, active_border));
+
+    xdg_toplevel_set_maximized(second.toplevel);
+    REQUIRE(connection.wait(second, [&] { return second.configured.maximized; }));
+    REQUIRE(connection.attach_configured(second, green));
+    REQUIRE(wait_pixel(connection, first, output.get(), 20, 45, green));
+    REQUIRE(desktop.action(action(ActionKind::cycle_focus_mru)));
+    REQUIRE(windows.focused_window() == a && windows.view(b).maximized);
+    REQUIRE(wait_pixel(connection, first, output.get(), 20, 45, red));
+    REQUIRE(wait_pixel(connection, first, output.get(), 5, 45, active_border));
+    REQUIRE(desktop.action(action(ActionKind::cycle_focus_mru)));
+    REQUIRE(windows.focused_window() == b && windows.view(b).maximized);
+    REQUIRE(wait_pixel(connection, first, output.get(), 20, 45, green));
+    xdg_toplevel_unset_maximized(second.toplevel);
+    REQUIRE(wait_tiled(connection, second, 69, 78));
+    REQUIRE(connection.attach_configured(second, green));
 
     REQUIRE(begin_drag(fixture, b, BTN_RIGHT, 119, 45));
     desktop.motion(131, 45);
@@ -1445,7 +1562,9 @@ int main(int argc, char **argv) {
     auto config = seaside::default_config();
     if (argc == 1) {
         config.window.tiling = false;
-        return run_fixture(config, run_part4) ? EXIT_SUCCESS : EXIT_FAILURE;
+        return run_fixture(config, run_part4) && run_fixture(config, run_client_gestures)
+                   ? EXIT_SUCCESS
+                   : EXIT_FAILURE;
     }
     const std::string_view scenario = argv[1];
     if (argc == 2 && scenario == "layer-shell") {

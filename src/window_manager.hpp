@@ -74,6 +74,8 @@ class WindowManager final {
     bool swap_window(WindowId id, Direction direction);
     bool resize_window(WindowId id, Direction direction, int distance);
     bool resize_window_by(WindowId id, int dw, int dh);
+    bool resize_floating(WindowId id, WindowRect start, std::optional<int> dx,
+                         std::optional<int> dy, bool from_left, bool from_top);
     bool begin_move(WindowId id);
     bool finish_move(WindowId id, double x, double y);
     void cancel_move(WindowId id);
@@ -148,6 +150,7 @@ class WindowManager final {
     bool is_tiled(WindowId id, const Window &window) const;
     bool has_tile_ancestor(WindowId id) const;
     bool is_descendant(WindowId id, WindowId ancestor) const;
+    std::optional<WindowId> local_focus(std::string_view output, WorkspaceId workspace) const;
     std::optional<WindowId> fullscreen_on(std::string_view output) const;
     WindowRect geometry(WindowId id, const Window &window) const;
     void position_window(WindowId id, Window &window);

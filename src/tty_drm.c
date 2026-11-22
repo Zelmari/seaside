@@ -22,15 +22,23 @@
 #include <wlr/backend/multi.h>
 #include <wlr/backend/session.h>
 #include <wlr/interfaces/wlr_buffer.h>
+#include <wlr/render/drm_syncobj.h>
 #include <wlr/render/wlr_renderer.h>
+#include <wlr/render/wlr_texture.h>
+#include <wlr/types/wlr_compositor.h>
+#include <wlr/types/wlr_linux_drm_syncobj_v1.h>
 #include <wlr/types/wlr_output.h>
 #include <wlr/util/log.h>
+#include <wlr/util/transform.h>
+#include <wlr/xcursor.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 
 enum {
     SEAT_WAIT_MS = 2000,
     CURSOR_SIZE = 16,
+    MAX_CURSOR_IMAGE = 64,
+    MAX_CLIENT_CURSOR_TEXTURE = 128,
     MAX_KMS_CARDS = 64,
     MAX_KMS_PLANES = 256,
     MAX_PLANE_PROPERTIES = 64,
@@ -51,9 +59,14 @@ struct seaside_tty_drm {
     struct seaside_tty_drm_observation evidence;
     struct wlr_buffer *visible_buffer;
     struct wlr_buffer *transparent_buffer;
+    struct wlr_xcursor_theme *cursor_theme;
+    struct wlr_buffer *client_cursor;
+    int cursor_hotspot_x, cursor_hotspot_y;
+    uint64_t cursor_generation;
     double cursor_x;
     double cursor_y;
     bool cursor_visible;
+    bool client_cursor_hidden;
     bool cursor_position_set;
     bool fixture_mode;
 };
@@ -79,6 +92,7 @@ struct tty_output {
     uint32_t connector_id;
     uint32_t cursor_plane_id;
     uint32_t commit_seq;
+    uint64_t cursor_generation;
     int x, y, width, height;
     uint64_t committed_frames, presented_frames, discarded_frames, last_presentation_ns;
     const char *disabled_reason;
@@ -90,7 +104,7 @@ struct tty_output {
 
 struct cursor_buffer {
     struct wlr_buffer base;
-    uint32_t pixels[CURSOR_SIZE * CURSOR_SIZE];
+    uint32_t pixels[];
 };
 
 static void destroy_cursor_buffer(struct wlr_buffer *base) {
@@ -107,7 +121,7 @@ static bool read_cursor_buffer(struct wlr_buffer *base, uint32_t flags, void **d
     }
     *data = buffer->pixels;
     *format = DRM_FORMAT_ARGB8888;
-    *stride = CURSOR_SIZE * sizeof(buffer->pixels[0]);
+    *stride = (size_t)base->width * sizeof(buffer->pixels[0]);
     return true;
 }
 
@@ -121,21 +135,112 @@ static const struct wlr_buffer_impl cursor_buffer_impl = {
     .end_data_ptr_access = end_cursor_buffer_access,
 };
 
-static struct wlr_buffer *make_cursor_buffer(bool visible) {
-    struct cursor_buffer *buffer = calloc(1, sizeof(*buffer));
+static struct cursor_buffer *new_cursor_buffer(int width, int height) {
+    if (width <= 0 || height <= 0 || width > MAX_CURSOR_IMAGE || height > MAX_CURSOR_IMAGE) {
+        return NULL;
+    }
+    struct cursor_buffer *buffer =
+        calloc(1, sizeof(*buffer) + (size_t)width * height * sizeof(buffer->pixels[0]));
     if (!buffer) {
         return NULL;
     }
-    wlr_buffer_init(&buffer->base, &cursor_buffer_impl, CURSOR_SIZE, CURSOR_SIZE);
-    /* A small bright cross is visible over the black test scene. A fixed
-     * source image makes the DRM test independent of installed cursor themes. */
-    if (visible) {
+    wlr_buffer_init(&buffer->base, &cursor_buffer_impl, width, height);
+    return buffer;
+}
+
+static struct wlr_buffer *make_cursor_buffer(bool visible, bool fixture) {
+    struct cursor_buffer *buffer = new_cursor_buffer(CURSOR_SIZE, CURSOR_SIZE);
+    if (!buffer) {
+        return NULL;
+    }
+    if (visible && fixture) {
+        /* Keep the qualification fixture independent of the desktop artwork. */
         for (size_t i = 0; i < CURSOR_SIZE; ++i) {
             buffer->pixels[CURSOR_SIZE * i + CURSOR_SIZE / 2] = UINT32_C(0xffffffff);
             buffer->pixels[CURSOR_SIZE * (CURSOR_SIZE / 2) + i] = UINT32_C(0xffffffff);
         }
+    } else if (visible) {
+        /* The arrow tip at (0, 0) is also its hardware hotspot. */
+        static const char arrow[CURSOR_SIZE][CURSOR_SIZE + 1] = {
+            "W...............", "WW..............", "WBW.............", "WBBW............",
+            "WBBBW...........", "WBBBBW..........", "WBBBBBW.........", "WBBBBBBW........",
+            "WBBBBBBBW.......", "WBBBBBBBBW......", "WBBBBBWWWWW.....", "WBBWBBW.........",
+            "WBW.WBBW........", "WW..WBBW........", "W....WW.........", "................",
+        };
+        for (size_t y = 0; y < CURSOR_SIZE; ++y) {
+            for (size_t x = 0; x < CURSOR_SIZE; ++x) {
+                const char pixel = arrow[y][x];
+                buffer->pixels[y * CURSOR_SIZE + x] = pixel == 'W'   ? UINT32_C(0xffffffff)
+                                                      : pixel == 'B' ? UINT32_C(0xff000000)
+                                                                     : 0;
+            }
+        }
     }
     return &buffer->base;
+}
+
+static struct cursor_buffer *copy_cursor_surface(struct wlr_surface *surface) {
+    const int width = surface->current.width;
+    const int height = surface->current.height;
+    struct wlr_texture *texture = wlr_surface_get_texture(surface);
+    if (!texture || width <= 0 || height <= 0 || width > MAX_CURSOR_IMAGE ||
+        height > MAX_CURSOR_IMAGE || texture->width == 0 || texture->height == 0 ||
+        texture->width > MAX_CLIENT_CURSOR_TEXTURE || texture->height > MAX_CLIENT_CURSOR_TEXTURE) {
+        return NULL;
+    }
+    struct wlr_linux_drm_syncobj_surface_v1_state *sync =
+        wlr_linux_drm_syncobj_v1_get_surface_state(surface);
+    if (sync && sync->acquire_timeline) {
+        bool ready = false;
+        if (!wlr_drm_syncobj_timeline_check(sync->acquire_timeline, sync->acquire_point, 0,
+                                            &ready) ||
+            !ready) {
+            return NULL;
+        }
+    }
+    uint32_t pixels[MAX_CLIENT_CURSOR_TEXTURE * MAX_CLIENT_CURSOR_TEXTURE];
+    uint32_t format = wlr_texture_preferred_read_format(texture);
+    if (format != DRM_FORMAT_ARGB8888 && format != DRM_FORMAT_ABGR8888 &&
+        format != DRM_FORMAT_XRGB8888 && format != DRM_FORMAT_XBGR8888) {
+        format = DRM_FORMAT_ARGB8888;
+    }
+    if (!wlr_texture_read_pixels(texture, &(struct wlr_texture_read_pixels_options){
+                                              .data = pixels,
+                                              .format = format,
+                                              .stride = texture->width * sizeof(pixels[0]),
+                                          })) {
+        return NULL;
+    }
+    struct wlr_fbox source;
+    wlr_surface_get_buffer_source_box(surface, &source);
+    if (!(source.x >= 0 && source.y >= 0 && source.width > 0 && source.height > 0 &&
+          source.x + source.width <= texture->width &&
+          source.y + source.height <= texture->height)) {
+        return NULL;
+    }
+    struct cursor_buffer *image = new_cursor_buffer(width, height);
+    if (!image) {
+        return NULL;
+    }
+    const enum wl_output_transform transform =
+        wlr_output_transform_invert(surface->current.transform);
+    const bool bgr = format == DRM_FORMAT_ABGR8888 || format == DRM_FORMAT_XBGR8888;
+    const bool opaque = format == DRM_FORMAT_XRGB8888 || format == DRM_FORMAT_XBGR8888;
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            struct wlr_fbox point = {.x = (x + 0.5) / width, .y = (y + 0.5) / height};
+            wlr_fbox_transform(&point, &point, transform, 1, 1);
+            const unsigned sx = (unsigned)(source.x + point.x * source.width);
+            const unsigned sy = (unsigned)(source.y + point.y * source.height);
+            uint32_t pixel = pixels[(size_t)sy * texture->width + sx];
+            if (bgr) {
+                pixel = (pixel & UINT32_C(0xff00ff00)) | ((pixel & UINT32_C(0xff0000)) >> 16) |
+                        ((pixel & UINT32_C(0xff)) << 16);
+            }
+            image->pixels[(size_t)y * width + x] = opaque ? pixel | UINT32_C(0xff000000) : pixel;
+        }
+    }
+    return image;
 }
 
 static void unlink_listener(struct wl_listener *listener) {
@@ -430,6 +535,10 @@ static void on_output_present(struct wl_listener *listener, void *data) {
     if (position_changed) {
         ++drm->evidence.presented_moves;
     }
+    if (view == drm->pointer_output && view->cursor_visible &&
+        view->cursor_generation == drm->cursor_generation && drm->callbacks.cursor_presented) {
+        drm->callbacks.cursor_presented(drm->callback_data, view->output, &event->when);
+    }
 }
 
 static bool primary_card_path(const char *path) {
@@ -614,6 +723,10 @@ void seaside_tty_drm_destroy(struct seaside_tty_drm *drm) {
     }
     wlr_buffer_drop(drm->visible_buffer);
     wlr_buffer_drop(drm->transparent_buffer);
+    wlr_buffer_unlock(drm->client_cursor);
+    if (drm->cursor_theme) {
+        wlr_xcursor_theme_destroy(drm->cursor_theme);
+    }
     unlink_listener(&drm->session_destroy);
     unlink_listener(&drm->session_active);
     if (!drm->backend) {
@@ -752,10 +865,10 @@ static void disable_output(struct tty_output *view) {
 
 static bool prepare_cursor_buffers(struct seaside_tty_drm *drm) {
     if (!drm->visible_buffer) {
-        drm->visible_buffer = make_cursor_buffer(true);
+        drm->visible_buffer = make_cursor_buffer(true, drm->fixture_mode);
     }
     if (!drm->transparent_buffer) {
-        drm->transparent_buffer = make_cursor_buffer(false);
+        drm->transparent_buffer = make_cursor_buffer(false, drm->fixture_mode);
     }
     if (!drm->visible_buffer || !drm->transparent_buffer) {
         fail(drm, "could not allocate the hardware cursor images");
@@ -764,14 +877,80 @@ static bool prepare_cursor_buffers(struct seaside_tty_drm *drm) {
     return true;
 }
 
+static bool cursor_should_show(const struct seaside_tty_drm *drm) {
+    return drm->cursor_visible && !drm->client_cursor_hidden;
+}
+
+static struct cursor_buffer *scale_cursor_buffer(struct wlr_buffer *buffer, float scale) {
+    const int width = (int)ceilf(buffer->width * scale);
+    const int height = (int)ceilf(buffer->height * scale);
+    struct cursor_buffer *image = new_cursor_buffer(width, height);
+    if (!image) {
+        return NULL;
+    }
+    void *data;
+    uint32_t format;
+    size_t stride;
+    if (!wlr_buffer_begin_data_ptr_access(buffer, WLR_BUFFER_DATA_PTR_ACCESS_READ, &data, &format,
+                                          &stride)) {
+        wlr_buffer_drop(&image->base);
+        return NULL;
+    }
+    if (format != DRM_FORMAT_ARGB8888) {
+        wlr_buffer_end_data_ptr_access(buffer);
+        wlr_buffer_drop(&image->base);
+        return NULL;
+    }
+    for (int y = 0; y < height; ++y) {
+        const unsigned sy = (unsigned)(y * buffer->height / height);
+        const unsigned char *row = (const unsigned char *)data + sy * stride;
+        for (int x = 0; x < width; ++x) {
+            const unsigned sx = (unsigned)(x * buffer->width / width);
+            memcpy(&image->pixels[(size_t)y * width + x], row + sx * sizeof(image->pixels[0]),
+                   sizeof(image->pixels[0]));
+        }
+    }
+    wlr_buffer_end_data_ptr_access(buffer);
+    return image;
+}
+
+static bool stage_cursor_buffer(struct tty_output *view, struct wlr_buffer *buffer, int hotspot_x,
+                                int hotspot_y) {
+    const float scale = view->output->scale;
+    if (!view->owner->fixture_mode && scale != 1.0f) {
+        struct cursor_buffer *scaled = scale_cursor_buffer(buffer, scale);
+        if (scaled) {
+            const bool displayed =
+                wlr_output_cursor_set_buffer(view->cursor, &scaled->base,
+                                             (int32_t)ceilf(hotspot_x * scale),
+                                             (int32_t)ceilf(hotspot_y * scale)) &&
+                has_hardware_cursor(view);
+            wlr_buffer_drop(&scaled->base);
+            if (displayed) {
+                return true;
+            }
+        }
+    }
+    return buffer->width >= scale && buffer->height >= scale &&
+           wlr_output_cursor_set_buffer(view->cursor, buffer, hotspot_x, hotspot_y) &&
+           has_hardware_cursor(view);
+}
+
 static bool load_cursor_image(struct tty_output *view, bool visible) {
-    struct wlr_buffer *buffer =
-        visible ? view->owner->visible_buffer : view->owner->transparent_buffer;
-    if (!wlr_output_cursor_set_buffer(view->cursor, buffer, CURSOR_SIZE / 2, CURSOR_SIZE / 2) ||
-        !has_hardware_cursor(view)) {
-        return false;
+    const struct seaside_tty_drm *drm = view->owner;
+    const int hotspot = drm->fixture_mode ? CURSOR_SIZE / 2 : 0;
+    if (!visible || !drm->client_cursor ||
+        !stage_cursor_buffer(view, drm->client_cursor, drm->cursor_hotspot_x,
+                             drm->cursor_hotspot_y)) {
+        // An unsupported client image must never force software cursor presentation
+        // or disable a display that can show the built-in hardware cursor.
+        struct wlr_buffer *buffer = visible ? drm->visible_buffer : drm->transparent_buffer;
+        if (!stage_cursor_buffer(view, buffer, hotspot, hotspot)) {
+            return false;
+        }
     }
     view->cursor_visible = visible;
+    view->cursor_generation = drm->cursor_generation;
     return true;
 }
 
@@ -812,7 +991,7 @@ static bool enable_output(struct tty_output *view, struct wlr_allocator *allocat
     const bool initial_pointer = !drm->cursor_position_set;
     view->cursor = wlr_output_cursor_create(output);
     if (!view->cursor || !wlr_output_cursor_move(view->cursor, view->width / 2, view->height / 2) ||
-        !load_cursor_image(view, initial_pointer && drm->cursor_visible)) {
+        !load_cursor_image(view, initial_pointer && cursor_should_show(drm))) {
         reject_output(view, "hardware cursor staging failed");
         return false;
     }
@@ -900,10 +1079,12 @@ static bool move_cursor(struct seaside_tty_drm *drm, double x, double y, bool co
         const double scale = target->output->scale;
         const bool pixel_changed = (int)(local_x * scale) != (int)target->cursor->x ||
                                    (int)(local_y * scale) != (int)target->cursor->y;
+        const bool visible = cursor_should_show(drm);
         if ((pixel_changed && !wlr_output_cursor_move(target->cursor, local_x, local_y)) ||
             !has_hardware_cursor(target) ||
-            (target->cursor_visible != drm->cursor_visible &&
-             !load_cursor_image(target, drm->cursor_visible))) {
+            ((target->cursor_visible != visible ||
+              (visible && target->cursor_generation != drm->cursor_generation)) &&
+             !load_cursor_image(target, visible))) {
             reject_output(target, "the backend rejected hardware cursor motion");
             return false;
         }
@@ -1054,6 +1235,7 @@ bool seaside_tty_drm_apply_settings(struct seaside_tty_drm *drm, struct wlr_outp
         view->cursor_presented = false;
         view->movement_verified = false;
         view->cursor_plane_id = 0;
+        view->cursor_generation = drm->cursor_generation - 1;
     }
     view->x = settings->x;
     view->y = settings->y;
@@ -1092,7 +1274,7 @@ bool seaside_tty_drm_set_output_power(struct seaside_tty_drm *drm, struct wlr_ou
         const double y = pointer_here ? drm->cursor_y - view->y : view->height / 2;
         view->cursor = wlr_output_cursor_create(output);
         if (!view->cursor || !wlr_output_cursor_move(view->cursor, x, y) ||
-            !load_cursor_image(view, pointer_here && drm->cursor_visible)) {
+            !load_cursor_image(view, pointer_here && cursor_should_show(drm))) {
             reject_output(view, "hardware cursor staging failed after display wake");
             return false;
         }
@@ -1240,18 +1422,148 @@ bool seaside_tty_drm_absolute_delta(const struct seaside_tty_drm *drm, double x,
     return true;
 }
 
+static bool refresh_cursor_image(struct seaside_tty_drm *drm) {
+    struct tty_output *view = drm->pointer_output;
+    const bool visible = cursor_should_show(drm);
+    if (drm->evidence.active && available(view) && !view->sleeping &&
+        (view->cursor_visible != visible ||
+         (visible && view->cursor_generation != drm->cursor_generation)) &&
+        !load_cursor_image(view, visible)) {
+        reject_output(view, "could not update the hardware cursor");
+        return false;
+    }
+    return true;
+}
+
 bool seaside_tty_drm_set_cursor_visible(struct seaside_tty_drm *drm, bool visible) {
     if (!drm || drm->evidence.failed) {
         return false;
     }
     drm->cursor_visible = visible;
-    struct tty_output *view = drm->pointer_output;
-    if (drm->evidence.active && available(view) && !view->sleeping &&
-        view->cursor_visible != visible && !load_cursor_image(view, visible)) {
-        reject_output(view, "could not change hardware cursor visibility");
+    return refresh_cursor_image(drm);
+}
+
+static bool set_cursor_image(struct seaside_tty_drm *drm, struct wlr_buffer *buffer,
+                             int32_t hotspot_x, int32_t hotspot_y, bool hidden) {
+    if (drm->client_cursor != buffer || drm->cursor_hotspot_x != hotspot_x ||
+        drm->cursor_hotspot_y != hotspot_y || drm->client_cursor_hidden != hidden) {
+        if (buffer) {
+            wlr_buffer_lock(buffer);
+        }
+        wlr_buffer_unlock(drm->client_cursor);
+        drm->client_cursor = buffer;
+        drm->cursor_hotspot_x = hotspot_x;
+        drm->cursor_hotspot_y = hotspot_y;
+        drm->client_cursor_hidden = hidden;
+        ++drm->cursor_generation;
+    }
+    return refresh_cursor_image(drm);
+}
+
+static bool resize_cursor_ink(int x, int y, int direction) {
+    const int dx = x - CURSOR_SIZE / 2;
+    const int dy = y - CURSOR_SIZE / 2;
+    int along = abs(dx);
+    int across = abs(dy);
+    if (direction == 1) {
+        along = abs(dy);
+        across = abs(dx);
+    } else if (direction == 2) {
+        along = abs(dx + dy) / 2;
+        across = abs(dx - dy) / 2;
+    } else if (direction == 3) {
+        along = abs(dx - dy) / 2;
+        across = abs(dx + dy) / 2;
+    }
+    return along <= 6 && (across <= 1 || (along >= 2 && across <= 6 - along));
+}
+
+static struct cursor_buffer *make_resize_cursor(const char *shape) {
+    static const char *const names[][2] = {
+        {"ew-resize", "col-resize"},
+        {"ns-resize", "row-resize"},
+        {"nwse-resize", NULL},
+        {"nesw-resize", NULL},
+    };
+    for (int direction = 0; direction < 4; ++direction) {
+        if (strcmp(shape, names[direction][0]) != 0 &&
+            (!names[direction][1] || strcmp(shape, names[direction][1]) != 0)) {
+            continue;
+        }
+        struct cursor_buffer *buffer = new_cursor_buffer(CURSOR_SIZE, CURSOR_SIZE);
+        if (!buffer) {
+            return NULL;
+        }
+        // Keep the common bidirectional resize shapes available even when
+        // the installed Xcursor theme provides only the legacy side shapes.
+        for (int y = 0; y < CURSOR_SIZE; ++y) {
+            for (int x = 0; x < CURSOR_SIZE; ++x) {
+                uint32_t pixel = 0;
+                if (resize_cursor_ink(x, y, direction)) {
+                    pixel = UINT32_C(0xff000000);
+                } else if (resize_cursor_ink(x - 1, y, direction) ||
+                           resize_cursor_ink(x + 1, y, direction) ||
+                           resize_cursor_ink(x, y - 1, direction) ||
+                           resize_cursor_ink(x, y + 1, direction)) {
+                    pixel = UINT32_C(0xffffffff);
+                }
+                buffer->pixels[CURSOR_SIZE * y + x] = pixel;
+            }
+        }
+        return buffer;
+    }
+    return NULL;
+}
+
+bool seaside_tty_drm_set_cursor_shape(struct seaside_tty_drm *drm, const char *shape) {
+    if (!drm || drm->evidence.failed || drm->fixture_mode) {
         return false;
     }
-    return true;
+    if (shape && strcmp(shape, "default") != 0) {
+        if (!drm->cursor_theme) {
+            drm->cursor_theme = wlr_xcursor_theme_load(NULL, CURSOR_SIZE);
+        }
+        struct wlr_xcursor *cursor =
+            drm->cursor_theme ? wlr_xcursor_theme_get_cursor(drm->cursor_theme, shape) : NULL;
+        if (cursor && cursor->image_count > 0) {
+            struct wlr_xcursor_image *image = cursor->images[0];
+            if (image->width <= MAX_CURSOR_IMAGE && image->height <= MAX_CURSOR_IMAGE &&
+                image->hotspot_x < image->width && image->hotspot_y < image->height) {
+                return set_cursor_image(drm, wlr_xcursor_image_get_buffer(image),
+                                        (int32_t)image->hotspot_x, (int32_t)image->hotspot_y,
+                                        false);
+            }
+        }
+        struct cursor_buffer *resize = make_resize_cursor(shape);
+        if (resize) {
+            const bool displayed =
+                set_cursor_image(drm, &resize->base, CURSOR_SIZE / 2, CURSOR_SIZE / 2, false);
+            wlr_buffer_drop(&resize->base);
+            return displayed;
+        }
+    }
+    return set_cursor_image(drm, NULL, 0, 0, false);
+}
+
+bool seaside_tty_drm_set_cursor_surface(struct seaside_tty_drm *drm, struct wlr_surface *surface,
+                                        int32_t hotspot_x, int32_t hotspot_y) {
+    if (!drm || drm->evidence.failed || drm->fixture_mode) {
+        return false;
+    }
+    if (!surface || !wlr_surface_has_buffer(surface)) {
+        return set_cursor_image(drm, NULL, 0, 0, true);
+    }
+    if (hotspot_x < -MAX_CURSOR_IMAGE || hotspot_x > MAX_CURSOR_IMAGE ||
+        hotspot_y < -MAX_CURSOR_IMAGE || hotspot_y > MAX_CURSOR_IMAGE) {
+        return seaside_tty_drm_set_cursor_shape(drm, NULL);
+    }
+    struct cursor_buffer *image = copy_cursor_surface(surface);
+    if (!image) {
+        return seaside_tty_drm_set_cursor_shape(drm, NULL);
+    }
+    const bool displayed = set_cursor_image(drm, &image->base, hotspot_x, hotspot_y, false);
+    wlr_buffer_drop(&image->base);
+    return displayed;
 }
 
 static struct seaside_cursor_point cross_output_gap(const struct seaside_tty_drm *drm,

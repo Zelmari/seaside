@@ -8,6 +8,8 @@ namespace seaside {
 namespace {
 
 constexpr WorkspaceId max_workspace_id = 2147483647U;
+constexpr auto fullscreen_priority = std::uint64_t{1} << 63;
+constexpr auto maximized_focus_priority = std::uint64_t{1} << 62;
 
 int coordinate(std::int64_t value) noexcept {
     return static_cast<int>(std::clamp<std::int64_t>(value, std::numeric_limits<int>::min(),
@@ -806,6 +808,20 @@ WindowRect WindowManager::geometry(WindowId id, const Window &window) const {
     return ordinary;
 }
 
+std::optional<WindowId> WindowManager::local_focus(std::string_view output,
+                                                   WorkspaceId workspace) const {
+    const auto valid_focus = [&](WindowId id) {
+        const auto *entry = state_.window(id);
+        return entry && entry->mapped && entry->home_workspace == workspace;
+    };
+    if (focused_output_ == output && focused_window_ && valid_focus(*focused_window_)) {
+        return focused_window_;
+    }
+    const auto &history = workspaces_.at(workspace).focus_history;
+    const auto previous = std::ranges::find_if(history, valid_focus);
+    return previous == history.end() ? std::nullopt : std::optional{*previous};
+}
+
 std::optional<WindowId> WindowManager::fullscreen_on(std::string_view output) const {
     const auto shown = state_.output(output)->shown;
     if (!shown) {
@@ -814,22 +830,8 @@ std::optional<WindowId> WindowManager::fullscreen_on(std::string_view output) co
     // A newly focused ordinary window must remain visible when it opens over
     // a fullscreen client. Keep the client's fullscreen configure and promote
     // its stack again when the user focuses it or one of its dialogs.
-    const auto valid_focus = [&](WindowId id) {
-        const auto *entry = state_.window(id);
-        return entry && entry->mapped && entry->home_workspace == shown;
-    };
-    std::optional<WindowId> local_focus;
-    if (focused_output_ == output && focused_window_ && valid_focus(*focused_window_)) {
-        local_focus = focused_window_;
-    } else {
-        const auto &history = workspaces_.at(*shown).focus_history;
-        if (const auto previous = std::ranges::find_if(history, valid_focus);
-            previous != history.end()) {
-            local_focus = *previous;
-        }
-    }
-    if (local_focus) {
-        for (auto current = local_focus; current;) {
+    if (const auto focused = local_focus(output, *shown)) {
+        for (auto current = focused; current;) {
             const auto &window = windows_.at(*current);
             if (window.fullscreen && state_.window(*current)->mapped) {
                 return current;
@@ -907,7 +909,8 @@ WindowView WindowManager::view(WindowId id) const {
         return {};
     }
     const auto &window = found->second;
-    const auto &layout = workspaces_.at(state_.window(id)->home_workspace).layout;
+    const auto workspace = state_.window(id)->home_workspace;
+    const auto &layout = workspaces_.at(workspace).layout;
     const bool moving = tile_move_ && tile_move_->tile.id == id;
     const bool ordinary = !window.maximized && !window.fullscreen;
     const bool tile_layout = ordinary && layout.contains(id);
@@ -915,15 +918,30 @@ WindowView WindowManager::view(WindowId id) const {
     const int border =
         moving ? tile_move_->border_width : (tile_layout ? layout.border_width(id) : 0);
     auto stacking = moving ? tile_move_->stacking : window.stacking;
-    if (window.fullscreen || window.parent) {
-        if (const auto output = window_output(id)) {
+    if (const auto output = window_output(id)) {
+        if (window.fullscreen || window.parent) {
             if (const auto fullscreen = fullscreen_on(*output);
                 fullscreen && (*fullscreen == id || is_descendant(id, *fullscreen))) {
                 // Scene order matters even if a fullscreen client submits a
                 // smaller buffer than its requested output rectangle.
-                stacking |= std::uint64_t{1} << 63;
+                stacking |= fullscreen_priority;
             } else if (window.fullscreen) {
                 stacking = 0;
+            }
+        }
+        if (!window.fullscreen && (tile_layout || window.maximized) &&
+            state_.output(*output)->shown == workspace && local_focus(*output, workspace) == id) {
+            const auto &siblings = state_.workspace(workspace)->windows;
+            const bool covered = tile_layout && std::ranges::any_of(siblings, [&](WindowId other) {
+                                     const auto &occluder = windows_.at(other);
+                                     return occluder.maximized && !occluder.fullscreen &&
+                                            occluder.stacking > stacking &&
+                                            state_.window(other)->mapped;
+                                 });
+            // Reveal the focused tile over a covering maximized window
+            // without changing layout order or either window's saved state.
+            if (window.maximized || covered) {
+                stacking |= maximized_focus_priority;
             }
         }
     }
@@ -1439,6 +1457,47 @@ bool WindowManager::resize_window_by(WindowId id, int dw, int dh) {
             std::clamp<std::int64_t>(std::int64_t{window.ordinary.height} + dh, 1, area.height));
     }
     return true;
+}
+
+bool WindowManager::resize_floating(WindowId id, WindowRect start, std::optional<int> dx,
+                                    std::optional<int> dy, bool from_left, bool from_top) {
+    const auto output = window_output(id);
+    if (!output || !is_visible(id)) {
+        return false;
+    }
+    auto &window = windows_.at(id);
+    if (is_tiled(id, window) || window.maximized || window.fullscreen) {
+        return false;
+    }
+    const auto &area = outputs_.find(*output)->second.usable;
+    const auto current = geometry(id, window);
+    const auto axis = [](int position, int extent, int area_start, int area_extent, int delta,
+                         bool near, int minimum, int maximum) {
+        const std::int64_t anchor = std::int64_t{position} + (near ? extent : 0);
+        const std::int64_t available =
+            near ? anchor - area_start : std::int64_t{area_start} + area_extent - anchor;
+        int upper = static_cast<int>(std::clamp<std::int64_t>(available, 1, area_extent));
+        if (maximum > 0) {
+            upper = std::min(upper, maximum);
+        }
+        const int lower = std::clamp(minimum, 1, upper);
+        const auto change = near ? -std::int64_t{delta} : std::int64_t{delta};
+        const int desired =
+            static_cast<int>(std::clamp<std::int64_t>(extent + change, lower, upper));
+        return std::pair{near ? coordinate(anchor - desired) : position, desired};
+    };
+    const auto [x, width] = dx ? axis(start.x, start.width, area.x, area.width, *dx, from_left,
+                                      window.limits.min_width, window.limits.max_width)
+                               : std::pair{current.x, current.width};
+    const auto [y, height] = dy ? axis(start.y, start.height, area.y, area.height, *dy, from_top,
+                                       window.limits.min_height, window.limits.max_height)
+                                : std::pair{current.y, current.height};
+    window.ordinary.width = width;
+    window.ordinary.height = height;
+    const auto resized = geometry(id, window);
+    move_window_by(id, coordinate(std::int64_t{x} - resized.x),
+                   coordinate(std::int64_t{y} - resized.y));
+    return geometry(id, window) != current;
 }
 
 bool WindowManager::begin_move(WindowId id) {

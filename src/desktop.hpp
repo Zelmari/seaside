@@ -62,6 +62,9 @@ class Desktop final {
         bool resize;
         double x, y;
         bool started = false;
+        bool client = false;
+        std::uint32_t resize_edges = 0;
+        WindowRect initial_geometry{};
     };
 
     static std::uint64_t on_window(void *self, const seaside_scene_window_event *event) noexcept;
@@ -70,6 +73,7 @@ class Desktop final {
     void project(WindowId resize = 0);
     bool update_size_limits(WindowId id);
     void discard_drag();
+    bool begin_client_drag(const seaside_scene_window_event &event);
     bool resize(WindowId id, Direction direction, int distance);
     bool resize_by(WindowId id, int dx, int dy);
 
@@ -83,6 +87,10 @@ class Desktop final {
     std::set<WindowId> views_;
     seaside_tty_input *input_ = nullptr;
     std::optional<Drag> drag_;
+    struct PointerPosition {
+        double x, y;
+    };
+    std::optional<PointerPosition> pointer_;
     std::uint8_t cycle_modifiers_ = 0;
     bool failed_ = false;
     bool layer_has_focus_ = false;

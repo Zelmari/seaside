@@ -14,6 +14,7 @@ struct wlr_ext_image_copy_capture_manager_v1;
 struct wlr_linux_dmabuf_v1;
 struct wlr_output;
 struct wlr_renderer;
+struct wlr_seat_client;
 struct wlr_surface;
 struct seaside_scene_bridge;
 
@@ -66,6 +67,15 @@ enum seaside_scene_window_event_kind {
     SEASIDE_WINDOW_MAXIMIZE_REQUESTED,
     SEASIDE_WINDOW_FULLSCREEN_REQUESTED,
     SEASIDE_WINDOW_ATTENTION_REQUESTED,
+    SEASIDE_WINDOW_MOVE_REQUESTED,
+    SEASIDE_WINDOW_RESIZE_REQUESTED,
+};
+
+enum seaside_scene_resize_edge {
+    SEASIDE_RESIZE_TOP = 1,
+    SEASIDE_RESIZE_BOTTOM = 2,
+    SEASIDE_RESIZE_LEFT = 4,
+    SEASIDE_RESIZE_RIGHT = 8,
 };
 
 struct seaside_scene_window_event {
@@ -74,6 +84,9 @@ struct seaside_scene_window_event {
     struct seaside_scene_rect geometry;
     bool enabled;
     bool ordinary_commit;
+    struct wlr_seat_client *seat_client;
+    uint32_t serial;
+    uint32_t resize_edges;
 };
 
 /* CREATED returns the logical ID. Other events return zero. */

@@ -82,6 +82,8 @@ struct scene_view {
     struct wl_listener destroy;
     struct wl_listener request_maximize;
     struct wl_listener request_fullscreen;
+    struct wl_listener request_move;
+    struct wl_listener request_resize;
     struct wl_listener set_parent;
     struct seaside_scene_window_placement placement;
     struct fullscreen_projection fullscreen;
@@ -744,6 +746,33 @@ static void view_request_fullscreen(struct wl_listener *listener, void *data) {
     }
 }
 
+static void view_request_gesture(struct scene_view *view, enum seaside_scene_window_event_kind kind,
+                                 struct wlr_seat_client *seat, uint32_t serial, uint32_t edges) {
+    if (view->mapped && view->id && view->owner->window) {
+        const struct seaside_scene_window_event event = {
+            .kind = kind,
+            .id = view->id,
+            .seat_client = seat,
+            .serial = serial,
+            .resize_edges = edges,
+        };
+        view->owner->window(view->owner->window_data, &event);
+    }
+}
+
+static void view_request_move(struct wl_listener *listener, void *data) {
+    struct scene_view *view = wl_container_of(listener, view, request_move);
+    const struct wlr_xdg_toplevel_move_event *event = data;
+    view_request_gesture(view, SEASIDE_WINDOW_MOVE_REQUESTED, event->seat, event->serial, 0);
+}
+
+static void view_request_resize(struct wl_listener *listener, void *data) {
+    struct scene_view *view = wl_container_of(listener, view, request_resize);
+    const struct wlr_xdg_toplevel_resize_event *event = data;
+    view_request_gesture(view, SEASIDE_WINDOW_RESIZE_REQUESTED, event->seat, event->serial,
+                         event->edges);
+}
+
 static void view_set_parent(struct wl_listener *listener, void *data) {
     (void)data;
     struct scene_view *view = wl_container_of(listener, view, set_parent);
@@ -766,6 +795,8 @@ static void destroy_view(struct scene_view *view) {
     wl_list_remove(&view->destroy.link);
     wl_list_remove(&view->request_maximize.link);
     wl_list_remove(&view->request_fullscreen.link);
+    wl_list_remove(&view->request_move.link);
+    wl_list_remove(&view->request_resize.link);
     wl_list_remove(&view->set_parent.link);
     wl_list_remove(&view->link);
     wlr_scene_node_set_enabled(&view->tree->node, false);
@@ -813,6 +844,8 @@ static void new_toplevel(struct wl_listener *listener, void *data) {
     view->destroy.notify = view_destroy;
     view->request_maximize.notify = view_request_maximize;
     view->request_fullscreen.notify = view_request_fullscreen;
+    view->request_move.notify = view_request_move;
+    view->request_resize.notify = view_request_resize;
     view->set_parent.notify = view_set_parent;
     wl_signal_add(&toplevel->base->surface->events.commit, &view->commit);
     wl_signal_add(&toplevel->base->surface->events.map, &view->map);
@@ -820,6 +853,8 @@ static void new_toplevel(struct wl_listener *listener, void *data) {
     wl_signal_add(&toplevel->events.destroy, &view->destroy);
     wl_signal_add(&toplevel->events.request_maximize, &view->request_maximize);
     wl_signal_add(&toplevel->events.request_fullscreen, &view->request_fullscreen);
+    wl_signal_add(&toplevel->events.request_move, &view->request_move);
+    wl_signal_add(&toplevel->events.request_resize, &view->request_resize);
     wl_signal_add(&toplevel->events.set_parent, &view->set_parent);
     wl_list_insert(&scene->views, &view->link);
     view->id = emit_window(view, SEASIDE_WINDOW_CREATED, false, false);
@@ -1720,6 +1755,9 @@ static void restack_view(struct scene_view *view) {
 }
 
 static void project_border(struct scene_view *view, size_t side, struct wlr_box bounds) {
+    static const float inactive[4] = {0.35f, 0.35f, 0.35f, 1};
+    static const float active[4] = {0.75f, 0.75f, 0.75f, 1};
+    const float *color = view->placement.activated ? active : inactive;
     struct wlr_scene_rect *border = view->borders[side];
     if (bounds.width <= 0 || bounds.height <= 0) {
         if (border) {
@@ -1728,14 +1766,15 @@ static void project_border(struct scene_view *view, size_t side, struct wlr_box 
         return;
     }
     if (!border) {
-        const float gray[4] = {0.35f, 0.35f, 0.35f, 1};
-        border = wlr_scene_rect_create(view->tree, bounds.width, bounds.height, gray);
+        border = wlr_scene_rect_create(view->tree, bounds.width, bounds.height, color);
         if (!border) {
             view->owner->snapshot.failed = true;
             return;
         }
         view->borders[side] = border;
         wlr_scene_node_place_below(&border->node, &view->xdg_tree->node);
+    } else {
+        wlr_scene_rect_set_color(border, color);
     }
     const struct seaside_scene_rect box = view->placement.geometry;
     wlr_scene_node_set_position(&border->node, clamp_coordinate((int64_t)bounds.x - box.x),

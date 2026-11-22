@@ -155,6 +155,29 @@ TEST(WindowManager, KeepsHeldMruStableAndSkipsUnmappedWindows) {
     EXPECT_FALSE(manager.focused_window());
 }
 
+TEST(WindowManager, FocusRevealsATileWithoutChangingMaximizedOrTiledGeometry) {
+    WindowManager manager(WorkspaceMode::global);
+    ASSERT_TRUE(manager.add_output("left", left, usable, true));
+    const auto tile = open_window(manager);
+    const auto browser = open_window(manager);
+    const auto tile_geometry = manager.view(tile).geometry;
+    ASSERT_TRUE(manager.set_maximized(browser, true));
+    ASSERT_GT(manager.view(browser).stacking, manager.view(tile).stacking);
+
+    ASSERT_TRUE(manager.cycle_focus(true));
+    EXPECT_EQ(manager.focused_window(), tile);
+    EXPECT_GT(manager.view(tile).stacking, manager.view(browser).stacking);
+    EXPECT_EQ(manager.view(tile).geometry, tile_geometry);
+    EXPECT_EQ(manager.view(browser).geometry, usable);
+    EXPECT_TRUE(manager.view(browser).maximized);
+
+    ASSERT_TRUE(manager.cycle_focus(true));
+    EXPECT_EQ(manager.focused_window(), browser);
+    EXPECT_GT(manager.view(browser).stacking, manager.view(tile).stacking);
+    EXPECT_EQ(manager.view(tile).geometry, tile_geometry);
+    EXPECT_TRUE(manager.view(browser).maximized);
+}
+
 TEST(WindowManager, DirectionalFocusWrapsInTheCurrentWorkspace) {
     WindowManager manager(WorkspaceMode::global, false);
     ASSERT_TRUE(manager.add_output("left", left, left, true));

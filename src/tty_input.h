@@ -6,9 +6,12 @@
 #include <stdint.h>
 
 struct wl_display;
+struct timespec;
 struct wlr_backend;
 struct wlr_drag_icon;
+struct wlr_output;
 struct wlr_seat;
+struct wlr_seat_client;
 struct wlr_surface;
 struct seaside_tty_input;
 
@@ -39,6 +42,9 @@ struct seaside_tty_input_callbacks {
     /* Convert normalized hardware coordinates for pointer confinement. */
     bool (*pointer_absolute_delta)(void *data, double x, double y, double *dx, double *dy);
     void (*pointer_locked)(void *data, bool locked);
+    /* NULL shape restores the desktop arrow. NULL surface hides the cursor. */
+    void (*cursor_shape)(void *data, const char *shape);
+    void (*cursor_surface)(void *data, struct wlr_surface *surface, int32_t x, int32_t y);
     /* The initiating device disappeared before its consumed button release. */
     void (*pointer_cancelled)(void *data);
     /* The icon is borrowed. The scene removes its node on icon destruction. */
@@ -77,6 +83,12 @@ void seaside_tty_input_set_focus(struct seaside_tty_input *input, struct wlr_sur
 struct wlr_seat *seaside_tty_input_get_seat(const struct seaside_tty_input *input);
 /* Reevaluate hover after a scene change, even when the cursor has not moved. */
 void seaside_tty_input_refresh_pointer(struct seaside_tty_input *input);
+void seaside_tty_input_cursor_presented(struct seaside_tty_input *input, struct wlr_output *output,
+                                        const struct timespec *when);
+/* Take over a live client grab and return its initiating button, or zero. */
+uint32_t seaside_tty_input_begin_client_gesture(struct seaside_tty_input *input,
+                                                struct wlr_seat_client *client,
+                                                struct wlr_surface *root, uint32_t serial);
 void seaside_tty_input_cancel_drag(struct seaside_tty_input *input);
 void seaside_tty_input_cancel_drag_from(struct seaside_tty_input *input, struct wlr_surface *root);
 void seaside_tty_input_destroy(struct seaside_tty_input *input);

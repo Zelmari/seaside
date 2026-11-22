@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "tty_input.h"
 
+#include "cursor-shape-v1-client-protocol.h"
 #include "pointer-constraints-client-protocol.h"
 #include "primary-selection-client-protocol.h"
 #include "relative-pointer-client-protocol.h"
@@ -200,6 +201,7 @@ struct keyboard_client {
     struct wl_keyboard *keyboard;
     struct wl_pointer *pointer;
     struct wl_shm *shm;
+    struct wp_cursor_shape_manager_v1 *cursor_shapes;
     struct zwp_pointer_constraints_v1 *constraints;
     struct zwp_relative_pointer_manager_v1 *relative_pointer_manager;
     uint32_t capabilities;
@@ -210,6 +212,7 @@ struct keyboard_client {
     uint32_t key;
     uint32_t key_state;
     uint32_t key_serial, button_serial;
+    uint32_t pointer_serial;
     uint32_t depressed;
     bool data_device_manager;
     uint32_t data_manager_name, primary_manager_name;
@@ -308,9 +311,9 @@ static const struct wl_keyboard_listener keyboard_listener = {
 static void pointer_enter(void *data, struct wl_pointer *pointer, uint32_t serial,
                           struct wl_surface *surface, wl_fixed_t sx, wl_fixed_t sy) {
     (void)pointer;
-    (void)serial;
     (void)surface;
     struct keyboard_client *client = data;
+    client->pointer_serial = serial;
     ++client->pointer_enters;
     client->pointer_x = wl_fixed_to_double(sx);
     client->pointer_y = wl_fixed_to_double(sy);
@@ -447,6 +450,9 @@ static void registry_global(void *data, struct wl_registry *registry, uint32_t n
     } else if (strcmp(interface, wl_shm_interface.name) == 0) {
         client->shm = wl_registry_bind(registry, name, &wl_shm_interface, 1);
         wl_shm_add_listener(client->shm, &shm_listener, client);
+    } else if (strcmp(interface, wp_cursor_shape_manager_v1_interface.name) == 0) {
+        client->cursor_shapes =
+            wl_registry_bind(registry, name, &wp_cursor_shape_manager_v1_interface, 1);
     } else if (strcmp(interface, zwp_pointer_constraints_v1_interface.name) == 0) {
         client->constraints =
             wl_registry_bind(registry, name, &zwp_pointer_constraints_v1_interface, 1);
@@ -664,6 +670,10 @@ struct pointer_scene {
     unsigned move_calls, clicks, consumed_releases, cancelled;
     unsigned drag_icons;
     bool locked;
+    const char *cursor_shape;
+    struct wlr_surface *cursor_surface;
+    unsigned cursor_requests;
+    int32_t hotspot_x, hotspot_y;
 };
 
 static void scene_motion(void *data, bool absolute, double x, double y) {
@@ -719,6 +729,22 @@ static bool scene_button(void *data, uint64_t window, uint32_t button, bool pres
 
 static void scene_locked(void *data, bool locked) {
     ((struct pointer_scene *)data)->locked = locked;
+}
+
+static void scene_cursor_shape(void *data, const char *shape) {
+    struct pointer_scene *scene = data;
+    scene->cursor_shape = shape;
+    scene->cursor_surface = NULL;
+    ++scene->cursor_requests;
+}
+
+static void scene_cursor_surface(void *data, struct wlr_surface *surface, int32_t x, int32_t y) {
+    struct pointer_scene *scene = data;
+    scene->cursor_shape = NULL;
+    scene->cursor_surface = surface;
+    scene->hotspot_x = x;
+    scene->hotspot_y = y;
+    ++scene->cursor_requests;
 }
 
 static void scene_cancelled(void *data) {
@@ -829,6 +855,7 @@ static void disconnect_pointer_client(struct wl_display *server, struct pointer_
         wl_surface_destroy(client->surface);
     }
     wl_buffer_destroy(client->buffer);
+    wp_cursor_shape_manager_v1_destroy(client->events.cursor_shapes);
     zwp_relative_pointer_v1_destroy(client->relative);
     zwp_relative_pointer_manager_v1_destroy(client->events.relative_pointer_manager);
     zwp_pointer_constraints_v1_destroy(client->events.constraints);
@@ -888,6 +915,8 @@ static void create_pointer_seat(struct wl_display *server, struct wlr_backend *b
         .pointer_button = scene_button,
         .pointer_locked = scene_locked,
         .pointer_absolute_delta = scene_absolute_delta,
+        .cursor_shape = scene_cursor_shape,
+        .cursor_surface = scene_cursor_surface,
         .pointer_cancelled = scene_cancelled,
         .drag_icon = scene_drag_icon,
     };
@@ -897,6 +926,102 @@ static void create_pointer_seat(struct wl_display *server, struct wlr_backend *b
           "pointer test seat setup failed");
     wl_signal_emit_mutable(&backend->events.new_input, &keyboard->base);
     wl_signal_emit_mutable(&backend->events.new_input, &pointer->base);
+}
+
+static void exercise_wayland_cursor(void) {
+    struct wl_display *server = wl_display_create();
+    struct wlr_backend backend = {0};
+    struct wlr_keyboard keyboard = {0};
+    struct wlr_pointer pointer = {0};
+    struct pointer_scene scene = {.x = 10, .y = 10};
+    create_pointer_seat(server, &backend, &keyboard, &pointer, &scene);
+
+    struct pointer_client left = {0}, right = {0};
+    scene.surfaces[0] = connect_pointer_client(server, &left);
+    scene.surfaces[1] = connect_pointer_client(server, &right);
+    check(left.events.cursor_shapes && right.events.cursor_shapes, "missing cursor shape protocol");
+    const struct keyboard_client *left_seat = &left.events;
+    const struct keyboard_client *right_seat = &right.events;
+    struct wp_cursor_shape_device_v1 *left_device =
+        wp_cursor_shape_manager_v1_get_pointer(left_seat->cursor_shapes, left_seat->pointer);
+    struct wp_cursor_shape_device_v1 *right_device =
+        wp_cursor_shape_manager_v1_get_pointer(right_seat->cursor_shapes, right_seat->pointer);
+
+    seaside_tty_input_refresh_pointer(scene.input);
+    round_trip(server, left.display);
+    check(left_seat->pointer_serial != 0, "missing cursor focus serial");
+    const unsigned defaults = scene.cursor_requests;
+    wp_cursor_shape_device_v1_set_shape(left_device, left_seat->pointer_serial - 1,
+                                        WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_TEXT);
+    round_trip(server, left.display);
+    check(scene.cursor_requests == defaults, "named cursor accepted with an invalid serial");
+    wp_cursor_shape_device_v1_set_shape(left_device, left_seat->pointer_serial,
+                                        WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_TEXT);
+    round_trip(server, left.display);
+    check(scene.cursor_requests > defaults && scene.cursor_shape &&
+              strcmp(scene.cursor_shape, "text") == 0,
+          "pointer focus did not set the named text cursor");
+
+    struct wl_surface *cursor = wl_compositor_create_surface(left_seat->compositor);
+    wl_pointer_set_cursor(left_seat->pointer, left_seat->pointer_serial, cursor, 5, 6);
+    round_trip(server, left.display);
+    check(scene.cursor_surface && scene.hotspot_x == 5 && scene.hotspot_y == 6,
+          "focused pointer did not accept a cursor surface");
+    const unsigned first_cursor = scene.cursor_requests;
+    wl_surface_attach(cursor, left.buffer, 2, 3);
+    wl_surface_commit(cursor);
+    round_trip(server, left.display);
+    check(scene.cursor_requests == first_cursor + 1 && scene.cursor_surface &&
+              scene.hotspot_x == 3 && scene.hotspot_y == 3,
+          "cursor surface commit did not preserve its hotspot relative to the new image");
+
+    const unsigned committed_cursor = scene.cursor_requests;
+    wl_pointer_set_cursor(right_seat->pointer, left_seat->pointer_serial, NULL, 0, 0);
+    round_trip(server, right.display);
+    check(scene.cursor_requests == committed_cursor && scene.cursor_surface,
+          "unfocused client could change the pointer cursor");
+
+    relative(&pointer, 100, 100);
+    round_trip(server, right.display);
+    check(scene.cursor_requests > committed_cursor && !scene.cursor_shape && !scene.cursor_surface,
+          "leaving a cursor surface's client did not restore the desktop arrow");
+    const unsigned focus_change = scene.cursor_requests;
+    wl_surface_commit(cursor);
+    round_trip(server, left.display);
+    check(scene.cursor_requests == focus_change,
+          "a previous cursor surface still changed the cursor after losing focus");
+    wp_cursor_shape_device_v1_set_shape(right_device, right_seat->pointer_serial,
+                                        WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_EW_RESIZE);
+    round_trip(server, right.display);
+    check(scene.cursor_requests == focus_change + 1 && scene.cursor_shape &&
+              strcmp(scene.cursor_shape, "ew-resize") == 0,
+          "new pointer focus did not set the resize cursor");
+    wl_pointer_set_cursor(right_seat->pointer, right_seat->pointer_serial, NULL, 4, 2);
+    round_trip(server, right.display);
+    check(!scene.cursor_shape && !scene.cursor_surface && scene.hotspot_x == 4 &&
+              scene.hotspot_y == 2,
+          "focused client could not hide its cursor");
+
+    relative(&pointer, -100, -100);
+    round_trip(server, left.display);
+    wl_pointer_set_cursor(left_seat->pointer, left_seat->pointer_serial, cursor, 8, 7);
+    round_trip(server, left.display);
+    check(scene.cursor_surface, "cursor surface could not be restored after refocus");
+    wl_surface_destroy(cursor);
+    round_trip(server, left.display);
+    check(!scene.cursor_surface && !scene.cursor_shape,
+          "destroying the active cursor surface did not restore the desktop arrow");
+
+    wp_cursor_shape_device_v1_destroy(left_device);
+    wp_cursor_shape_device_v1_destroy(right_device);
+    disconnect_pointer_client(server, &left);
+    disconnect_pointer_client(server, &right);
+    wl_display_destroy_clients(server);
+    seaside_tty_input_destroy(scene.input);
+    wlr_pointer_finish(&pointer);
+    wlr_keyboard_finish(&keyboard);
+    wlr_backend_finish(&backend);
+    wl_display_destroy(server);
 }
 
 static void exercise_wayland_pointer(void) {
@@ -1503,11 +1628,15 @@ int main(int argc, char **argv) {
     if (argc == 1 || (argc == 2 && strcmp(argv[1], "pointer") == 0)) {
         exercise_wayland_pointer();
     }
+    if (argc == 1 || (argc == 2 && strcmp(argv[1], "cursor") == 0)) {
+        exercise_wayland_cursor();
+    }
     if (argc == 1 || (argc == 2 && strcmp(argv[1], "data-device") == 0)) {
         exercise_data_device();
     }
-    if (argc > 2 || (argc == 2 && strcmp(argv[1], "keyboard") != 0 &&
-                     strcmp(argv[1], "pointer") != 0 && strcmp(argv[1], "data-device") != 0)) {
+    if (argc > 2 ||
+        (argc == 2 && strcmp(argv[1], "keyboard") != 0 && strcmp(argv[1], "pointer") != 0 &&
+         strcmp(argv[1], "cursor") != 0 && strcmp(argv[1], "data-device") != 0)) {
         return EXIT_FAILURE;
     }
     return EXIT_SUCCESS;

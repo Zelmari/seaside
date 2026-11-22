@@ -129,6 +129,19 @@ foreach name : ['pointer-constraints', 'relative-pointer', 'primary-selection']
   )
 endforeach
 
+foreach protocol : ['staging/cursor-shape/cursor-shape-v1', 'stable/tablet/tablet-v2']
+  name = protocol.split('/')[-1]
+  xml = wayland_protocols.get_variable(pkgconfig: 'pkgdatadir') / (protocol + '.xml')
+  seat_protocols += custom_target(
+    name + '-client-header', input: xml, output: name + '-client-protocol.h',
+    command: [wayland_scanner, 'client-header', '@INPUT@', '@OUTPUT@'],
+  )
+  seat_protocols += custom_target(
+    name + '-private-code', input: xml, output: name + '-protocol.c',
+    command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'],
+  )
+endforeach
+
 capture_source_xml = wayland_protocols.get_variable(pkgconfig: 'pkgdatadir') / 'staging/ext-image-capture-source/ext-image-capture-source-v1.xml'
 capture_source_server = custom_target(
   'capture-source-server-header', input: capture_source_xml,
@@ -295,6 +308,9 @@ test('part3-tty-input', tty_input_test, args: ['keyboard'], suite: ['unit', 'par
 )
 test('part4-pointer-seat', tty_input_test, args: ['pointer'], suite: ['integration', 'part4'], timeout: 10,
   env: {'SEASIDE_TEST_PART': '4', 'SEASIDE_REQUIREMENTS': '4.4,6.2,12.2b'},
+)
+test('preview2-cursor-input', tty_input_test, args: ['cursor'], suite: ['integration', 'preview2'], timeout: 10,
+  env: {'SEASIDE_TEST_PART': '8', 'SEASIDE_REQUIREMENTS': '6.2,12.2b'},
 )
 test('part7-data-device', tty_input_test, args: ['data-device'], suite: ['integration', 'part7'], timeout: 15,
   env: {'SEASIDE_TEST_PART': '7', 'SEASIDE_REQUIREMENTS': '7.3,11,12.2b'},

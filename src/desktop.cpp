@@ -168,8 +168,11 @@ void Desktop::on_layer_changed(void *self) noexcept {
 }
 
 void Desktop::project(WindowId resize) {
-    if (drag_ && !windows_.view(drag_->window).visible) {
-        discard_drag();
+    if (drag_) {
+        const auto view = windows_.view(drag_->window);
+        if (!view.visible || (drag_->client && view.tiled)) {
+            discard_drag();
+        }
     }
     for (auto &[handle, record] : outputs_) {
         const auto bounds = windows_.output_bounds(record.id);
@@ -293,7 +296,7 @@ std::uint64_t Desktop::window_event(const seaside_scene_window_event &event) {
         const bool limits_changed = update_size_limits(event.id);
         const auto current = windows_.view(event.id);
         if (!event.ordinary_commit || current.tile_layout || current.maximized ||
-            current.fullscreen ||
+            current.fullscreen || (drag_ && drag_->window == event.id && drag_->resize_edges) ||
             (current.tiled && drag_ && drag_->started && !drag_->resize &&
              drag_->window == event.id) ||
             (current.geometry.width == event.geometry.width &&
@@ -332,9 +335,42 @@ std::uint64_t Desktop::window_event(const seaside_scene_window_event &event) {
         }
         windows_.set_fullscreen(event.id, event.enabled);
         break;
+    case SEASIDE_WINDOW_MOVE_REQUESTED:
+    case SEASIDE_WINDOW_RESIZE_REQUESTED:
+        if (!begin_client_drag(event)) {
+            return 0;
+        }
+        break;
     }
-    project();
+    project(event.kind == SEASIDE_WINDOW_RESIZE_REQUESTED ? event.id : 0);
     return 0;
+}
+
+bool Desktop::begin_client_drag(const seaside_scene_window_event &event) {
+    if (drag_ || !pointer_ || windows_.focused_window() != event.id || layer_has_focus_) {
+        return false;
+    }
+    const auto view = windows_.view(event.id);
+    const bool resize = event.kind == SEASIDE_WINDOW_RESIZE_REQUESTED;
+    if (!view.visible || view.tiled || view.maximized || view.fullscreen ||
+        (resize && !event.resize_edges)) {
+        return false;
+    }
+    const auto button = seaside_tty_input_begin_client_gesture(
+        input_, event.seat_client, scene_.window_surface(event.id), event.serial);
+    if (!button) {
+        return false;
+    }
+    drag_ = Drag{.window = event.id,
+                 .button = button,
+                 .resize = resize,
+                 .x = pointer_->x,
+                 .y = pointer_->y,
+                 .started = resize,
+                 .client = true,
+                 .resize_edges = event.resize_edges,
+                 .initial_geometry = view.geometry};
+    return true;
 }
 
 bool Desktop::resize(WindowId id, Direction direction, int distance) {
@@ -548,6 +584,9 @@ void Desktop::finish_focus_cycle() noexcept try {
 
 bool Desktop::button(WindowId id, std::uint32_t button, bool pressed, std::uint8_t modifiers,
                      double x, double y) noexcept try {
+    if (std::isfinite(x) && std::isfinite(y)) {
+        pointer_ = PointerPosition{x, y};
+    }
     if (!pressed) {
         if (drag_ && drag_->button == button) {
             const auto drag = *drag_;
@@ -598,17 +637,35 @@ bool Desktop::button(WindowId id, std::uint32_t button, bool pressed, std::uint8
 }
 
 void Desktop::motion(double x, double y) noexcept try {
-    if (!drag_ || !std::isfinite(x) || !std::isfinite(y)) {
+    if (!std::isfinite(x) || !std::isfinite(y)) {
+        return;
+    }
+    if (pointer_) {
+        pointer_ = PointerPosition{x, y};
+    }
+    if (!drag_) {
         return;
     }
     const auto dx = motion_delta(x - drag_->x);
     const auto dy = motion_delta(y - drag_->y);
+    const WindowId id = drag_->window;
+    if (const auto edges = drag_->resize_edges) {
+        if (windows_.resize_floating(
+                id, drag_->initial_geometry,
+                edges & (SEASIDE_RESIZE_LEFT | SEASIDE_RESIZE_RIGHT) ? std::optional{dx}
+                                                                     : std::nullopt,
+                edges & (SEASIDE_RESIZE_TOP | SEASIDE_RESIZE_BOTTOM) ? std::optional{dy}
+                                                                     : std::nullopt,
+                (edges & SEASIDE_RESIZE_LEFT) != 0, (edges & SEASIDE_RESIZE_TOP) != 0)) {
+            project(id);
+        }
+        return;
+    }
     if (!dx && !dy) {
         return;
     }
     drag_->x += dx;
     drag_->y += dy;
-    const WindowId id = drag_->window;
     if (drag_->resize) {
         if (resize_by(id, dx, dy)) {
             drag_->started = true;

@@ -10,6 +10,8 @@ struct wlr_backend;
 struct wlr_output;
 struct wlr_output_mode;
 struct wlr_renderer;
+struct wlr_surface;
+struct timespec;
 struct seaside_tty_drm;
 
 struct seaside_tty_drm_output_callbacks {
@@ -18,6 +20,7 @@ struct seaside_tty_drm_output_callbacks {
     void (*removed)(void *data, struct wlr_output *output, const char *name);
     void (*observed)(void *data, struct wlr_output *output, const char *name, const char *identity,
                      bool connected, const char *disabled_reason);
+    void (*cursor_presented)(void *data, struct wlr_output *output, const struct timespec *when);
 };
 
 struct seaside_drm_output_settings {
@@ -121,6 +124,10 @@ struct wlr_output *seaside_tty_drm_pointer_output(const struct seaside_tty_drm *
 bool seaside_tty_drm_absolute_delta(const struct seaside_tty_drm *drm, double x, double y,
                                     double *dx, double *dy);
 bool seaside_tty_drm_set_cursor_visible(struct seaside_tty_drm *drm, bool visible);
+/* A NULL shape restores the desktop arrow. A NULL cursor surface hides it. */
+bool seaside_tty_drm_set_cursor_shape(struct seaside_tty_drm *drm, const char *shape);
+bool seaside_tty_drm_set_cursor_surface(struct seaside_tty_drm *drm, struct wlr_surface *surface,
+                                        int32_t hotspot_x, int32_t hotspot_y);
 bool seaside_tty_drm_move(struct seaside_tty_drm *drm, bool absolute, double x, double y);
 bool seaside_tty_drm_change_vt(struct seaside_tty_drm *drm, unsigned vt);
 struct seaside_tty_drm_observation seaside_tty_drm_observation(const struct seaside_tty_drm *drm);

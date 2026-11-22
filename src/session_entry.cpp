@@ -388,6 +388,7 @@ class Session {
             .added = output_added,
             .removed = output_removed,
             .observed = output_observed,
+            .cursor_presented = cursor_presented,
         };
         seaside_tty_drm_set_output_callbacks(drm_, &callbacks, this);
         timer_.reset(wl_event_loop_add_timer(loop_, on_tick, this));
@@ -508,10 +509,36 @@ class Session {
     static void pointer_locked(void *data, bool locked) noexcept {
         auto &session = *static_cast<Session *>(data);
         seaside_tty_drm_set_cursor_visible(session.drm_, !locked);
-        seaside_output_capture_cursor_changed(session.capture_.get());
+        session.cursor_changed();
+    }
+
+    void cursor_changed() noexcept {
+        seaside_output_capture_cursor_changed(capture_.get());
         double x, y;
-        if (seaside_tty_drm_cursor_position(session.drm_, &x, &y)) {
-            session.scene_.capture_pointer(x, y);
+        if (seaside_tty_drm_cursor_position(drm_, &x, &y)) {
+            scene_.capture_pointer(x, y);
+        }
+    }
+
+    static void cursor_shape(void *data, const char *shape) noexcept {
+        auto &session = *static_cast<Session *>(data);
+        if (!session.stopping_ && seaside_tty_drm_set_cursor_shape(session.drm_, shape)) {
+            session.cursor_changed();
+        }
+    }
+
+    static void cursor_surface(void *data, wlr_surface *surface, std::int32_t x,
+                               std::int32_t y) noexcept {
+        auto &session = *static_cast<Session *>(data);
+        if (!session.stopping_ && seaside_tty_drm_set_cursor_surface(session.drm_, surface, x, y)) {
+            session.cursor_changed();
+        }
+    }
+
+    static void cursor_presented(void *data, wlr_output *output, const timespec *when) noexcept {
+        auto &session = *static_cast<Session *>(data);
+        if (!session.stopping_) {
+            seaside_tty_input_cursor_presented(session.input_, output, when);
         }
     }
 
@@ -1252,6 +1279,8 @@ run_session(seaside::LoadedConfig config, seaside::Wallpaper wallpaper, seaside:
         .pointer_button = Session::pointer_button,
         .pointer_absolute_delta = Session::pointer_absolute_delta,
         .pointer_locked = Session::pointer_locked,
+        .cursor_shape = Session::cursor_shape,
+        .cursor_surface = Session::cursor_surface,
         .pointer_cancelled = Session::pointer_cancelled,
         .drag_icon = Session::drag_icon,
         .activity = Session::input_activity,
