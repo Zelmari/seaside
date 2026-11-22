@@ -59,7 +59,7 @@ Record the relevant case IDs and outcome (`pass`, `fail`, `skip`, or
 `blocked`) and keep any reason for a missing result. Offscreen tests cover
 software and client protocols. The installed TTY fixture covers the real
 guest session. Use the recorded evidence for each environment when describing
-support. [Testing contract](SEASIDE_SPEC.md#12-testing-observability-and-release-acceptance) · [Verification and support](PUBLIC_DOCUMENTATION.md#verification-and-support)
+support. [Verification and support](PUBLIC_DOCUMENTATION.md#verification-and-support)
 
 ## Build in a clean Arch chroot
 

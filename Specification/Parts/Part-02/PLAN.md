@@ -4,7 +4,7 @@ Status: implemented and software-verified in Arch WSL2; static review completed.
 Designated VM/native qualification remains pending. Actual modules,
 commands, evidence and limitations are recorded in [the Part 2 handoff](HANDOFF.md).
 
-This implements the existing [specification](../../SEASIDE_SPEC.md), especially
+This implements the existing [specification](https://github.com/Zelmari/seaside/blob/77c0607ea900c6ccbd2da510c9ec141a34a2aba8/Specification/SEASIDE_SPEC.md), especially
 §§2.2, 8–9, 12.2b and 14. It adds the configuration/state foundations and their
 tests. It does not authorize additional settings, bindings or runtime features.
 The [part 1 handoff](../Part-01/HANDOFF.md) records the earlier foundation evidence.

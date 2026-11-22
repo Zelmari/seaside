@@ -75,7 +75,7 @@ After required session services pass startup checks, expect a black desktop
 with no windows. A panel is optional. Press **Super+Enter** to open `foot`.
 In that terminal, run `seasidectl status` to confirm the session is ready or
 `seasidectl exit` to return to the same logged-in TTY. Close or save your work
-before ending the desktop session. [Startup, recovery, and shutdown design](SEASIDE_SPEC.md#3-startup-session-recovery-and-shutdown)
+before ending the desktop session.
 
 ## Configure Seaside
 
@@ -86,7 +86,7 @@ also installs it at `/usr/share/doc/seaside/config.example.toml`. Change one
 existing value, such as `gaps_inner` in `[window]`, and save. A valid live
 change applies to the running session. Most settings take effect this way.
 `workspaces.mode` and the autostart command list take effect on the next start.
-[Canonical TOML](SEASIDE_CONFIG_EXAMPLE.toml) · [Settings and validation](SEASIDE_SPEC.md#82-full-settings-registry-and-validation)
+[Canonical TOML](SEASIDE_CONFIG_EXAMPLE.toml)
 
 If an edit is invalid, Seaside keeps the active settings and displays an error
 banner. `seasidectl status` reports the config path and error. Correct the
@@ -94,7 +94,6 @@ file and save again. A subsequent launch with invalid TOML uses the last
 accepted configuration, or built-in defaults when there is no accepted file.
 The last-good copy is in `$XDG_STATE_HOME/seaside/last-good-config.toml`,
 with `~/.local/state` as the fallback state directory.
-[Config loading and recovery](SEASIDE_SPEC.md#81-loading-validation-reload-and-recovery)
 
 Seaside follows chains of symlinks such as a dotfile profile selected by an
 intermediate link. On local filesystems that allow Linux read leases on your
@@ -141,7 +140,7 @@ remove any old maximization shortcut you no longer use.
 ```
 
 Run `seasidectl bindings` to see the shortcuts the running session is using.
-[Key names, actions, and examples](SEASIDE_SPEC.md#83-binding-grammar-and-action-catalog-engineering-choice)
+[Binding examples and action names](SEASIDE_CONFIG_EXAMPLE.toml)
 
 The default pointer is a black arrow with a white outline. Apps can request
 their own pointer shapes. Ordinary tiled and floating windows use
@@ -162,7 +161,7 @@ awake, asleep, or disabled. A sleeping monitor stays logically enabled so
 its workspace remains assigned. Dwindle
 splits space around a window as new windows open. Scrolling places windows in
 horizontal columns. Set `layout = "scrolling"` in `[window]` to switch the
-layout. [Monitor settings](SEASIDE_CONFIG_EXAMPLE.toml) · [Window layouts and focus](SEASIDE_SPEC.md#4-windows-layouts-focus-and-movement)
+layout. [Monitor settings](SEASIDE_CONFIG_EXAMPLE.toml)
 
 ## Control the session
 
@@ -189,8 +188,8 @@ prints a JSON response. An error response includes a code and message.
 Both `seaside --version` and `seasidectl --version` report the build version
 and source revision. These commands also work outside a Seaside session.
 
-Clients that use the local IPC socket directly can read the [JSONL protocol and
-error formats](SEASIDE_SPEC.md#10-ipc-cli-command-and-event-protocol--v1).
+The protocol implementation lists the methods and parameters accepted on the
+local IPC socket. [JSONL protocol](../src/ipc_protocol.cpp)
 
 ## Use applications and sharing
 
@@ -216,7 +215,7 @@ error formats](SEASIDE_SPEC.md#10-ipc-cli-command-and-event-protocol--v1).
   run alongside Seaside. Ordinary layers hide while an app is fullscreen on
   that display and return afterward.
 
-[Verified app and hardware coverage](PUBLIC_DOCUMENTATION.md#verification-and-support) · [Capture and audio design](SEASIDE_SPEC.md#7-shell-interoperability-capture-clipboard-and-idle-power)
+[Verified app and hardware coverage](PUBLIC_DOCUMENTATION.md#verification-and-support)
 
 ## Troubleshoot
 

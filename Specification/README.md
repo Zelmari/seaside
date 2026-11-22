@@ -17,7 +17,6 @@ session. Find detailed workflows and verification below.
 - [Build and run the test harness](CONTRIBUTING.md#build-and-test).
 - [Reproduce an Arch package in a clean chroot](CONTRIBUTING.md#build-in-a-clean-arch-chroot).
 - [Share changes and test evidence](CONTRIBUTING.md#share-changes-and-evidence).
-- [Engineering design](SEASIDE_SPEC.md) contains the approved behavior, IPC protocol, and release requirements.
 - [Native Arch desktop checklist](Research/NATIVE_ARCH_CHECKLIST.md) and [performance investigations](Research/PERFORMANCE.md) describe hardware and measurement workloads.
 
 ## Development parts

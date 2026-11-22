@@ -5,7 +5,7 @@ the monitor identity can be matched. Automatic primary selection uses
 advertised modes and stays on the selected display until it becomes
 unavailable. Output settings continue to apply transactionally. Seaside
 rechecks the hardware cursor plane after geometry or seat changes.
-[Part 8 plan](PLAN.md) · [Seaside design](../../SEASIDE_SPEC.md)
+[Part 8 plan](PLAN.md) · [Seaside design](https://github.com/Zelmari/seaside/blob/77c0607ea900c6ccbd2da510c9ec141a34a2aba8/Specification/SEASIDE_SPEC.md)
 
 Fullscreen uses the actual surface geometry and keeps the configured output
 mode. The default `preserve` fits the content with black bars. `stretch`

@@ -10,7 +10,7 @@ session. [Part 2 handoff](../Part-02/HANDOFF.md) · [Part 4 handoff](../Part-04/
 
 The contracts are in §§2, 5.2, 6, 8–10, 12.2b, and 14 of the design. The TOML
 schema, default chords, and IPC method and event names are already specified.
-[Seaside design](../../SEASIDE_SPEC.md)
+[Seaside design](https://github.com/Zelmari/seaside/blob/77c0607ea900c6ccbd2da510c9ec141a34a2aba8/Specification/SEASIDE_SPEC.md)
 
 ## Delivery steps
 

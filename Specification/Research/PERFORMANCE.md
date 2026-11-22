@@ -3,8 +3,7 @@
 Updated: 2026-11-20
 
 These notes describe candidates for performance investigation.
-The [design](../SEASIDE_SPEC.md), especially §§2, 6, 7, 12 and 14, remains the
-product contract. Each item below is an unmeasured investigation candidate.
+Each item below is an unmeasured investigation candidate.
 It is not a promise of lower latency or a request for additional functionality.
 
 For the day-to-day desktop trial on the native installation, see the

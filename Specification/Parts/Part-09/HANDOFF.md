@@ -24,7 +24,7 @@ Required services still gate startup. A service loss during a running session
 produces `integration.failed`. Seaside rechecks PipeWire and the external
 portal route asynchronously and emits `integration.recovered` after the
 service passes its check. Portal recovery verifies unit ownership before it
-reuses or restarts services. [Part 9 plan](PLAN.md) · [Seaside design](../../SEASIDE_SPEC.md)
+reuses or restarts services. [Part 9 plan](PLAN.md) · [Seaside design](https://github.com/Zelmari/seaside/blob/77c0607ea900c6ccbd2da510c9ec141a34a2aba8/Specification/SEASIDE_SPEC.md)
 
 ## Automated checks
 

@@ -3,7 +3,7 @@
 Use this checklist to qualify Seaside on native Arch with AMD graphics. Start
 with first login, then exercise the relevant apps, physical devices, and
 workloads. Record results in a test report using the details below.
-[Seaside design](../SEASIDE_SPEC.md) · [Part 7 handoff](../Parts/Part-07/HANDOFF.md) · [Part 8 handoff](../Parts/Part-08/HANDOFF.md) · [Part 9 handoff](../Parts/Part-09/HANDOFF.md) · [Performance investigations](PERFORMANCE.md)
+[Part 7 handoff](../Parts/Part-07/HANDOFF.md) · [Part 8 handoff](../Parts/Part-08/HANDOFF.md) · [Part 9 handoff](../Parts/Part-09/HANDOFF.md) · [Performance investigations](PERFORMANCE.md)
 
 ## Evidence going into the native run
 
@@ -195,4 +195,4 @@ and any relevant log or test recording. Mark checks as passed, failed, or
 pending so the checklist reflects what actually ran.
 
 Isolated application audio for a selected-window share is deferred beyond v1.
-[Audio scope](../SEASIDE_SPEC.md#75-audio-boundary-desktop-sharing-and-deferred-application-isolation)
+[Sharing scope](../PUBLIC_DOCUMENTATION.md#feature-boundaries)

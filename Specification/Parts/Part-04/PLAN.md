@@ -2,7 +2,7 @@
 
 Part 4 turns the Part 2 state registry and Part 3 XDG, scene, and seat
 foundations into working window management. The scope is basic window geometry,
-focus, and workspace behavior under [the Seaside design](../../SEASIDE_SPEC.md),
+focus, and workspace behavior under [the Seaside design](https://github.com/Zelmari/seaside/blob/77c0607ea900c6ccbd2da510c9ec141a34a2aba8/Specification/SEASIDE_SPEC.md),
 especially §§2.2, 4.1, 4.4–4.5, 5, 6.2, 12.2b, and 14. The
 [Part 3 VM trial](../Part-03/HANDOFF.md#observed-vm-results) provides the starting TTY and
 session baseline.

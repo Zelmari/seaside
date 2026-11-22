@@ -1,7 +1,7 @@
 # Part 1: build, feasibility and harness foundation
 
 This records the software foundation for the first development part in §14 of
-[the Seaside design](../../SEASIDE_SPEC.md).
+[the Seaside design](https://github.com/Zelmari/seaside/blob/77c0607ea900c6ccbd2da510c9ec141a34a2aba8/Specification/SEASIDE_SPEC.md).
 
 The foundation was originally implemented in C/wlroots/Meson. On 2026-11-20
 the lifecycle core was migrated to C++23 with a narrow C interoperability bridge,

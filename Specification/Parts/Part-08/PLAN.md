@@ -12,7 +12,7 @@ identity and physical rounding (G3 and G8), mandatory hardware cursors (G7),
 hardware night light (G9), and the gaming portion of G12. Part 9 owns idle
 and layer-shell integration, the bounded trace recorder and exporter, and
 broader session recovery. Part 8 checks display recovery when a VT transition
-or resume returns the seat and outputs to the running session. [Seaside design](../../SEASIDE_SPEC.md)
+or resume returns the seat and outputs to the running session. [Seaside design](https://github.com/Zelmari/seaside/blob/77c0607ea900c6ccbd2da510c9ec141a34a2aba8/Specification/SEASIDE_SPEC.md)
 
 ## Delivery steps
 
@@ -84,7 +84,7 @@ or resume returns the seat and outputs to the running session. [Seaside design](
   requirement metadata. Use the Part 6 DRM-boundary fixture for injected failures
   and multi-output sequences and the Part 7 clients for capture regressions.
   Wait for protocol and output events with deadlines. Keep each trial's config,
-  state, runtime directory and owned processes isolated. [Harness contract](../../SEASIDE_SPEC.md#122b-incremental-test-harness-and-minimum-human-involvement)
+  state, runtime directory and owned processes isolated. [Harness contract](https://github.com/Zelmari/seaside/blob/77c0607ea900c6ccbd2da510c9ec141a34a2aba8/Specification/SEASIDE_SPEC.md#122b-incremental-test-harness-and-minimum-human-involvement)
 - From a clean build, use `tools/run-tests --jobs 2 --suite part8 --suite part6
   --suite part7` for focused runs, then `tools/run-tests --jobs 2` for the full
   regression in Arch. Run the affected suites in a separate Meson ASan/UBSan

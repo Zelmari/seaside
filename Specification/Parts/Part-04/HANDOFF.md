@@ -2,7 +2,7 @@
 
 The TTY session now manages ordinary XDG windows through the same event-loop
 policy used by the headless fixtures. See the [Part 4 plan](PLAN.md) and
-[design](../../SEASIDE_SPEC.md) §§4–5, 6.2, and 14.
+[design](https://github.com/Zelmari/seaside/blob/77c0607ea900c6ccbd2da510c9ec141a34a2aba8/Specification/SEASIDE_SPEC.md) §§4–5, 6.2, and 14.
 
 - The scene bridge applies XDG configure state, visibility, geometry, and
   stacking. Unmap preserves the window ID until destroy. Restore configures

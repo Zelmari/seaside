@@ -5,7 +5,7 @@ A bad edit leaves the current settings and recovery snapshot in place and
 shows a top-edge diagnostic, including over fullscreen. A valid repair
 clears the banner. `workspaces.mode` takes effect on restart, and
 `seasidectl status` shows the active and requested mode. Autostart runs once
-per launch after preflight. [Part 6 plan](PLAN.md) · [Seaside design](../../SEASIDE_SPEC.md)
+per launch after preflight. [Part 6 plan](PLAN.md) · [Seaside design](https://github.com/Zelmari/seaside/blob/77c0607ea900c6ccbd2da510c9ec141a34a2aba8/Specification/SEASIDE_SPEC.md)
 
 The `seasidectl` client can query status, outputs, workspaces, windows, and
 focus. It also runs compositor actions and subscribes to events. Commands

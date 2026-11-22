@@ -64,7 +64,7 @@ In VirtualBox with 3D acceleration disabled, launch with
 - [Troubleshoot startup, output, or capture](Specification/USER_GUIDE.md#troubleshoot)
 - [Use X11 apps, audio, and screen sharing](Specification/USER_GUIDE.md#use-applications-and-sharing)
 - [Build, test, and contribute](Specification/CONTRIBUTING.md)
-- [Engineering design, development handoffs, and native checklist](Specification/README.md)
+- [Development handoffs and native checklist](Specification/README.md)
 
 Seaside is licensed under the [MIT License](LICENSE). Third-party dependencies
 retain their own licences.

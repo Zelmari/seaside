@@ -4,7 +4,7 @@ Turn the Parts 1–9 implementation into a clean Arch installation and qualify
 the package for v1. The Part 9 guest trial provides a working source-built
 reference for the real TTY, portal recovery, and virtual display power. The
 native AMD evidence remains a release requirement.
-[Roadmap](../../SEASIDE_SPEC.md#14-ten-development-parts-and-acceptance-checks) · [Part 9 handoff](../Part-09/HANDOFF.md)
+[Roadmap](https://github.com/Zelmari/seaside/blob/77c0607ea900c6ccbd2da510c9ec141a34a2aba8/Specification/SEASIDE_SPEC.md#14-ten-development-parts-and-acceptance-checks) · [Part 9 handoff](../Part-09/HANDOFF.md)
 
 ## Delivery steps
 
@@ -43,7 +43,7 @@ native AMD evidence remains a release requirement.
   missing playback device. Use a test account to verify an existing config
   is preserved across install, reinstall and removal, and that a bad edit
   recovers through the approved last-good path.
-  [Package baseline](../../SEASIDE_SPEC.md#111-external-packagerelease-baseline) · [Session contract](../../SEASIDE_SPEC.md#3-startup-session-recovery-and-shutdown)
+  [Package baseline](https://github.com/Zelmari/seaside/blob/77c0607ea900c6ccbd2da510c9ec141a34a2aba8/Specification/SEASIDE_SPEC.md#111-external-packagerelease-baseline) · [Session contract](https://github.com/Zelmari/seaside/blob/77c0607ea900c6ccbd2da510c9ec141a34a2aba8/Specification/SEASIDE_SPEC.md#3-startup-session-recovery-and-shutdown)
 
 ## Harness and Arch VM acceptance
 
@@ -70,7 +70,7 @@ native AMD evidence remains a release requirement.
   duration or cycle count explicit for each stability scenario and retain
   the machine-readable and human-readable reports. Match the published
   acceptance report to the tested revision and package.
-  [Harness contract](../../SEASIDE_SPEC.md#122b-incremental-test-harness-and-minimum-human-involvement)
+  [Harness contract](https://github.com/Zelmari/seaside/blob/77c0607ea900c6ccbd2da510c9ec141a34a2aba8/Specification/SEASIDE_SPEC.md#122b-incremental-test-harness-and-minimum-human-involvement)
 
 ## README, navigation, and what to share
 
@@ -126,4 +126,4 @@ native AMD evidence remains a release requirement.
   Declare v1 release-qualified only when the required checks pass in their
   specified environments. Isolated selected-application audio remains scoped
   beyond v1 under G15.
-  [Native Arch checklist](../../Research/NATIVE_ARCH_CHECKLIST.md) · [Performance measurements](../../Research/PERFORMANCE.md) · [Release checklist](../../SEASIDE_SPEC.md#124-release-checklist)
+  [Native Arch checklist](../../Research/NATIVE_ARCH_CHECKLIST.md) · [Performance measurements](../../Research/PERFORMANCE.md) · [Release checklist](https://github.com/Zelmari/seaside/blob/77c0607ea900c6ccbd2da510c9ec141a34a2aba8/Specification/SEASIDE_SPEC.md#124-release-checklist)

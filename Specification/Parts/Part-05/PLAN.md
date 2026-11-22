@@ -3,7 +3,7 @@
 Part 5 gives each workspace a working tiling layout. Dwindle is the default,
 and scrolling is selectable in the startup TOML. Both use Part 4's window
 lifecycle, focus, and workspace policy. The requirements are in §§4–5, 8–9,
-12.2b, and 14 of the design. [Seaside design](../../SEASIDE_SPEC.md) · [Part 4 handoff](../Part-04/HANDOFF.md)
+12.2b, and 14 of the design. [Seaside design](https://github.com/Zelmari/seaside/blob/77c0607ea900c6ccbd2da510c9ec141a34a2aba8/Specification/SEASIDE_SPEC.md) · [Part 4 handoff](../Part-04/HANDOFF.md)
 
 ## Delivery steps
 

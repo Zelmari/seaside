@@ -149,4 +149,4 @@ and cursor behavior, native performance, suspend and hotplug, physical media
 keys and audio, and actual OBS, Discord, and Steam/Proton workflows. Keep the
 package revision and checksum with that evidence. Required native gates must
 pass before declaring a v1 release.
-[Native Arch checklist](../../Research/NATIVE_ARCH_CHECKLIST.md) · [Release checklist](../../SEASIDE_SPEC.md#124-release-checklist)
+[Native Arch checklist](../../Research/NATIVE_ARCH_CHECKLIST.md) · [Release checklist](https://github.com/Zelmari/seaside/blob/77c0607ea900c6ccbd2da510c9ec141a34a2aba8/Specification/SEASIDE_SPEC.md#124-release-checklist)

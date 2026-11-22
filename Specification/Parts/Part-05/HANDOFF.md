@@ -3,7 +3,7 @@
 Ordinary windows use Dwindle by default. Set `window.layout = "scrolling"` in
 the startup TOML to use horizontal columns, or `window.tiling = false` to start
 with floating windows. Both layouts apply to every workspace in either
-workspace mode. [Part 5 plan](PLAN.md) · [Seaside design](../../SEASIDE_SPEC.md)
+workspace mode. [Part 5 plan](PLAN.md) · [Seaside design](https://github.com/Zelmari/seaside/blob/77c0607ea900c6ccbd2da510c9ec141a34a2aba8/Specification/SEASIDE_SPEC.md)
 
 - Dwindle splits the eligible focused tile by default, with largest-tile
   insertion available in the config. Normal splits follow the region's

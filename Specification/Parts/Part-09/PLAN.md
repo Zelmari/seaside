@@ -5,7 +5,7 @@ shell clients, temporary frame tracing, and recovery of a running session.
 Reuse the Part 3 service probes, the Part 6 config, IPC and worker paths,
 the Part 7 capture receivers, and the Part 8 output and presentation paths.
 An empty autostart list still starts a complete Seaside session.
-[Seaside design](../../SEASIDE_SPEC.md) · [Part 8 handoff](../Part-08/HANDOFF.md)
+[Seaside design](https://github.com/Zelmari/seaside/blob/77c0607ea900c6ccbd2da510c9ec141a34a2aba8/Specification/SEASIDE_SPEC.md) · [Part 8 handoff](../Part-08/HANDOFF.md)
 
 ## Delivery steps
 
@@ -44,7 +44,7 @@ An empty autostart list still starts a complete Seaside session.
   eligible keyboard and pointer activity to wake, reverify hardware cursor
   presentation, and check pointer and keyboard continuity. Exercise idle
   around VT loss, reconnect, capture in flight and shutdown. A visible
-  fullscreen client keeps only its own output awake. [Idle and shell requirements](../../SEASIDE_SPEC.md#7-shell-interoperability-capture-clipboard-and-idle-power)
+  fullscreen client keeps only its own output awake. [Idle and shell requirements](https://github.com/Zelmari/seaside/blob/77c0607ea900c6ccbd2da510c9ec141a34a2aba8/Specification/SEASIDE_SPEC.md#7-shell-interoperability-capture-clipboard-and-idle-power)
 
 ## Trace and recovery acceptance
 
@@ -53,7 +53,7 @@ An empty autostart list still starts a complete Seaside session.
   bytes, dropped samples and the stop reason. Record actual output and
   presentation observations with documented clock domains. Exercise idle
   time expiry, start while running, stop when idle, export before start or
-  while running, and replacement of a completed trace. [Trace contract](../../SEASIDE_SPEC.md#105-error-codes-cli-and-tracing-behavior)
+  while running, and replacement of a completed trace. [Trace contract](https://github.com/Zelmari/seaside/blob/77c0607ea900c6ccbd2da510c9ec141a34a2aba8/Specification/SEASIDE_SPEC.md#105-error-codes-cli-and-tracing-behavior)
 - Write complete JSONL under `$XDG_STATE_HOME/seaside/traces/` with owner-only
   permissions (`0700` for the directory and `0600` for files). Use the
   existing state-directory fallback and safe file-writing patterns. Keep the
@@ -70,7 +70,7 @@ An empty autostart list still starts a complete Seaside session.
   Wayland clients and IPC responsive. Demonstrate a new live share through
   the real chooser and receiver after recovery, including repeat failures,
   timeouts and stale probe responses. Scope fault injection to test-owned
-  service instances. [Session contract](../../SEASIDE_SPEC.md#3-startup-session-recovery-and-shutdown)
+  service instances. [Session contract](https://github.com/Zelmari/seaside/blob/77c0607ea900c6ccbd2da510c9ec141a34a2aba8/Specification/SEASIDE_SPEC.md#3-startup-session-recovery-and-shutdown)
 - Verify seat pause and reactivation, focus and grab cleanup, preservation
   of clients and workspaces, and reapplication of display settings. Use the
   Part 8 cursor-plane evidence to verify recovered presentation. Exercise
