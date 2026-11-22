@@ -102,6 +102,8 @@ with `~/.local/state` as the fallback state directory.
 |---|---|
 | Super+Enter | Open `foot` |
 | Super+D | Toggle tiling for the focused window |
+| Super+F | Toggle maximization for the focused window |
+| Super+Shift+F | Toggle fullscreen for the focused window |
 | Super+arrow keys | Focus a window in that direction |
 | Alt+Tab | Cycle through the current workspace's recent focus history |
 | Super+left mouse drag | Move a window |
@@ -113,13 +115,22 @@ binding, as shown in the example. The `[keybinds]` table is the
 complete active list when present. Removing a line disables that shortcut,
 an empty table disables every shortcut, and removing the table restores the
 built-in defaults. The generated config includes commented examples for
-**Super+M** to toggle maximization, **Super+Q** to close a window, and
-workspace and fullscreen shortcuts. Uncomment the bindings you want and save
-the file to activate them. Run `seasidectl bindings` to see the shortcuts the
-running session is using. [Key names, actions, and examples](SEASIDE_SPEC.md#83-binding-grammar-and-action-catalog-engineering-choice)
+closing windows and switching workspaces. Uncomment the bindings you want and
+save the file to activate them. To adopt the current window shortcuts in an
+older config, add or update these lines in the existing `[keybinds]` table and
+remove any old maximization shortcut you no longer use.
+
+```toml
+"Super+F" = "toggle_window_maximize"
+"Super+Shift+F" = "toggle_window_fullscreen"
+```
+
+Run `seasidectl bindings` to see the shortcuts the running session is using.
+[Key names, actions, and examples](SEASIDE_SPEC.md#83-binding-grammar-and-action-catalog-engineering-choice)
 
 The default pointer is a black arrow with a white outline. Apps can request
-their own pointer shapes. A brighter border marks the focused window. Focus
+their own pointer shapes. Ordinary tiled and floating windows use
+`window.border_width`. A brighter border marks the focused window. Focus
 navigation brings a selected tile in front of a maximized window that covers
 it and preserves that window's maximized state. To move or resize a floating
 window, drag its title bar or resize handles where the app provides them.

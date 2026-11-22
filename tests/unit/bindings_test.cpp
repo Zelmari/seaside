@@ -242,13 +242,17 @@ TEST_F(BindingsTest, TransferWorkspacePreservesTheWholeOpaqueSelectorSuffix) {
     }
 }
 
-TEST_F(BindingsTest, DefaultsHaveOnlyTheTwelveApprovedBindings) {
+TEST_F(BindingsTest, DefaultsHaveOnlyTheApprovedBindings) {
     auto map = seaside::default_bindings();
-    ASSERT_EQ(map.size(), 12U);
+    ASSERT_EQ(map.size(), 14U);
     EXPECT_EQ(map.at(seaside::parse_chord("Super+Return").value()).text, "foot");
     EXPECT_EQ(map.at(seaside::parse_chord("XF86AudioRaiseVolume").value()).text,
               "wpctl set-volume --limit 1 @DEFAULT_AUDIO_SINK@ 5%+");
-    for (auto key : {"Super+Q", "Super+1", "Super+N", "Super+Shift+E", "Super+F"})
+    EXPECT_EQ(map.at(seaside::parse_chord("Super+F").value()).kind,
+              seaside::ActionKind::toggle_window_maximize);
+    EXPECT_EQ(map.at(seaside::parse_chord("Super+Shift+F").value()).kind,
+              seaside::ActionKind::toggle_window_fullscreen);
+    for (auto key : {"Super+Q", "Super+1", "Super+N", "Super+Shift+E", "Super+M"})
         EXPECT_FALSE(map.contains(seaside::parse_chord(key).value()));
 }
 } // namespace

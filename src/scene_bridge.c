@@ -1785,7 +1785,8 @@ static void project_border(struct scene_view *view, size_t side, struct wlr_box 
 
 static void project_borders(struct scene_view *view) {
     const struct seaside_scene_window_placement *placement = &view->placement;
-    const struct seaside_scene_rect clip = placement->clip;
+    const struct seaside_scene_rect clip =
+        placement->tiled || has_viewport(placement->clip) ? placement->clip : placement->output;
     const struct seaside_scene_rect box = placement->geometry;
     const int64_t width = placement->border_width;
     if (width <= 0 || !has_viewport(box) || !has_viewport(clip)) {

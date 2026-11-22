@@ -109,6 +109,8 @@ temperature_kelvin = 4500
 # This table is the complete active map: delete/comment an entry to disable it.
 # An empty [keybinds] table disables all bindings; omitting the table uses defaults.
 "Super+D" = "toggle_window_tiling"
+"Super+F" = "toggle_window_maximize"
+"Super+Shift+F" = "toggle_window_fullscreen"
 "Super+Left" = "focus left"
 "Super+Right" = "focus right"
 "Super+Up" = "focus up"
@@ -146,8 +148,6 @@ temperature_kelvin = 4500
 # "Super+Alt+Left" = "swap_window left"
 # "Super+Ctrl+Left" = "resize_window left 32"
 # "Super+P" = "toggle_window_pin"
-# "Super+M" = "toggle_window_maximize"
-# "Super+F" = "toggle_window_fullscreen"
 # "Super+N" = "night_light toggle"
 # "Super+Shift+E" = "exit"
 # System actions are EXTERNAL commands, e.g.:

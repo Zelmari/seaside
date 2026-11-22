@@ -12,6 +12,10 @@ from part9_vm import guest_source
 
 
 PACKAGE_LIMIT = 64 * 1024 * 1024
+WINDOW_KEYS = {
+    "maximize": ("e0", "5b", "21", "a1", "e0", "db"),
+    "fullscreen": ("e0", "5b", "2a", "21", "a1", "aa", "e0", "db"),
+}
 ARTIFACTS = {
     "part10-package.log", "part10-package-info.txt", "part10-build-info.txt",
     "part10-package-files.txt", "part10-first-use.toml", "part10-session.log",
@@ -28,6 +32,8 @@ def send_input(runner, vm, message):
         runner.type_command(vm, "Monitor" if key == "monitor" else "Part 10 Package Pattern")
     elif key in {"up", "down", "mute", "cancel"}:
         runner.keys(vm, *KEYS[key])
+    elif key in WINDOW_KEYS:
+        runner.keys(vm, *WINDOW_KEYS[key])
     elif key == "wake":
         runner.keys(vm, "2a", "aa")
     else:

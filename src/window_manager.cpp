@@ -915,8 +915,12 @@ WindowView WindowManager::view(WindowId id) const {
     const bool ordinary = !window.maximized && !window.fullscreen;
     const bool tile_layout = ordinary && layout.contains(id);
     const bool clipped = ordinary && (tile_layout || moving || has_tile_ancestor(id));
-    const int border =
-        moving ? tile_move_->border_width : (tile_layout ? layout.border_width(id) : 0);
+    int border = 0;
+    if (moving) {
+        border = tile_move_->border_width;
+    } else if (ordinary) {
+        border = tile_layout ? layout.border_width(id) : layout_settings_.border_width;
+    }
     auto stacking = moving ? tile_move_->stacking : window.stacking;
     if (const auto output = window_output(id)) {
         if (window.fullscreen || window.parent) {

@@ -229,6 +229,15 @@ def first_use(session, temporary, state):
              session.process)
     session.wait(lambda: any(window["mapped"] and "foot" in window["app_id"]
                              for window in session.ctl("windows")["windows"]), "a mapped foot window")
+    for key, field, other in (("maximize", "maximized", "fullscreen"),
+                              ("fullscreen", "fullscreen", "maximized")):
+        for enabled in (True, False):
+            event("part10-input", f"toggle {key} to {enabled} with the default key", key=key)
+            session.wait(lambda: any(window["mapped"] and "foot" in window["app_id"] and
+                                     window[field] == enabled and not window[other]
+                                     for window in session.ctl("windows")["windows"]),
+                         f"the terminal's {field} state to become {enabled}")
+    state["default_window_keys"] = "maximize and fullscreen toggled independently"
     runtime = Path(session.env["XDG_RUNTIME_DIR"])
     children = Path(f"/proc/{session.process.pid}/task/{session.process.pid}/children")
     for pid in children.read_text().split():

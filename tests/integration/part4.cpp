@@ -831,6 +831,44 @@ bool wait_pixel(Connection &connection, Client &client, part3_output *output, un
     return ready;
 }
 
+bool run_floating_borders(const Fixture &fixture) {
+    auto &desktop = fixture.desktop;
+    auto output = fixture.output();
+    REQUIRE(output);
+    REQUIRE(desktop.add_output(part3_output_handle(output.get()), "headless", "", output_bounds));
+    Connection connection(fixture.display);
+    Client first, second;
+    REQUIRE(connection.connect(first) && connection.open(first));
+    REQUIRE(connection.attach(first, ordinary_width, ordinary_height));
+    const auto a = desktop.windows().focused_window();
+    REQUIRE(a);
+    const auto geometry = desktop.windows().view(*a).geometry;
+    const auto x = static_cast<unsigned>(geometry.x - 1);
+    const auto y = static_cast<unsigned>(geometry.y + 4);
+    constexpr std::uint32_t active_border = 0xbfbfbf;
+    constexpr std::uint32_t inactive_border = 0x595959;
+    REQUIRE(wait_pixel(connection, first, output.get(), x, y, active_border));
+    seaside_scene_target border{};
+    REQUIRE(fixture.scene.window_at(x, y, border) && border.id == a && !border.surface);
+
+    REQUIRE(connection.connect(second) && connection.open(second));
+    REQUIRE(connection.attach(second, ordinary_width, ordinary_height));
+    const auto b = desktop.windows().focused_window();
+    REQUIRE(b && b != a);
+    REQUIRE(desktop.action(directional_action(ActionKind::move_window, Direction::right, 24)));
+    REQUIRE(wait_pixel(connection, first, output.get(), x, y, inactive_border));
+
+    auto config = seaside::default_config();
+    config.window.tiling = false;
+    config.window.border_width = 0;
+    desktop.apply_config(config);
+    REQUIRE(wait_pixel(connection, first, output.get(), x, y, 0));
+    REQUIRE(hit(fixture.scene, geometry, *a));
+    REQUIRE(!desktop.failed() && !fixture.scene.snapshot().failed);
+    desktop.remove_output(part3_output_handle(output.get()));
+    return true;
+}
+
 struct LayerSeat {
     explicit LayerSeat(const Fixture &display) : fixture(display) {}
     ~LayerSeat() { fixture.desktop.set_input(nullptr); }
@@ -1562,7 +1600,8 @@ int main(int argc, char **argv) {
     auto config = seaside::default_config();
     if (argc == 1) {
         config.window.tiling = false;
-        return run_fixture(config, run_part4) && run_fixture(config, run_client_gestures)
+        return run_fixture(config, run_part4) && run_fixture(config, run_floating_borders) &&
+                       run_fixture(config, run_client_gestures)
                    ? EXIT_SUCCESS
                    : EXIT_FAILURE;
     }

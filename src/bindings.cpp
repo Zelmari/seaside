@@ -283,6 +283,8 @@ std::string format_action(const Action &action) {
 BindingMap default_bindings() {
     const std::array definitions{
         std::pair{"Super+D", "toggle_window_tiling"},
+        std::pair{"Super+F", "toggle_window_maximize"},
+        std::pair{"Super+Shift+F", "toggle_window_fullscreen"},
         std::pair{"Super+Left", "focus left"},
         std::pair{"Super+Right", "focus right"},
         std::pair{"Super+Up", "focus up"},

@@ -24,7 +24,7 @@ Seaside is a **Wayland compositor with an integrated window manager**, not a com
 
 **Goals:** excellent gaming responsiveness and frame pacing; reliable daily work/study/coding; minimal code and idle CPU/GPU work; maintainable small modules; explicit diagnostics for capability limits; predictable behavior. Reducing source lines is not a performance metric.
 
-**APPROVED appearance defaults:** 10 logical px outer tiling gaps, 5 logical px inner gaps, and 2 logical px square borders. These are user-configurable defaults through `window.gaps_outer`, `window.gaps_inner`, and `window.border_width` in the TOML file; accepted ranges and live application are specified in §8.2.
+**APPROVED appearance defaults:** 10 logical px outer tiling gaps, 5 logical px inner gaps, and 2 logical px square borders on ordinary tiled and floating windows. These are user-configurable defaults through `window.gaps_outer`, `window.gaps_inner`, and `window.border_width` in the TOML file; accepted ranges and live application are specified in §8.2.
 
 **Fixed aesthetic constraints:** Square borders; no rounded corners, blurs, shadows, fading, sliding, layout easing, or any compositor animation engine. Game and application animations are unaffected.
 
@@ -480,7 +480,7 @@ The parser normalizes modifier ordering and keysym case only where XKB explicitl
 
 `DIR` means `left`, `right`, `up`, or `down`; `ID` means a positive integer workspace ID; `SELECTOR` is the exact current monitor selector from §8.2. When a command has no eligible target, it is a no-op for a keybinding and a machine-readable error for an IPC call. Floating-only or tiled-only operations follow the already-approved window rules; don't silently introduce minimization, always-on-top or new movement modes.
 
-**Confirmed default bindings:** `Super+D` tiling toggle; `Super+Left/Right/Up/Down` directional focus; `Alt+Tab` current-workspace MRU; `Super+MouseLeftDrag` move/detach-reinsert; `Super+MouseRightDrag` resize; **`Super+Return` = `exec foot`** (approved default terminal); **`XF86AudioLowerVolume`, `XF86AudioRaiseVolume`, `XF86AudioMute`** = the external `wpctl` commands in §9 (approved playback controls). Keyboard move/swap/resize, pinning, maximize/fullscreen, other external-command bindings, workspace selection/move, night-light, close and exit remain **unbound by default unless the owner separately approves a specific default chord**. The template may contain commented examples but must not silently activate them. Users can remove or rebind every default.
+**Confirmed default bindings:** `Super+D` tiling toggle; `Super+F` maximization toggle; `Super+Shift+F` fullscreen toggle; `Super+Left/Right/Up/Down` directional focus; `Alt+Tab` current-workspace MRU; `Super+MouseLeftDrag` move/detach-reinsert; `Super+MouseRightDrag` resize; **`Super+Return` = `exec foot`** (approved default terminal); **`XF86AudioLowerVolume`, `XF86AudioRaiseVolume`, `XF86AudioMute`** = the external `wpctl` commands in §9 (approved playback controls). Keyboard move/swap/resize, pinning, other external-command bindings, workspace selection/move, night-light, close and exit remain **unbound by default unless the owner separately approves a specific default chord**. The template may contain commented examples but must not silently activate them. Users can remove or rebind every default.
 
 **`exec` and autostart:** Treat the command suffix and autostart array elements as user-authored shell commands; execute asynchronously via `/bin/sh -c`. There is no `eval`/script interpreter inside Seaside. Do not offer `exec` through IPC, and do not run an `exec` string supplied by an untrusted Wayland client. Log spawn failures without blocking input or output presentation.
 
@@ -600,6 +600,8 @@ temperature_kelvin = 4500
 # This table is the complete active map: delete/comment an entry to disable it.
 # An empty [keybinds] table disables all bindings; omitting the table uses defaults.
 "Super+D" = "toggle_window_tiling"
+"Super+F" = "toggle_window_maximize"
+"Super+Shift+F" = "toggle_window_fullscreen"
 "Super+Left" = "focus left"
 "Super+Right" = "focus right"
 "Super+Up" = "focus up"
@@ -637,8 +639,6 @@ temperature_kelvin = 4500
 # "Super+Alt+Left" = "swap_window left"
 # "Super+Ctrl+Left" = "resize_window left 32"
 # "Super+P" = "toggle_window_pin"
-# "Super+M" = "toggle_window_maximize"
-# "Super+F" = "toggle_window_fullscreen"
 # "Super+N" = "night_light toggle"
 # "Super+Shift+E" = "exit"
 # System actions are EXTERNAL commands, e.g.:
