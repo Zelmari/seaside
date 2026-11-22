@@ -232,7 +232,6 @@ void Desktop::project(WindowId resize) {
     const auto *dragged =
         drag_ && drag_->started && drag_->resize ? windows_.state().window(drag_->window) : nullptr;
     auto *layer_focus = scene_.layer_keyboard_focus(focused_output_handle());
-    layer_has_focus_ = layer_focus != nullptr;
     for (const auto id : views_) {
         const auto view = windows_.view(id);
         const auto output = windows_.window_output(id);
@@ -298,13 +297,20 @@ void Desktop::project(WindowId resize) {
             fitting_.erase(id);
         }
     }
+    update_keyboard_focus(layer_focus, focused);
     if (input_) {
-        seaside_tty_input_set_focus(input_,
-                                    layer_focus ? layer_focus : scene_.window_surface(focused));
         seaside_tty_input_refresh_pointer(input_);
     }
     if (projected_) {
         projected_();
+    }
+}
+
+void Desktop::update_keyboard_focus(wlr_surface *layer_focus, WindowId focused) noexcept {
+    layer_has_focus_ = layer_focus != nullptr;
+    if (input_) {
+        seaside_tty_input_set_focus(input_,
+                                    layer_focus ? layer_focus : scene_.window_surface(focused));
     }
 }
 
@@ -813,6 +819,17 @@ bool Desktop::button(WindowId id, std::uint32_t button, bool pressed, std::uint8
     // Focusing by click or arming a drag must not publish an unfinished tiled opening.
     if (opening_.empty()) {
         project();
+    } else {
+        auto *layer_focus = scene_.layer_keyboard_focus(focused_output_handle());
+        const auto focused = windows_.focused_window().value_or(0);
+        // Deliver the next key to the clicked scene without exposing an
+        // unpresented toplevel selected by the pending layout.
+        if (layer_focus || !focused || presented_.contains(focused)) {
+            update_keyboard_focus(layer_focus, focused);
+            if (projected_) {
+                projected_();
+            }
+        }
     }
     return drag_.has_value();
 } catch (...) {

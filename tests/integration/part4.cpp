@@ -1041,6 +1041,60 @@ struct LayerSeat {
     unsigned shortcuts = 0;
 };
 
+bool run_pending_opening_focus(const Fixture &fixture) {
+    auto &desktop = fixture.desktop;
+    auto left = fixture.output();
+    auto right = fixture.output();
+    REQUIRE(left && right);
+    auto right_bounds = output_bounds;
+    right_bounds.x = output_bounds.width;
+    REQUIRE(desktop.add_output(part3_output_handle(left.get()), "left", "", output_bounds));
+    REQUIRE(desktop.add_output(part3_output_handle(right.get()), "right", "", right_bounds));
+    LayerSeat seat(fixture);
+    REQUIRE(seat.start());
+
+    Connection connection(fixture.display);
+    Client first, second, remote, opening;
+    WindowId remote_id{}, first_id{};
+    seat.click(210, 45);
+    REQUIRE(map_tiled(fixture, connection, remote, remote_id, 160, 90, 0, blue));
+    seat.click(30, 45);
+    REQUIRE(map_tiled(fixture, connection, first, first_id, 160, 90, 0, red));
+    REQUIRE(connection.wait(first, [&] { return first.pointer_surface == first.surface; }));
+
+    REQUIRE(connection.connect(second) && connection.open(second));
+    REQUIRE(connection.attach_configured(second, blue));
+    REQUIRE(wait_tiled(connection, first, 80, 90));
+    REQUIRE(connection.attach_configured(first, red));
+    REQUIRE(connection.wait(second, [&] { return second.keyboard_surface == second.surface; }));
+    const auto second_id = desktop.windows().focused_window();
+    REQUIRE(second_id && second_id != first_id);
+
+    REQUIRE(connection.connect(opening) && connection.open(opening));
+    REQUIRE(connection.attach_configured(opening, green));
+    REQUIRE(wait_tiled(connection, second, 80, 45));
+
+    // Both keys must go to the visible client just clicked, before dispatch
+    // can process a resize buffer or the opening deadline.
+    seat.click(30, 45);
+    seat.key(KEY_A);
+    seat.click(210, 45);
+    seat.key(KEY_B);
+    seaside_scene_target shown{};
+    REQUIRE(fixture.scene.window_at(110, 70, shown) && shown.id == second_id);
+    REQUIRE(connection.roundtrip(first) && connection.roundtrip(second) &&
+            connection.roundtrip(remote));
+    REQUIRE(first.keys == 1 && second.keys == 0 && remote.keys == 1);
+    REQUIRE(remote.keyboard_surface == remote.surface);
+
+    REQUIRE(connection.attach_configured(second, blue));
+    REQUIRE(wait_pixel(connection, opening, left.get(), 110, 70, green));
+    REQUIRE(desktop.windows().focused_window() == remote_id);
+    desktop.remove_output(part3_output_handle(right.get()));
+    desktop.remove_output(part3_output_handle(left.get()));
+    return true;
+}
+
 bool run_client_gestures(const Fixture &fixture) {
     auto &desktop = fixture.desktop;
     auto output = fixture.output();
@@ -1753,7 +1807,9 @@ int main(int argc, char **argv) {
         transaction.window.border_width = 0;
         config.window.gaps_outer = 4;
         config.window.gaps_inner = 6;
-        return run_fixture(config, run_dwindle) && run_fixture(transaction, run_opening_transaction)
+        return run_fixture(config, run_dwindle) &&
+                       run_fixture(transaction, run_opening_transaction) &&
+                       run_fixture(transaction, run_pending_opening_focus)
                    ? EXIT_SUCCESS
                    : EXIT_FAILURE;
     }

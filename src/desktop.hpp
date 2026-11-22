@@ -83,6 +83,7 @@ class Desktop final {
     static void before_output_frame(void *self, wlr_output *output) noexcept;
     std::uint64_t window_event(const seaside_scene_window_event &event);
     void project(WindowId resize = 0);
+    void update_keyboard_focus(wlr_surface *layer_focus, WindowId focused) noexcept;
     bool stage_opening(WindowId id);
     bool opening_ready() const;
     void project_if_opening_ready();
