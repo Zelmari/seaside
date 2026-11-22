@@ -216,7 +216,7 @@ struct keyboard_client {
     uint32_t depressed;
     bool data_device_manager;
     uint32_t data_manager_name, primary_manager_name;
-    bool data_control;
+    bool ext_data_control, wlr_data_control;
     bool escaped;
     bool entered_with_return;
     unsigned pointer_enters;
@@ -444,9 +444,10 @@ static void registry_global(void *data, struct wl_registry *registry, uint32_t n
         client->data_manager_name = name;
     } else if (strcmp(interface, zwp_primary_selection_device_manager_v1_interface.name) == 0) {
         client->primary_manager_name = name;
-    } else if (strcmp(interface, "ext_data_control_manager_v1") == 0 ||
-               strcmp(interface, "zwlr_data_control_manager_v1") == 0) {
-        client->data_control = true;
+    } else if (strcmp(interface, "ext_data_control_manager_v1") == 0) {
+        client->ext_data_control = version >= 1;
+    } else if (strcmp(interface, "zwlr_data_control_manager_v1") == 0) {
+        client->wlr_data_control = version >= 2;
     } else if (strcmp(interface, wl_shm_interface.name) == 0) {
         client->shm = wl_registry_bind(registry, name, &wl_shm_interface, 1);
         wl_shm_add_listener(client->shm, &shm_listener, client);
@@ -1387,7 +1388,8 @@ static struct wlr_surface *connect_data_client(struct wl_display *server,
         .data_offer = primary_offer, .selection = primary_selection};
     struct wlr_surface *surface = connect_pointer_client(server, &client->pointer);
     struct keyboard_client *events = &client->pointer.events;
-    check(events->data_device_manager && events->primary_manager_name && !events->data_control,
+    check(events->data_device_manager && events->primary_manager_name && events->ext_data_control &&
+              events->wlr_data_control,
           "unexpected clipboard protocol globals");
     client->manager = wl_registry_bind(client->pointer.registry, events->data_manager_name,
                                        &wl_data_device_manager_interface, 3);

@@ -508,7 +508,7 @@ static void on_display_destroy(struct wl_listener *listener, void *data) {
     detach_display(capture);
 }
 
-static bool capture_global_visible(const struct wl_client *client, const struct wl_global *global,
+static bool session_global_visible(const struct wl_client *client, const struct wl_global *global,
                                    void *data) {
     (void)data;
     const char *interface = wl_global_get_interface(global)->name;
@@ -516,7 +516,9 @@ static bool capture_global_visible(const struct wl_client *client, const struct 
         strcmp(interface, "ext_output_image_capture_source_manager_v1") != 0 &&
         strcmp(interface, "ext_foreign_toplevel_image_capture_source_manager_v1") != 0 &&
         strcmp(interface, "ext_foreign_toplevel_list_v1") != 0 &&
-        strcmp(interface, "zwlr_screencopy_manager_v1") != 0) {
+        strcmp(interface, "zwlr_screencopy_manager_v1") != 0 &&
+        strcmp(interface, "ext_data_control_manager_v1") != 0 &&
+        strcmp(interface, "zwlr_data_control_manager_v1") != 0) {
         return true;
     }
     uid_t uid;
@@ -533,9 +535,8 @@ struct seaside_output_capture *seaside_output_capture_create(struct wl_display *
         return NULL;
     }
     capture->display = display;
-    // Local Wayland clients can capture directly within the same-user trust
-    // boundary. The external portal mediates consent outside that boundary.
-    wl_display_set_global_filter(display, capture_global_visible, NULL);
+    // Direct capture and background clipboard access share the local session's UID boundary.
+    wl_display_set_global_filter(display, session_global_visible, NULL);
     capture->display_destroy.notify = on_display_destroy;
     capture->new_session.notify = on_new_session;
     wl_list_init(&capture->output_resources);

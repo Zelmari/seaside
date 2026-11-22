@@ -12,7 +12,9 @@
 #include <wlr/interfaces/wlr_keyboard.h>
 #include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_cursor_shape_v1.h>
+#include <wlr/types/wlr_data_control_v1.h>
 #include <wlr/types/wlr_data_device.h>
+#include <wlr/types/wlr_ext_data_control_v1.h>
 #include <wlr/types/wlr_fractional_scale_v1.h>
 #include <wlr/types/wlr_keyboard.h>
 #include <wlr/types/wlr_keyboard_group.h>
@@ -1253,7 +1255,9 @@ bool seaside_tty_input_enable_keyboard(struct seaside_tty_input *input,
     }
     if (!seat || (input->callbacks.pointer_target && (!relative_pointer || !constraints)) ||
         (needs_cursor && !cursor_shapes) || !wlr_data_device_manager_create(display) ||
-        !wlr_primary_selection_v1_device_manager_create(display)) {
+        !wlr_primary_selection_v1_device_manager_create(display) ||
+        !wlr_ext_data_control_manager_v1_create(display, 1) ||
+        !wlr_data_control_manager_v1_create(display)) {
         xkb_state_unref(shortcut_state);
         wlr_seat_destroy(seat);
         if (group) {

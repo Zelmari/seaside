@@ -202,6 +202,10 @@ local IPC socket. [JSONL protocol](../src/ipc_protocol.cpp)
 - **Wayland and X11 apps.** Run the app in a Seaside terminal or launch it from
   your own panel. The first X11 client starts `xwayland-satellite` on demand.
   If that service exits, a subsequent X11 connection can start it again.
+- **Clipboard.** Local Wayland clients running as your user can read and replace
+  clipboard and primary selections in the background. Use `wl-copy` and
+  `wl-paste` for command-line transfers. For history, run an external manager
+  such as `wl-paste --watch cliphist store`.
 - **Audio.** The media keys adjust the current default playback device through
   WirePlumber. Run `wpctl status` to list devices and
   `wpctl get-volume @DEFAULT_AUDIO_SINK@` to inspect the current volume and
