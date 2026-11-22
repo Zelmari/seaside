@@ -869,6 +869,37 @@ bool wait_pixel(Connection &connection, Client &client, part3_output *output, un
     return ready;
 }
 
+bool pump_frames(Connection &connection, Client &client) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(35);
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (!connection.pump(client)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool check_idle_resize(const Fixture &fixture, Connection &connection, Client &client,
+                       std::initializer_list<std::pair<double, double>> positions) {
+    REQUIRE(pump_frames(connection, client));
+    unsigned commits = 0;
+    fixture.scene.set_frame_observer(
+        [](void *data, wlr_output *, const seaside_scene_frame_observation *frame) {
+            if (std::strcmp(frame->event, "commit") == 0 && frame->succeeded) {
+                ++*static_cast<unsigned *>(data);
+            }
+        },
+        &commits);
+    bool pumped = true;
+    for (const auto &[x, y] : positions) {
+        fixture.desktop.motion(x, y);
+        pumped = pump_frames(connection, client) && pumped;
+    }
+    fixture.scene.set_frame_observer(nullptr, nullptr);
+    REQUIRE(pumped && commits == 0);
+    return true;
+}
+
 bool run_opening_transaction(const Fixture &fixture) {
     auto &desktop = fixture.desktop;
     auto output = fixture.output();
@@ -908,36 +939,11 @@ bool run_opening_transaction(const Fixture &fixture) {
     desktop.enable_frame_paced_resize();
     REQUIRE(begin_drag(fixture, *right, BTN_RIGHT, 110, 45));
     REQUIRE(connection.wait(second, [&] { return second.configured.activated; }));
-    const auto pump_frames = [&] {
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(35);
-        while (std::chrono::steady_clock::now() < deadline) {
-            if (!connection.pump(first)) {
-                return false;
-            }
-        }
-        return true;
-    };
-    REQUIRE(pump_frames());
-    unsigned commits = 0;
-    fixture.scene.set_frame_observer(
-        [](void *data, wlr_output *, const seaside_scene_frame_observation *frame) {
-            if (std::strcmp(frame->event, "commit") == 0 && frame->succeeded) {
-                ++*static_cast<unsigned *>(data);
-            }
-        },
-        &commits);
-    desktop.motion(110, 45);
-    const bool stationary_pumped = pump_frames();
-    const auto stationary_commits = commits;
-    desktop.motion(110.2, 45);
-    const bool fractional_pumped = pump_frames();
-    const auto fractional_commits = commits;
-    desktop.motion(110.2, 45);
-    const bool repeated_pumped = pump_frames();
-    fixture.scene.set_frame_observer(nullptr, nullptr);
-    REQUIRE(stationary_pumped && fractional_pumped && repeated_pumped);
-    REQUIRE(stationary_commits == 0 && commits == fractional_commits);
-
+    REQUIRE(check_idle_resize(fixture, connection, first,
+                              {{110, 45}, {110.2, 45.1}, {109.5, 44.2}, {110.6, 45}, {110.6, 45}}));
+    desktop.motion(115, 45);
+    desktop.motion(109.8, 45);
+    REQUIRE(pump_frames(connection, first));
     // The fractional part remains available to the next sampled position.
     REQUIRE(desktop.windows().view(left).geometry.width == 80);
     desktop.motion(111.1, 45);
@@ -960,6 +966,11 @@ bool run_opening_transaction(const Fixture &fixture) {
         second, [&] { return !second.configured.resizing && second.configured.width == 55; }));
     REQUIRE(wait_pixel(connection, first, output.get(), 103, 45, red));
     REQUIRE(wait_pixel(connection, first, output.get(), 107, 45, green));
+    REQUIRE(begin_drag(fixture, *right, BTN_RIGHT, 115, 45));
+    desktop.motion(135, 45);
+    desktop.cancel_drag();
+    REQUIRE(pump_frames(connection, first));
+    REQUIRE(desktop.windows().view(left).geometry.width == 105);
 
     Client third;
     REQUIRE(connection.connect(third) && connection.open(third));
@@ -1293,6 +1304,7 @@ bool run_client_gestures(const Fixture &fixture) {
     desktop.motion(seat.x + 5, seat.y + 5);
     REQUIRE(windows.view(*id).geometry == moved);
 
+    desktop.enable_frame_paced_resize();
     xdg_toplevel_set_min_size(client.toplevel, 40, 26);
     wl_surface_commit(client.surface);
     REQUIRE(connection.roundtrip(client));
@@ -1311,19 +1323,26 @@ bool run_client_gestures(const Fixture &fixture) {
     seat.x -= 6;
     seat.y -= 4;
     desktop.motion(seat.x, seat.y);
-    const auto expanded = windows.view(*id).geometry;
-    REQUIRE(expanded == (WindowRect{moved.x - 6, moved.y - 4, moved.width + 6, moved.height + 4}));
+    const WindowRect expanded{moved.x - 6, moved.y - 4, moved.width + 6, moved.height + 4};
+    REQUIRE(connection.wait(client, [&] { return windows.view(*id).geometry == expanded; }));
     REQUIRE(connection.wait(client, [&] {
         return client.configured.width == expanded.width &&
                client.configured.height == expanded.height;
     }));
     REQUIRE(connection.attach_configured(client));
+    REQUIRE(check_idle_resize(fixture, connection, client,
+                              {{seat.x - 0.8, seat.y - 0.3}, {seat.x - 0.1, seat.y - 0.8}}));
+    // The client gesture is absolute from the original top-left press.
+    desktop.motion(seat.x - 9, seat.y - 6);
+    desktop.motion(seat.x + 6.2, seat.y + 4.1);
+    REQUIRE(connection.wait(client, [&] { return windows.view(*id).geometry == moved; }));
+    REQUIRE(connection.wait(client, [&] { return client.configured.width == moved.width; }));
+    REQUIRE(connection.attach_configured(client));
     seat.x += 32;
     seat.y += 18;
     desktop.motion(seat.x, seat.y);
-    const auto clamped = windows.view(*id).geometry;
-    REQUIRE(clamped ==
-            (WindowRect{moved.x + moved.width - 40, moved.y + moved.height - 26, 40, 26}));
+    const WindowRect clamped{moved.x + moved.width - 40, moved.y + moved.height - 26, 40, 26};
+    REQUIRE(connection.wait(client, [&] { return windows.view(*id).geometry == clamped; }));
     REQUIRE(connection.wait(
         client, [&] { return client.configured.width == 40 && client.configured.height == 26; }));
     REQUIRE(connection.attach_configured(client));
@@ -1337,8 +1356,10 @@ bool run_client_gestures(const Fixture &fixture) {
     part3_input_button(seat.devices.get(), BTN_LEFT, true);
     REQUIRE(connection.wait(client, [&] { return client.button_serial != 0; }));
     xdg_toplevel_resize(client.toplevel, client.seat, client.button_serial,
-                        XDG_TOPLEVEL_RESIZE_EDGE_BOTTOM_RIGHT);
+                        XDG_TOPLEVEL_RESIZE_EDGE_RIGHT);
     REQUIRE(connection.wait(client, [&] { return client.configured.resizing; }));
+    REQUIRE(check_idle_resize(fixture, connection, client, {{seat.x + 0.7, seat.y + 10}}));
+    desktop.motion(seat.x + 8, seat.y);
     desktop.apply_config(seaside::default_config());
     REQUIRE(connection.wait(client, [&] {
         return !client.configured.resizing && client.configured.tiled_edges == all_tiled_edges;

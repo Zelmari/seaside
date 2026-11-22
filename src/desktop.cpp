@@ -864,6 +864,14 @@ bool Desktop::button(WindowId id, std::uint32_t button, bool pressed, std::uint8
     return false;
 }
 
+std::pair<int, int> Desktop::Drag::delta(double target_x, double target_y) const noexcept {
+    const bool horizontal =
+        !resize_edges || (resize_edges & (SEASIDE_RESIZE_LEFT | SEASIDE_RESIZE_RIGHT));
+    const bool vertical =
+        !resize_edges || (resize_edges & (SEASIDE_RESIZE_TOP | SEASIDE_RESIZE_BOTTOM));
+    return {horizontal ? motion_delta(target_x - x) : 0, vertical ? motion_delta(target_y - y) : 0};
+}
+
 void Desktop::motion(double x, double y) noexcept try {
     if (!std::isfinite(x) || !std::isfinite(y)) {
         return;
@@ -876,15 +884,13 @@ void Desktop::motion(double x, double y) noexcept try {
     }
     if (frame_paced_resize_ && drag_->resize) {
         if (auto *output = window_output_handle(drag_->window)) {
-            const auto last =
-                drag_->last_scheduled_resize.value_or(PointerPosition{drag_->x, drag_->y});
-            if (x == last.x && y == last.y) {
-                return;
+            if (drag_->pending) {
+                // The pointer can return to the applied target before this frame.
+                drag_->pending = PointerPosition{x, y};
+            } else if (drag_->delta(x, y) != drag_->applied_edge_delta) {
+                drag_->pending = PointerPosition{x, y};
+                scene_.schedule_frame(output);
             }
-            const PointerPosition target{x, y};
-            drag_->last_scheduled_resize = target;
-            drag_->pending = target;
-            scene_.schedule_frame(output);
             return;
         }
     }
@@ -907,10 +913,12 @@ void Desktop::before_output_frame(void *self, wlr_output *output) noexcept {
 }
 
 void Desktop::apply_drag_motion(double x, double y) {
-    const auto dx = motion_delta(x - drag_->x);
-    const auto dy = motion_delta(y - drag_->y);
+    const auto [dx, dy] = drag_->delta(x, y);
     const WindowId id = drag_->window;
     if (const auto edges = drag_->resize_edges) {
+        // Client edges stay anchored to the original geometry. Compositor
+        // gestures advance x/y by whole pixels and retain the fractional remainder.
+        drag_->applied_edge_delta = {dx, dy};
         if (windows_.resize_floating(
                 id, drag_->initial_geometry,
                 edges & (SEASIDE_RESIZE_LEFT | SEASIDE_RESIZE_RIGHT) ? std::optional{dx}

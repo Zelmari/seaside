@@ -6,6 +6,7 @@
 
 #include <functional>
 #include <set>
+#include <utility>
 
 struct seaside_tty_input;
 struct wl_event_source;
@@ -71,7 +72,8 @@ class Desktop final {
         std::uint32_t resize_edges = 0;
         WindowRect initial_geometry{};
         std::optional<PointerPosition> pending{};
-        std::optional<PointerPosition> last_scheduled_resize{};
+        std::pair<int, int> applied_edge_delta{};
+        std::pair<int, int> delta(double target_x, double target_y) const noexcept;
     };
     struct OpeningWindow {
         WindowRect geometry;
