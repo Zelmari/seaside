@@ -105,6 +105,9 @@ def run_layout(repo, directory, result_dir, state, layout):
         second = observe("second", key="open")
         if second["pid"] == first["pid"]:
             raise RuntimeError(f"The second {layout} terminal did not gain keyboard focus")
+        reselected = observe("workspace-reselect", key="workspace-one", expected=second)
+        if (reselected["columns"], reselected["rows"]) != (second["columns"], second["rows"]):
+            raise RuntimeError(f"Reselecting the {layout} workspace changed its terminal geometry")
         middle = height // 2
         left = width // 4
         right = width * 3 // 4
@@ -116,6 +119,11 @@ def run_layout(repo, directory, result_dir, state, layout):
                               expected=first)
             if resized["columns"] <= split["columns"]:
                 raise RuntimeError("Dwindle pointer resize did not widen the left tile")
+            restored = observe("resize-reverse",
+                               mouse=drag(2, (left + width // 10, middle), (left, middle)),
+                               expected=first)
+            if abs(restored["columns"] - split["columns"]) > 1 or restored["rows"] != split["rows"]:
+                raise RuntimeError("Reversing the Dwindle drag did not restore the terminal geometry")
             observe("reinsert", mouse=drag(1, (right + width // 10, middle), (left, middle)),
                     expected=second)
             observe("left-after-drop", mouse={"button": 1, "start": (left, middle)}, expected=second)
