@@ -23,6 +23,7 @@ struct client {
     int32_t width;
     int32_t height;
     uint32_t pixel;
+    unsigned resize_delay_ms;
     bool dirty;
     bool fixed_size;
     bool configured;
@@ -122,6 +123,14 @@ static void draw(struct client *client) {
 static void surface_configured(void *data, struct xdg_surface *surface, uint32_t serial) {
     struct client *client = data;
     xdg_surface_ack_configure(surface, serial);
+    if (client->configured && client->dirty && client->resize_delay_ms) {
+        // Flush the acknowledgment before delaying the matching buffer commit.
+        if (wl_display_flush(client->display) < 0 && errno != EAGAIN) {
+            client->failed = true;
+            return;
+        }
+        usleep(client->resize_delay_ms * 1000);
+    }
     client->configured = true;
     if (client->dirty) {
         draw(client);
@@ -187,6 +196,24 @@ static bool parse_pixel(const char *word, uint32_t *pixel) {
     }
     *pixel = (uint32_t)value | 0xff000000U;
     return true;
+}
+
+static bool parse_option(const char *word, struct client *client) {
+    if (strcmp(word, "--fixed-size") == 0) {
+        client->fixed_size = true;
+        return true;
+    }
+    const char prefix[] = "--delay-resize=";
+    if (strncmp(word, prefix, sizeof(prefix) - 1) == 0) {
+        const char *start = word + sizeof(prefix) - 1;
+        char *end = NULL;
+        unsigned long delay = strtoul(start, &end, 10);
+        if (end != start && *end == '\0' && delay > 0 && delay <= 3000) {
+            client->resize_delay_ms = (unsigned)delay;
+            return true;
+        }
+    }
+    return false;
 }
 
 static void read_command(struct client *client) {
@@ -261,11 +288,10 @@ static void destroy_client(struct client *client, struct wl_registry *registry) 
 
 int main(int argc, char **argv) {
     struct client client = {.width = 264, .height = 176, .dirty = true};
-    if (argc == 4 && strcmp(argv[3], "--fixed-size") == 0) {
-        client.fixed_size = true;
-    }
-    if ((argc != 3 && !client.fixed_size) || !parse_pixel(argv[2], &client.pixel)) {
-        fputs("Usage: seaside-part7-native-client TITLE RRGGBB [--fixed-size]\n", stderr);
+    if (argc < 3 || argc > 4 || (argc == 4 && !parse_option(argv[3], &client)) ||
+        !parse_pixel(argv[2], &client.pixel)) {
+        fputs("Usage: seaside-part7-native-client TITLE RRGGBB [--fixed-size|--delay-resize=MS]\n",
+              stderr);
         return EXIT_FAILURE;
     }
     setvbuf(stdout, NULL, _IOLBF, 0);

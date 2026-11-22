@@ -22,6 +22,7 @@ revision = standard["REVISION"]
 base = standard["BASE"]
 TITLE = "Part 8 Fullscreen Pattern"
 PIXEL = (100, 72, 44)
+BUILD_TARGETS = ("seaside", "seasidectl", "seaside-part7-native-client", "seaside-portal-stream")
 
 
 def require(condition, message):
@@ -56,7 +57,7 @@ def environment():
     return env
 
 
-def prepare(source, results, state, env, part=8, extra_targets=()):
+def prepare(source, results, state, env, part=8, extra_targets=(), *, targets=BUILD_TARGETS):
     limit = 64 * 1024 * 1024
     bundle = source / "revision.bundle"
     with standard["OPENER"].open(base + "/bundle", timeout=30) as response:
@@ -84,10 +85,9 @@ def prepare(source, results, state, env, part=8, extra_targets=()):
         event("build", revision[:12])
         require(not run_logged(["meson", "setup", "build", "--buildtype=debug"], repo, log, 120,
                                env=env), "Guest configure failed")
-        targets = ["seaside", "seasidectl", "seaside-part7-native-client", "seaside-portal-stream",
-                   *extra_targets]
-        require(not run_logged(["meson", "compile", "-C", "build", "-j2", *targets], repo, log,
-                               420, env=env), "Guest compositor or fixture build failed")
+        require(not run_logged(["meson", "compile", "-C", "build", "-j2", *targets,
+                                *extra_targets], repo, log, 420, env=env),
+                "Guest compositor or fixture build failed")
     else:
         event("harness", revision[:12])
         reports = results / "harness"
@@ -113,10 +113,11 @@ def prepare(source, results, state, env, part=8, extra_targets=()):
 
 
 class Session:
-    def __init__(self, repo, root, results, env, label="part8"):
+    def __init__(self, repo, root, results, env, label="part8", *, config=None, installed=False):
         self.repo, self.results = repo, results
         self.label = label
         self.log = results / f"{label}-session.log"
+        self.installed = installed
         self.state_dir = root / "state"
         self.env = dict(env, XDG_CONFIG_HOME=str(root / "config"), XDG_STATE_HOME=str(self.state_dir))
         self.config = root / "config/seaside/config.toml"
@@ -125,9 +126,10 @@ class Session:
         marker = shlex.quote(str(self.marker))
         command = (f"umask 077; printf '%s\\n' \"$WAYLAND_DISPLAY\" \"$SEASIDE_SOCKET\" > {marker}.tmp"
                    f" && mv -- {marker}.tmp {marker}")
-        self.base_config = ("[window]\ntiling = false\n[keybinds]\n"
-                            '"Super+N" = "night_light toggle"\n'
-                            f"[autostart]\ncommands = [{json.dumps(command)}]\n")
+        if config is None:
+            config = ('[window]\ntiling = false\n[keybinds]\n'
+                      '"Super+N" = "night_light toggle"\n')
+        self.base_config = config + f"\n[autostart]\ncommands = [{json.dumps(command)}]\n"
         self.chooser = shutil.which("wofi", path=self.env.get("PATH"))
         if self.chooser:
             portal = root / "config/xdg-desktop-portal-wlr/Seaside"
@@ -148,7 +150,12 @@ class Session:
         staged.replace(self.config)
 
     def __enter__(self):
-        self.process = standard["start_seaside"](self.repo, self.env, self.log)
+        if self.installed:
+            with self.log.open("wb") as output:
+                self.process = subprocess.Popen(["/usr/bin/seaside"], env=self.env, stdout=output,
+                                                stderr=subprocess.STDOUT)
+        else:
+            self.process = standard["start_seaside"](self.repo, self.env, self.log)
         try:
             wait_for(self.marker.is_file, 25, "production readiness and test autostart", self.process)
             wayland, socket = self.marker.read_text().splitlines()
@@ -164,7 +171,8 @@ class Session:
         stop(self.process)
 
     def ctl(self, *args):
-        reply = json.loads(checked([self.repo / "build/seasidectl", *args], env=self.env))
+        executable = Path("/usr/bin/seasidectl") if self.installed else self.repo / "build/seasidectl"
+        reply = json.loads(checked([executable, *args], env=self.env))
         require(reply["ok"] is True and reply["v"] == 1, f"Invalid seasidectl reply: {reply}")
         return reply["result"]
 

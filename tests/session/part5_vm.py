@@ -25,7 +25,7 @@ CAPTURES = {"dwindle.png", "scrolling.png"}
 BUNDLE_LIMIT = 64 * 1024 * 1024
 
 
-def mouse(runner, vm, request):
+def mouse(runner, vm, request, *, hold_ms=150):
     start = request["start"]
     end = request.get("end", start)
     for point in (start, end):
@@ -34,6 +34,8 @@ def mouse(runner, vm, request):
     button = request["button"]
     if button not in (1, 2):
         raise RuntimeError("Invalid Part 5 pointer button")
+    if type(hold_ms) is not int or not 0 < hold_ms <= 3000:
+        raise RuntimeError("Invalid pointer hold duration")
     x, y = (p + 1 for p in start)
     end_x, end_y = (p + 1 for p in end)
     before_x = x + 17 if x < 16367 else x - 17
@@ -53,7 +55,7 @@ def mouse(runner, vm, request):
         f"$pressed = $true; $mouse.PutMouseEventAbsolute({x}, {y}, 0, 0, {button})",
         "Start-Sleep -Milliseconds 150",
         f"$mouse.PutMouseEventAbsolute({end_x}, {end_y}, 0, 0, {button})",
-        "Start-Sleep -Milliseconds 150",
+        f"Start-Sleep -Milliseconds {hold_ms}",
         "} finally { try { if ($pressed) { "
         f"$mouse.PutMouseEventAbsolute({end_x}, {end_y}, 0, 0, 0)"
         " } } finally { $session.UnlockMachine() } }",
@@ -94,7 +96,7 @@ def load_runner():
 
 
 def run(args, revision, bundle, *, scenario="part5", captures=None, send_input=route,
-        settings="", scenario_source=None, downloads=None):
+        settings="", scenario_source=None, downloads=None, follow=None):
     runner = load_runner()
     if captures is None:
         captures = CAPTURES | {"dwindle.log", "scrolling.log"}
@@ -142,6 +144,8 @@ def run(args, revision, bundle, *, scenario="part5", captures=None, send_input=r
             return BundleHandler
 
     runner.RunBridge = ScenarioBridge
+    if follow is not None:
+        runner.follow_trial = lambda vm, bridge, directory: follow(runner, vm, bridge, directory)
     return runner.run(args.vm, "tty" if args.tty_only else "run", revision, args.state)
 
 
