@@ -172,11 +172,17 @@ def prepare(source, result_dir, state):
         raise RuntimeError("Could not clone the supplied revision bundle")
     if git(repo, "rev-parse", "HEAD") != revision or git(repo, "status", "--porcelain"):
         raise RuntimeError("The isolated checkout does not match the requested revision")
+    env = os.environ.copy()
+    if part5_pkg_config_path:
+        if not Path(part5_pkg_config_path).is_dir():
+            raise RuntimeError("The guest pkg-config directory is unavailable")
+        env["PKG_CONFIG_PATH"] = os.pathsep.join(filter(None, (
+            part5_pkg_config_path, env.get("PKG_CONFIG_PATH"))))
     if mode == "tty":
         state["software_checks"] = "not-run"
         event("build", revision[:12])
-        if (run_logged(["meson", "setup", "build", "--buildtype=debug"], repo, log, 120) or
-                run_logged(["ninja", "-C", "build", "-j2", "seaside"], repo, log, 240)):
+        if (run_logged(["meson", "setup", "build", "--buildtype=debug"], repo, log, 120, env=env) or
+                run_logged(["ninja", "-C", "build", "-j2", "seaside"], repo, log, 240, env=env)):
             raise RuntimeError("Could not build the isolated checkout")
     else:
         # Run static analysis locally. The guest runs the real portal and TTY
@@ -185,7 +191,7 @@ def prepare(source, result_dir, state):
         reports = result_dir / "harness"
         code = run_logged(["tools/run-tests", "--results-dir", str(reports), "--suite", "unit",
                            "--suite", "integration", "--suite", "runner", "--suite", "hardware"],
-                          repo, result_dir / "harness.log", 760)
+                          repo, result_dir / "harness.log", 760, env=env)
         summaries = list(reports.glob("*/summary.json"))
         if not summaries:
             raise RuntimeError("The guest harness produced no summary")

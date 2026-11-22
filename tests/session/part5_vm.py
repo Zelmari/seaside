@@ -180,9 +180,14 @@ def main():
     parser.add_argument("--vm", default="Arch Seaside Testing")
     parser.add_argument("--state", type=Path, default=Path.home() / ".local/state/seaside-vm")
     parser.add_argument("--tty-only", action="store_true")
+    parser.add_argument("--pkg-config-path", type=Path,
+                        help="additional pkg-config directory on the guest")
     args = parser.parse_args()
+    if args.pkg_config_path is not None and not args.pkg_config_path.is_absolute():
+        parser.error("the guest pkg-config directory must be absolute")
     with revision_bundle() as (revision, bundle):
-        return run(args, revision, bundle)
+        settings = f"part5_pkg_config_path = {str(args.pkg_config_path or '')!r}\n"
+        return run(args, revision, bundle, settings=settings)
 
 
 if __name__ == "__main__":
