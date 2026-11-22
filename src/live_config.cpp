@@ -1,13 +1,11 @@
 #include "live_config.hpp"
 
-#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
 #include <map>
 #include <sys/inotify.h>
-#include <sys/stat.h>
 #include <unistd.h>
 #include <wayland-server-core.h>
 
@@ -35,10 +33,8 @@ std::error_code work_error(WorkError error) {
 } // namespace
 
 struct LiveConfig::Impl {
-    enum class WriteState { complete, created, modified };
     struct Entry {
         std::string name;
-        std::filesystem::path path;
         unsigned hop;
         bool ancestor;
     };
@@ -77,7 +73,7 @@ struct LiveConfig::Impl {
             const int wd =
                 inotify_add_watch(watch_fd_, entry.parent_path().c_str(), directory_events);
             if (wd >= 0)
-                watches[wd].push_back({entry.filename().string(), entry, hop, ancestor});
+                watches[wd].push_back({entry.filename().string(), hop, ancestor});
             return wd >= 0;
         };
         add(path, false);
@@ -131,8 +127,6 @@ struct LiveConfig::Impl {
 
     static int on_timer(void *data) noexcept {
         auto &self = *static_cast<Impl *>(data);
-        if (self.write_state_ != WriteState::complete)
-            return 0;
         self.due_ = true;
         self.submit_reload();
         return 0;
@@ -161,6 +155,7 @@ struct LiveConfig::Impl {
                 const auto *name = buffer.data() + offset + sizeof(event);
                 offset += sizeof(event) + event.len;
                 if (event.mask & IN_Q_OVERFLOW) {
+                    writer_check_ = WriterCheck::required;
                     changed = true;
                     rewatch = true;
                 } else if (event.wd == file_watch_) {
@@ -169,7 +164,7 @@ struct LiveConfig::Impl {
                         continue;
                     changed = true;
                     rewatch |= (event.mask & (lost_watch | IN_ATTRIB)) != 0;
-                    record_write(event.mask, {});
+                    record_write(event.mask);
                 } else if (auto it = directories_.find(event.wd); it != directories_.end()) {
                     for (const auto &entry : it->second) {
                         if (replaced_hop && entry.hop > *replaced_hop)
@@ -183,9 +178,9 @@ struct LiveConfig::Impl {
                             if (replacement)
                                 replaced_hop = entry.hop;
                             if (!entry.ancestor)
-                                record_write(event.mask, entry.path);
+                                record_write(event.mask);
                             else if (replacement)
-                                write_state_ = WriteState::complete;
+                                writer_check_ = WriterCheck::required;
                         }
                     }
                 }
@@ -203,29 +198,17 @@ struct LiveConfig::Impl {
             watch_failed();
     }
 
-    void record_write(std::uint32_t mask, const std::filesystem::path &path) noexcept {
-        if (mask & (IN_CLOSE_WRITE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO | lost_watch)) {
-            write_state_ = WriteState::complete;
-        } else if (mask & IN_MODIFY) {
-            write_state_ = WriteState::modified;
-        } else if (mask & IN_CREATE) {
-            write_state_ = created_regular_file(path) ? WriteState::created : WriteState::complete;
-        }
-    }
-
-    static bool created_regular_file(const std::filesystem::path &path) noexcept {
-        struct stat status{};
-        // A symlink or hard link publishes an existing target without a write-close.
-        return lstat(path.c_str(), &status) == 0 && S_ISREG(status.st_mode) && status.st_nlink == 1;
+    void record_write(std::uint32_t mask) noexcept {
+        if (mask & (IN_CLOSE_WRITE | IN_MOVED_TO))
+            writer_check_ = WriterCheck::when_available;
+        else if (mask & (IN_MODIFY | IN_CREATE | IN_DELETE | IN_MOVED_FROM | lost_watch))
+            writer_check_ = WriterCheck::required;
     }
 
     bool arm_reload() {
         due_ = false;
-        // A create or modify invalidates any older worker immediately. Only a
-        // completed save may arm another candidate, even if a prefix parses.
-        const int delay = write_state_ == WriteState::complete ? debounce_ms : 0;
         return transaction_.begin_reload() &&
-               wl_event_source_timer_update(timer_.get(), delay) == 0;
+               wl_event_source_timer_update(timer_.get(), debounce_ms) == 0;
     }
 
     void watch_failed() {
@@ -271,7 +254,7 @@ struct LiveConfig::Impl {
                               const Config &candidate) { return worker(candidate, active); };
             }
             const auto submitted = io_.load_prepared(
-                paths_.user, generation, reload_reservation, std::move(prepare),
+                paths_.user, generation, reload_reservation, writer_check_, std::move(prepare),
                 [this, generation](auto result) { loaded(generation, std::move(result)); });
             if (submitted)
                 loading_ = true;
@@ -283,8 +266,7 @@ struct LiveConfig::Impl {
         }
     }
 
-    void loaded(std::uint64_t generation,
-                std::expected<PreparedConfigCandidate, Diagnostic> result) noexcept {
+    void loaded(std::uint64_t generation, AsyncConfigIo::PreparedResult result) noexcept {
         loading_ = false;
         try {
             // The queue and inotify may wake the loop together. Drain path
@@ -292,10 +274,10 @@ struct LiveConfig::Impl {
             if (watch_source_)
                 drain_watch();
             if (generation == transaction_.generation()) {
-                if (result)
-                    commit(std::move(*result));
-                else
+                if (!result)
                     reject(generation, std::move(result.error()));
+                else if (*result)
+                    commit(std::move(**result));
             }
         } catch (...) {
             std::fputs("seaside: could not apply configuration reload\n", stderr);
@@ -376,7 +358,7 @@ struct LiveConfig::Impl {
     Source timer_{nullptr, wl_event_source_remove};
     int watch_fd_ = -1;
     int file_watch_ = -1;
-    WriteState write_state_ = WriteState::complete;
+    WriterCheck writer_check_ = WriterCheck::when_available;
     bool ready_ = false;
     bool due_ = false;
     bool loading_ = false;

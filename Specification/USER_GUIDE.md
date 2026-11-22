@@ -96,6 +96,13 @@ The last-good copy is in `$XDG_STATE_HOME/seaside/last-good-config.toml`,
 with `~/.local/state` as the fallback state directory.
 [Config loading and recovery](SEASIDE_SPEC.md#81-loading-validation-reload-and-recovery)
 
+Seaside follows chains of symlinks such as a dotfile profile selected by an
+intermediate link. On local filesystems that allow Linux read leases on your
+config file, it also recognizes pathname truncation and hard-link publication,
+even when an inotify queue overflow drops the close notification. If leases
+are unavailable (for example, on a file owned by another user), finish the
+save by closing the writer or by renaming a completed file into place.
+
 ### Default shortcuts
 
 | Shortcut | Action |

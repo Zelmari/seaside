@@ -28,6 +28,7 @@ enum class StorageStep {
     sync_ancestor,
     rollback,
     waiting_for_publication,
+    check_writer,
 };
 struct StorageError {
     StorageStep operation;
@@ -39,6 +40,9 @@ struct StorageError {
     bool publication_committed = false;
     bool cleanup_failed = false;
 };
+// On filesystems without leases, a known publication can still be read using
+// the inotify close/rename boundary. An uncertain live edit must await a new save.
+enum class WriterCheck { skip, when_available, required };
 enum class PublishMode { replace_snapshot, create_user_file };
 enum class PublishResult { written, already_exists };
 
@@ -62,8 +66,9 @@ class ConfigStore {
     explicit ConfigStore(std::shared_ptr<StorageIo> io = std::make_shared<StorageIo>());
     // Reading symlinked user dotfiles is supported. Private recovery state must
     // be a regular file, not a symlink. Nonblocking opens reject FIFOs/devices.
-    std::expected<std::optional<std::string>, StorageError> read(const std::filesystem::path &path,
-                                                                 bool private_state = false) const;
+    std::expected<std::optional<std::string>, StorageError>
+    read(const std::filesystem::path &path, bool private_state = false,
+         WriterCheck writer_check = WriterCheck::skip) const;
     // Blocking serialization belongs on workers (or before the event loop).
     // StorageIo hooks and generation predicates must not reenter publication.
     std::expected<PublishResult, StorageError>

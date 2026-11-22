@@ -4,8 +4,11 @@
 
 #include <array>
 #include <cerrno>
+#include <fcntl.h>
 #include <fstream>
 #include <gtest/gtest.h>
+#include <pthread.h>
+#include <signal.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -77,6 +80,51 @@ TEST_F(StoreTest, MissingEmptyAndBoundedRegularFiles) {
     ASSERT_EQ(::mkfifo((root / "fifo").c_str(), 0600), 0);
     EXPECT_FALSE(store.read(root / "fifo"));
 }
+TEST_F(StoreTest, ReadLeaseRoutesBreakToReaderAndPreservesPendingSignal) {
+    using namespace seaside;
+    const auto path = root / "lease";
+    write(path, "candidate");
+    auto io = std::make_shared<FaultIo>();
+    ConfigStore store{io};
+    // Force the actual kernel to break the lease before the checked close.
+    io->observe = [&](StorageStep step) {
+        if (step != StorageStep::close_file)
+            return;
+        const int writer = open(path.c_str(), O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+        EXPECT_EQ(writer, -1);
+        if (writer >= 0)
+            close(writer);
+        else
+            EXPECT_EQ(errno, EWOULDBLOCK);
+        sigset_t pending;
+        ASSERT_EQ(sigpending(&pending), 0);
+        EXPECT_EQ(sigismember(&pending, SIGIO), 1);
+    };
+    std::jthread reader([&] {
+        sigset_t signals, mask, pending;
+        sigemptyset(&signals);
+        sigaddset(&signals, SIGIO);
+        ASSERT_EQ(pthread_sigmask(SIG_UNBLOCK, &signals, nullptr), 0);
+        ASSERT_TRUE(store.read(path, false, WriterCheck::required));
+        ASSERT_EQ(pthread_sigmask(SIG_SETMASK, nullptr, &mask), 0);
+        EXPECT_EQ(sigismember(&mask, SIGIO), 0);
+        ASSERT_EQ(sigpending(&pending), 0);
+        EXPECT_EQ(sigismember(&pending, SIGIO), 0);
+
+        ASSERT_EQ(pthread_sigmask(SIG_BLOCK, &signals, nullptr), 0);
+        ASSERT_EQ(pthread_kill(pthread_self(), SIGIO), 0);
+        ASSERT_TRUE(store.read(path, false, WriterCheck::required));
+        ASSERT_EQ(pthread_sigmask(SIG_SETMASK, nullptr, &mask), 0);
+        EXPECT_EQ(sigismember(&mask, SIGIO), 1);
+        ASSERT_EQ(sigpending(&pending), 0);
+        EXPECT_EQ(sigismember(&pending, SIGIO), 1);
+    });
+    reader.join();
+    const int writer = open(path.c_str(), O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+    ASSERT_GE(writer, 0);
+    close(writer);
+}
+
 TEST_F(StoreTest, UserSymlinksAllowedAndRecoverySymlinksRejected) {
     seaside::ConfigStore store;
     write(root / "real", "[window]\ngaps_outer=3\n");

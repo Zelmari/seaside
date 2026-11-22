@@ -23,15 +23,27 @@ LoadedConfig defaults_with(std::optional<Diagnostic> diagnostic) {
     return {default_config(), std::string(default_template()), ConfigSource::defaults,
             std::move(diagnostic)};
 }
+std::expected<ConfigCandidate, Diagnostic>
+parse_candidate(const std::filesystem::path &path, std::uint64_t generation,
+                std::expected<std::optional<std::string>, StorageError> text) {
+    if (!text)
+        return std::unexpected(storage_diagnostic(text.error()));
+    if (!*text)
+        return std::unexpected(Diagnostic{path.string(), 0, 0, "", "configuration is missing"});
+    auto config = parse_config(**text, path.string());
+    if (!config)
+        return std::unexpected(std::move(config.error()));
+    return ConfigCandidate{generation, std::move(*config), std::move(**text)};
+}
 } // namespace
 
 LoadedConfig load_startup_config(const ConfigStore &store, const ConfigPaths &paths) {
-    auto user = store.read(paths.user);
+    auto user = store.read(paths.user, false, WriterCheck::when_available);
     if (user && !*user) {
         auto created = store.publish(paths.user, default_template(), PublishMode::create_user_file);
         if (!created)
             return defaults_with(storage_diagnostic(created.error()));
-        user = store.read(paths.user);
+        user = store.read(paths.user, false, WriterCheck::when_available);
     }
     std::optional<Diagnostic> error;
     if (!user)
@@ -56,15 +68,7 @@ LoadedConfig load_startup_config(const ConfigStore &store, const ConfigPaths &pa
 std::expected<ConfigCandidate, Diagnostic> load_config_candidate(const ConfigStore &store,
                                                                  const std::filesystem::path &path,
                                                                  std::uint64_t generation) {
-    auto text = store.read(path);
-    if (!text)
-        return std::unexpected(storage_diagnostic(text.error()));
-    if (!*text)
-        return std::unexpected(Diagnostic{path.string(), 0, 0, "", "configuration is missing"});
-    auto config = parse_config(**text, path.string());
-    if (!config)
-        return std::unexpected(std::move(config.error()));
-    return ConfigCandidate{generation, std::move(*config), std::move(**text)};
+    return parse_candidate(path, generation, store.read(path));
 }
 
 ConfigTransaction::ConfigTransaction(LoadedConfig startup)
@@ -148,20 +152,19 @@ std::expected<void, WorkError> AsyncConfigIo::load(std::filesystem::path path,
                                                    LoadCompletion completion) {
     if (!completion)
         return std::unexpected(WorkError::invalid_job);
-    return load_prepared(std::move(path), generation, 64 * 1024 * 1024, {},
+    return load_prepared(std::move(path), generation, 64 * 1024 * 1024, WriterCheck::skip, {},
                          [completion = std::move(completion)](auto result) {
                              if (result)
-                                 completion(std::move(result->candidate));
+                                 completion(std::move(result->value().candidate));
                              else
                                  completion(std::unexpected(std::move(result.error())));
                          });
 }
 
-std::expected<void, WorkError> AsyncConfigIo::load_prepared(std::filesystem::path path,
-                                                            std::uint64_t generation,
-                                                            std::size_t reservation_bytes,
-                                                            Prepare prepare,
-                                                            PreparedCompletion completion) {
+std::expected<void, WorkError>
+AsyncConfigIo::load_prepared(std::filesystem::path path, std::uint64_t generation,
+                             std::size_t reservation_bytes, WriterCheck writer_check,
+                             Prepare prepare, PreparedCompletion completion) {
     if (owner_ != std::this_thread::get_id())
         return std::unexpected(WorkError::wrong_thread);
     if (!completion)
@@ -176,20 +179,25 @@ std::expected<void, WorkError> AsyncConfigIo::load_prepared(std::filesystem::pat
     auto submitted = queue_.submit(
         0, lifetime_, reservation_bytes,
         [store = std::move(store), path = std::move(path), generation, reservation_bytes,
-         prepare = std::move(prepare)](std::stop_token stop) -> WorkResult {
+         writer_check, prepare = std::move(prepare)](std::stop_token stop) -> WorkResult {
             if (stop.stop_requested())
                 return {{}, 0, WorkError::cancelled};
-            using Result = std::expected<PreparedConfigCandidate, Diagnostic>;
-            auto loaded = load_config_candidate(store, path, generation);
+            auto text = store.read(path, false, writer_check);
+            if (!text && text.error().operation == StorageStep::check_writer)
+                return {std::make_shared<PreparedResult>(), sizeof(PreparedResult),
+                        WorkError::none};
+            auto loaded = parse_candidate(path, generation, std::move(text));
             if (!loaded)
-                return {std::make_shared<Result>(std::unexpected(std::move(loaded.error()))),
-                        reservation_bytes, WorkError::none};
+                return {
+                    std::make_shared<PreparedResult>(std::unexpected(std::move(loaded.error()))),
+                    reservation_bytes, WorkError::none};
             auto prepared = prepare ? prepare(loaded->config)
                                     : std::expected<std::shared_ptr<const void>, Diagnostic>{};
             if (!prepared)
-                return {std::make_shared<Result>(std::unexpected(std::move(prepared.error()))),
-                        reservation_bytes, WorkError::none};
-            return {std::make_shared<Result>(
+                return {
+                    std::make_shared<PreparedResult>(std::unexpected(std::move(prepared.error()))),
+                    reservation_bytes, WorkError::none};
+            return {std::make_shared<PreparedResult>(
                         PreparedConfigCandidate{std::move(*loaded), std::move(*prepared)}),
                     reservation_bytes, WorkError::none};
         },
@@ -200,8 +208,7 @@ std::expected<void, WorkError> AsyncConfigIo::load_prepared(std::filesystem::pat
             if (result.error != WorkError::none || !result.value)
                 completion(std::unexpected(transaction_error("configuration worker failed")));
             else
-                completion(*std::static_pointer_cast<
-                           const std::expected<PreparedConfigCandidate, Diagnostic>>(result.value));
+                completion(*std::static_pointer_cast<const PreparedResult>(result.value));
         });
     if (submitted)
         generation_->store(generation);

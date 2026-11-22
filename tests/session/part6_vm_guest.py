@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import signal
 import socket
 import struct
 import subprocess
@@ -269,6 +270,65 @@ class Events:
         return result["seq"]
 
 
+def check_completed_saves(session, events, target, snapshot, initial, selected):
+    def accepted(text, pending):
+        events.expect("config.recovered")
+        session.wait(lambda: session.config()["recovery_persisted"], "completed save snapshot")
+        status = session.config()
+        require(not status["error"] and status["pending_restart"] == pending and
+                snapshot.read_text() == text, "Completed save lost live state or snapshot bytes")
+
+    stage = target.with_suffix(".stage")
+    stage.write_text(selected)
+    target.unlink()
+    os.link(stage, target)
+    stage.unlink()
+    accepted(selected, True)
+    os.truncate(target, len(initial.encode()))
+    accepted(initial, False)
+
+    # Pause only this trial's child so its real inotify queue deterministically
+    # overflows. Every rename contributes two independent, noncoalescing records.
+    limit = int(Path("/proc/sys/fs/inotify/max_queued_events").read_text())
+    require(0 < limit <= 100_000, f"Impractical inotify queue size {limit}")
+    noise_a, noise_b = target.with_suffix(".a"), target.with_suffix(".b")
+    noise_a.touch()
+
+    def overflow(close_writer=None):
+        nonlocal noise_a, noise_b
+        session.process.send_signal(signal.SIGSTOP)
+        try:
+            _, status = os.waitpid(session.process.pid, os.WUNTRACED)
+            require(os.WIFSTOPPED(status), "Could not pause the trial compositor")
+            for _ in range(limit // 2 + 2):
+                noise_a.rename(noise_b)
+                noise_a, noise_b = noise_b, noise_a
+            if close_writer:
+                close_writer()
+        finally:
+            session.process.send_signal(signal.SIGCONT)
+
+    finished = selected + "# complete\n"
+    with target.open("w") as writer:
+        writer.write(selected)
+        writer.flush()
+        overflow()
+        deadline = time.monotonic() + .65
+        while time.monotonic() < deadline:
+            status = session.config()
+            require(not status["error"] and not status["pending_restart"] and
+                    snapshot.read_text() == initial, "Overflow published an open writer's prefix")
+            time.sleep(.05)
+        writer.write("# complete\n")
+        writer.flush()
+        overflow(writer.close)
+    accepted(finished, True)
+    target.write_text(initial)
+    accepted(initial, False)
+    return {"hard_link_unlink": True, "pathname_truncate": True, "open_prefix_retained": True,
+            "lost_close_recovered": True, "queue_limit": limit}
+
+
 def run_live(repo, directory, result_dir, state):
     config = directory / "config/seaside/config.toml"
     snapshot = directory / "state/seaside/last-good-config.toml"
@@ -311,6 +371,8 @@ def run_live(repo, directory, result_dir, state):
             require(not session.config()["pending_restart"] and snapshot.read_text() == initial,
                     "A subsequent edit of the new target did not repair the profile")
             state["profile_switch"] = {"retargeted": True, "invalid_retained": True, "repaired": True}
+            state["completed_saves"] = check_completed_saves(session, events, files / "home",
+                                                            snapshot, initial, selected)
             session.key("open")
             session.wait(session.windows, "the default Super+Return terminal")
             mapped = events.expect("window.mapped")

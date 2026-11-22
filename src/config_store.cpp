@@ -9,6 +9,8 @@
 #include <fcntl.h>
 #include <linux/fs.h>
 #include <mutex>
+#include <pthread.h>
+#include <signal.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <utility>
@@ -23,6 +25,82 @@ StorageError failure(StorageStep step, const std::filesystem::path &path,
                      std::error_code error = system_error(), bool uncertain = false,
                      bool committed = false, bool cleanup_failed = false) {
     return {step, path, error, uncertain, committed, cleanup_failed};
+}
+// Lease breaks deliver SIGIO. Keep it on the calling thread and preserve the
+// caller's mask and any SIGIO already pending on entry.
+class ReadLease {
+  public:
+    explicit ReadLease(int fd) : fd_(fd) {}
+    ReadLease(const ReadLease &) = delete;
+    ReadLease &operator=(const ReadLease &) = delete;
+
+    std::error_code acquire() {
+        sigemptyset(&signals_);
+        sigaddset(&signals_, SIGIO);
+        if (int e = pthread_sigmask(SIG_BLOCK, &signals_, &previous_))
+            return {e, std::generic_category()};
+        blocked_ = true;
+        sigset_t pending;
+        if (sigpending(&pending) < 0)
+            return system_error();
+        const f_owner_ex reader{F_OWNER_TID, gettid()};
+        if (fcntl(fd_, F_SETOWN_EX, &reader) < 0 || fcntl(fd_, F_SETLEASE, F_RDLCK) < 0)
+            return system_error();
+        acquired_ = true;
+        drain_ = !sigismember(&pending, SIGIO);
+        return {};
+    }
+
+    std::error_code release() noexcept {
+        if (std::exchange(acquired_, false) && fcntl(fd_, F_SETLEASE, F_UNLCK) < 0) {
+            // A fork can temporarily share the description. Stop signal delivery
+            // even if release fails and close is not its last reference.
+            auto error = system_error();
+            fcntl(fd_, F_SETOWN, 0);
+            return error;
+        }
+        return {};
+    }
+
+    ~ReadLease() {
+        release();
+        if (!blocked_)
+            return;
+        if (drain_) {
+            const timespec now{};
+            while (sigtimedwait(&signals_, nullptr, &now) < 0 && errno == EINTR) {
+            }
+        }
+        pthread_sigmask(SIG_SETMASK, &previous_, nullptr);
+    }
+
+  private:
+    int fd_;
+    sigset_t signals_{}, previous_{};
+    bool blocked_ = false, acquired_ = false, drain_ = false;
+};
+
+std::expected<std::string, std::error_code> read_bytes(int fd, off_t size, StorageIo &io) {
+    if (size < 0 || static_cast<std::uint64_t>(size) > max_config_bytes)
+        return std::unexpected(std::make_error_code(std::errc::invalid_argument));
+    std::string text;
+    std::array<char, 8192> buffer{};
+    for (;;) {
+        if (auto error = io.check(StorageStep::read))
+            return std::unexpected(error);
+        const auto count = io.read(fd, buffer);
+        if (count < 0) {
+            if (errno == EINTR)
+                continue;
+            return std::unexpected(system_error());
+        }
+        if (count == 0)
+            break;
+        if (static_cast<std::size_t>(count) > max_config_bytes - text.size())
+            return std::unexpected(std::make_error_code(std::errc::file_too_large));
+        text.append(buffer.data(), static_cast<std::size_t>(count));
+    }
+    return text;
 }
 bool same_file(const struct stat &a, const struct stat &b) {
     return a.st_dev == b.st_dev && a.st_ino == b.st_ino && a.st_size == b.st_size &&
@@ -93,7 +171,8 @@ ConfigStore::ConfigStore(std::shared_ptr<StorageIo> io)
 }
 
 std::expected<std::optional<std::string>, StorageError>
-ConfigStore::read(const std::filesystem::path &path, bool private_state) const {
+ConfigStore::read(const std::filesystem::path &path, bool private_state,
+                  WriterCheck writer_check) const {
     if (auto error = io_->check(StorageStep::open_read))
         return std::unexpected(failure(StorageStep::open_read, path, error));
     StorageFd fd(
@@ -106,40 +185,47 @@ ConfigStore::read(const std::filesystem::path &path, bool private_state) const {
     struct stat before{}, after{};
     if (::fstat(fd.get(), &before) < 0)
         return std::unexpected(failure(StorageStep::read, path));
-    if (!S_ISREG(before.st_mode) || before.st_size < 0 ||
-        static_cast<std::uint64_t>(before.st_size) > max_config_bytes)
+    if (!S_ISREG(before.st_mode))
         return std::unexpected(
             failure(StorageStep::read, path, std::make_error_code(std::errc::invalid_argument)));
-    std::string text;
-    std::array<char, 8192> buffer{};
-    for (;;) {
-        if (auto error = io_->check(StorageStep::read))
-            return std::unexpected(failure(StorageStep::read, path, error));
-        const auto count = io_->read(fd.get(), buffer);
-        if (count < 0) {
-            if (errno == EINTR)
-                continue;
-            return std::unexpected(failure(StorageStep::read, path));
+    auto text = read_bytes(fd.get(), before.st_size, *io_);
+    ReadLease lease(fd.get());
+    if (writer_check != WriterCheck::skip) {
+        // Prove the same inode has no writable descriptions *after* copying
+        // its bytes, then check its version. Readers never hold the lease over
+        // file data I/O, parsing, graphical preparation or publication.
+        auto error = io_->check(StorageStep::check_writer);
+        if (!error)
+            error = lease.acquire();
+        if (error) {
+            const bool unavailable = error == std::errc::operation_not_supported ||
+                                     error == std::errc::invalid_argument ||
+                                     error == std::errc::operation_not_permitted ||
+                                     error == std::errc::permission_denied ||
+                                     error == std::errc::function_not_supported;
+            if (error == std::errc::resource_unavailable_try_again ||
+                (unavailable && writer_check == WriterCheck::required))
+                return std::unexpected(failure(StorageStep::check_writer, path, error));
+            if (!unavailable)
+                return std::unexpected(failure(StorageStep::read, path, error));
         }
-        if (count == 0)
-            break;
-        if (static_cast<std::size_t>(count) > max_config_bytes - text.size())
-            return std::unexpected(
-                failure(StorageStep::read, path, std::make_error_code(std::errc::file_too_large)));
-        text.append(buffer.data(), static_cast<std::size_t>(count));
     }
+    if (!text)
+        return std::unexpected(failure(StorageStep::read, path, text.error()));
     if (::fstat(fd.get(), &after) < 0)
         return std::unexpected(failure(StorageStep::read, path));
-    if (!same_file(before, after) || text.size() != static_cast<std::size_t>(after.st_size))
+    if (!same_file(before, after) || text->size() != static_cast<std::size_t>(after.st_size))
         return std::unexpected(
             failure(StorageStep::read, path,
                     std::make_error_code(std::errc::resource_unavailable_try_again)));
     auto close_error = io_->check(StorageStep::close_file);
+    if (auto error = lease.release(); error && !close_error)
+        close_error = error;
     if (fd.close() < 0 && !close_error)
         close_error = system_error();
     if (close_error)
         return std::unexpected(failure(StorageStep::close_file, path, close_error));
-    return std::optional<std::string>(std::move(text));
+    return std::optional<std::string>(std::move(*text));
 }
 
 std::expected<PublishResult, StorageError>

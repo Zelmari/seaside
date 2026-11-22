@@ -84,8 +84,9 @@ class AsyncConfigIo {
     using LoadCompletion = std::function<void(std::expected<ConfigCandidate, Diagnostic>)>;
     using Prepare =
         std::function<std::expected<std::shared_ptr<const void>, Diagnostic>(const Config &)>;
-    using PreparedCompletion =
-        std::function<void(std::expected<PreparedConfigCandidate, Diagnostic>)>;
+    // Empty success defers an incomplete save until the next filesystem event.
+    using PreparedResult = std::expected<std::optional<PreparedConfigCandidate>, Diagnostic>;
+    using PreparedCompletion = std::function<void(PreparedResult)>;
     using SaveCompletion = std::function<void(std::optional<StorageError>)>;
     AsyncConfigIo(WorkQueue &queue, ConfigStore store);
     ~AsyncConfigIo();
@@ -95,7 +96,8 @@ class AsyncConfigIo {
                                         LoadCompletion completion);
     std::expected<void, WorkError> load_prepared(std::filesystem::path path,
                                                  std::uint64_t generation,
-                                                 std::size_t reservation_bytes, Prepare prepare,
+                                                 std::size_t reservation_bytes,
+                                                 WriterCheck writer_check, Prepare prepare,
                                                  PreparedCompletion completion);
     std::expected<void, WorkError> persist(std::filesystem::path path, std::string text,
                                            std::uint64_t generation, SaveCompletion completion);

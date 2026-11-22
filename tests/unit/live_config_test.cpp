@@ -17,11 +17,14 @@ using Change = LiveConfig::Change;
 class SnapshotFailure : public StorageIo {
   public:
     std::error_code check(StorageStep step) noexcept override {
+        if (step == StorageStep::check_writer && leases_unavailable.load())
+            return std::make_error_code(std::errc::operation_not_supported);
         if (step == StorageStep::sync_file && fail.load())
             return std::make_error_code(std::errc::no_space_on_device);
         return {};
     }
     std::atomic<bool> fail = false;
+    std::atomic<bool> leases_unavailable = false;
 };
 
 class LiveConfigTest : public testing::Test {
@@ -345,18 +348,106 @@ TEST_F(LiveConfigTest, IntermediateProfileSwitchTracksTheNewTargetAndItsRepairs)
     EXPECT_EQ(snapshot(), repaired);
 }
 
-TEST_F(LiveConfigTest, RescansCurrentPathAfterAnInotifyOverflow) {
-    int queue_limit = 0;
-    if (!(std::ifstream("/proc/sys/fs/inotify/max_queued_events") >> queue_limit) ||
-        queue_limit < 1 || queue_limit > 100'000) {
-        GTEST_SKIP() << "The system inotify queue limit is unavailable or impractical to fill";
-    }
+TEST_F(LiveConfigTest, PathTruncatePublishesTheShorterConfiguration) {
+    const std::string prefix = "[window]\ngaps_outer=25\n";
+    ASSERT_TRUE(
+        store.publish(paths.user, prefix + "gaps_inner=17\n", PublishMode::create_user_file));
+    ASSERT_NO_FATAL_FAILURE(start());
+    ASSERT_EQ(transaction().active().window.gaps_inner, 17);
+    EXPECT_FALSE(pump_until([&] { return transaction().diagnostic().has_value(); }, 250ms));
+    std::filesystem::resize_file(paths.user, prefix.size());
+    ASSERT_TRUE(pump_until([&] {
+        return transaction().active().window.gaps_inner == default_config().window.gaps_inner &&
+               transaction().recovery_persisted();
+    }));
+    EXPECT_EQ(snapshot(), prefix);
+}
+
+TEST_F(LiveConfigTest, HardLinkPublicationSurvivesRemovalOfTheStagingName) {
     ASSERT_NO_FATAL_FAILURE(start());
     ASSERT_TRUE(pump_until([&] { return transaction().recovery_persisted(); }));
-    EXPECT_FALSE(pump_until([&] { return transaction().diagnostic().has_value(); }, 250ms));
+    const auto stage = directory.path() / "stage";
+    const std::string text = "[window]\ngaps_outer=42\n";
+    ASSERT_TRUE(std::ofstream(stage) << text);
+    std::filesystem::remove(paths.user);
+    std::filesystem::create_hard_link(stage, paths.user);
+    std::filesystem::remove(stage);
+    ASSERT_TRUE(pump_until([&] {
+        return transaction().active().window.gaps_outer == 42 && transaction().recovery_persisted();
+    }));
+    EXPECT_EQ(snapshot(), text);
+}
 
-    auto first = paths.user.parent_path() / "flood-a";
-    auto second = paths.user.parent_path() / "flood-b";
+TEST_F(LiveConfigTest, ACloseFromOneWriterCannotPublishAnotherWritersPrefix) {
+    ASSERT_NO_FATAL_FAILURE(start());
+    ASSERT_TRUE(pump_until([&] { return transaction().recovery_persisted(); }));
+    const auto alias = directory.path() / "also-open";
+    std::filesystem::create_hard_link(paths.user, alias);
+    auto writer = std::ofstream(alias);
+    const std::string prefix = "[window]\ngaps_outer=33\n";
+    ASSERT_TRUE(writer << prefix << std::flush);
+    // The second writable description closes, while the prefix writer stays open.
+    ASSERT_TRUE(std::ofstream(paths.user, std::ios::app).good());
+    EXPECT_FALSE(pump_until([&] { return transaction().active().window.gaps_outer == 33; }, 500ms));
+    EXPECT_FALSE(transaction().diagnostic());
+    EXPECT_EQ(snapshot(), default_template());
+    writer << "[keybinds]\n";
+    writer.close();
+    ASSERT_TRUE(pump_until([&] {
+        return transaction().active().window.gaps_outer == 33 && transaction().recovery_persisted();
+    }));
+    EXPECT_EQ(snapshot(), prefix + "[keybinds]\n");
+}
+
+TEST_F(LiveConfigTest, UnsupportedLeasesKeepUnconfirmedEditsPendingUntilAnOrdinarySave) {
+    io->leases_unavailable = true;
+    ASSERT_NO_FATAL_FAILURE(start());
+    const std::string prefix = "[window]\ngaps_outer=31\n";
+    const std::string prior = prefix + "gaps_inner=18\n";
+    ASSERT_NO_FATAL_FAILURE(replace(prior));
+    ASSERT_TRUE(pump_until([&] {
+        return transaction().active().window.gaps_inner == 18 && transaction().recovery_persisted();
+    }));
+    std::filesystem::resize_file(paths.user, prefix.size());
+    EXPECT_FALSE(pump_until([&] { return transaction().active().window.gaps_inner != 18; }, 500ms));
+    EXPECT_EQ(snapshot(), prior);
+    ASSERT_TRUE(std::ofstream(paths.user) << prefix);
+    ASSERT_TRUE(pump_until([&] {
+        return transaction().active().window.gaps_inner == default_config().window.gaps_inner &&
+               transaction().recovery_persisted();
+    }));
+    EXPECT_EQ(snapshot(), prefix);
+}
+
+TEST_F(LiveConfigTest, AnOpenWriterAtStartupUsesRecoveryUntilTheFirstCompletedSave) {
+    const std::string prior = "[window]\ngaps_outer=18\n";
+    ASSERT_TRUE(store.publish(paths.recovery, prior, PublishMode::replace_snapshot));
+    std::filesystem::create_directories(paths.user.parent_path());
+    auto writer = std::ofstream(paths.user);
+    const std::string prefix = "[window]\ngaps_outer=47\n";
+    ASSERT_TRUE(writer << prefix << std::flush);
+    ASSERT_NO_FATAL_FAILURE(start());
+    EXPECT_EQ(live->source(), ConfigSource::recovery);
+    EXPECT_FALSE(pump_until([&] { return transaction().active().window.gaps_outer != 18; }, 500ms));
+    EXPECT_EQ(snapshot(), prior);
+    writer << "[keybinds]\n";
+    writer.close();
+    ASSERT_TRUE(pump_until([&] {
+        return transaction().active().window.gaps_outer == 47 && transaction().recovery_persisted();
+    }));
+    EXPECT_FALSE(transaction().diagnostic());
+    EXPECT_EQ(snapshot(), prefix + "[keybinds]\n");
+}
+
+int inotify_queue_limit() {
+    int queue_limit = 0;
+    std::ifstream("/proc/sys/fs/inotify/max_queued_events") >> queue_limit;
+    return queue_limit <= 100'000 ? queue_limit : 0;
+}
+
+void fill_queue(const std::filesystem::path &dir, int queue_limit) {
+    auto first = dir / "flood-a";
+    auto second = dir / "flood-b";
     ASSERT_TRUE(std::ofstream(first) << "noise");
     // Each rename contributes two records with an independent cookie. With
     // dispatch paused, the subsequent save notification is replaced by overflow.
@@ -364,9 +455,48 @@ TEST_F(LiveConfigTest, RescansCurrentPathAfterAnInotifyOverflow) {
         std::filesystem::rename(first, second);
         std::swap(first, second);
     }
+}
+
+TEST_F(LiveConfigTest, RescansCurrentPathAfterAnInotifyOverflow) {
+    const int queue_limit = inotify_queue_limit();
+    if (queue_limit <= 0)
+        GTEST_SKIP() << "The system inotify queue limit is unavailable or impractical to fill";
+    ASSERT_NO_FATAL_FAILURE(start());
+    ASSERT_TRUE(pump_until([&] { return transaction().recovery_persisted(); }));
+    EXPECT_FALSE(pump_until([&] { return transaction().diagnostic().has_value(); }, 250ms));
+    ASSERT_NO_FATAL_FAILURE(fill_queue(paths.user.parent_path(), queue_limit));
     ASSERT_NO_FATAL_FAILURE(replace("[window]\ngaps_outer=53\n"));
     ASSERT_TRUE(pump_until([&] { return transaction().active().window.gaps_outer == 53; }));
     ASSERT_NO_FATAL_FAILURE(replace("[window]\ngaps_outer=57\n"));
     ASSERT_TRUE(pump_until([&] { return transaction().active().window.gaps_outer == 57; }));
+}
+
+TEST_F(LiveConfigTest, OverflowPreservesOpenPrefixAndRecoversFromLostWriteClose) {
+    const int queue_limit = inotify_queue_limit();
+    if (queue_limit <= 0)
+        GTEST_SKIP() << "The system inotify queue limit is unavailable or impractical to fill";
+    ASSERT_NO_FATAL_FAILURE(start());
+    ASSERT_TRUE(pump_until([&] { return transaction().recovery_persisted(); }));
+    auto writer = std::ofstream(paths.user);
+    const std::string prefix = "[window]\ngaps_outer=27\n";
+    auto generation = transaction().generation();
+    ASSERT_TRUE(writer << prefix << std::flush);
+    ASSERT_TRUE(pump_until([&] { return transaction().generation() > generation; }));
+
+    ASSERT_NO_FATAL_FAILURE(fill_queue(paths.user.parent_path(), queue_limit));
+    EXPECT_FALSE(pump_until([&] { return transaction().active().window.gaps_outer == 27; }, 650ms));
+    EXPECT_FALSE(transaction().diagnostic());
+    EXPECT_EQ(snapshot(), default_template());
+
+    // Let inotify deliver the modification, then fill its queue before closing.
+    generation = transaction().generation();
+    ASSERT_TRUE(writer << "[keybinds]\n" << std::flush);
+    ASSERT_TRUE(pump_until([&] { return transaction().generation() > generation; }));
+    ASSERT_NO_FATAL_FAILURE(fill_queue(paths.user.parent_path(), queue_limit));
+    writer.close();
+    ASSERT_TRUE(pump_until([&] {
+        return transaction().active().window.gaps_outer == 27 && transaction().recovery_persisted();
+    }));
+    EXPECT_EQ(snapshot(), prefix + "[keybinds]\n");
 }
 } // namespace
