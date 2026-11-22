@@ -999,6 +999,7 @@ done:
 static bool check_tearing(struct fixture *fixture, struct seaside_scene_bridge *scene,
                           struct wl_surface *surface) {
     bool passed = false;
+    struct wlr_output *plugged = NULL;
     struct wp_tearing_control_v1 *hint =
         wp_tearing_control_manager_v1_get_tearing_control(fixture->tearing, surface);
     CHECK(hint);
@@ -1020,6 +1021,52 @@ static bool check_tearing(struct fixture *fixture, struct seaside_scene_bridge *
     fprintf(stderr, "Fullscreen async rejection: async=%u synchronized=%u\n", async_flips,
             sync_flips);
     CHECK(async_flips == 1 && sync_flips >= 6);
+    // Changing output configuration retries async once even with the same
+    // surface and hint, and tearing stays synchronized after a second rejection.
+    struct wlr_output_state state;
+    for (unsigned i = 0; i < 2; i++) {
+        wlr_output_state_init(&state);
+        if (i == 0) {
+            wlr_output_state_set_custom_mode(&state, WIDTH, HEIGHT, 75000);
+        } else {
+            wlr_output_state_set_scale(&state, 1.25f);
+        }
+        bool configured = wlr_output_commit_state(fixture->output, &state);
+        wlr_output_state_finish(&state);
+        CHECK(configured);
+        unsigned attempts = async_flips;
+        CHECK(paint(fixture, surface, WIDTH, HEIGHT, i) && pump_for(fixture, 50));
+        CHECK(paint(fixture, surface, WIDTH, HEIGHT, i + 1) && pump_for(fixture, 50));
+        CHECK(async_flips == attempts + 1);
+    }
+    wlr_output_state_init(&state);
+    wlr_output_state_set_scale(&state, 1);
+    wlr_output_state_set_custom_mode(&state, WIDTH, HEIGHT, 60000);
+    bool restored = wlr_output_commit_state(fixture->output, &state);
+    wlr_output_state_finish(&state);
+    CHECK(restored && paint(fixture, surface, WIDTH, HEIGHT, 0) && pump_for(fixture, 50));
+    // Move the same fullscreen surface onto a newly hotplugged monitor. It
+    // can present asynchronously regardless of the first monitor's rejection.
+    plugged = wlr_headless_add_output(fixture->backend, WIDTH, HEIGHT);
+    CHECK(plugged && wlr_output_init_render(plugged, fixture->allocator, fixture->renderer));
+    CHECK(set_output_power(plugged, true));
+    tearing_output = plugged;
+    CHECK(seaside_scene_add_output(scene, plugged) &&
+          seaside_scene_place_output(scene, plugged, WIDTH, 0));
+    fullscreen.output.x = fullscreen.geometry.x = WIDTH;
+    seaside_scene_place_window(scene, 1, &fullscreen);
+    unsigned prior = async_flips;
+    reject_tearing = false;
+    CHECK(paint(fixture, surface, WIDTH, HEIGHT, 0) && pump_for(fixture, 50));
+    CHECK(async_flips > prior);
+    wlr_output_destroy(plugged);
+    plugged = NULL;
+    tearing_output = fixture->output;
+    fullscreen.output.x = fullscreen.geometry.x = 0;
+    seaside_scene_place_window(scene, 1, &fullscreen);
+    reject_tearing = true;
+    CHECK(paint(fixture, surface, WIDTH, HEIGHT, 0) && pump_for(fixture, 50));
+    prior = async_flips;
     // Changing the active hint permits another attempt.
     wp_tearing_control_v1_set_presentation_hint(hint,
                                                 WP_TEARING_CONTROL_V1_PRESENTATION_HINT_VSYNC);
@@ -1028,9 +1075,13 @@ static bool check_tearing(struct fixture *fixture, struct seaside_scene_bridge *
     wp_tearing_control_v1_set_presentation_hint(hint,
                                                 WP_TEARING_CONTROL_V1_PRESENTATION_HINT_ASYNC);
     CHECK(paint(fixture, surface, WIDTH, HEIGHT, CURSOR_RGB) && pump_for(fixture, 50));
-    CHECK(async_flips > 1);
+    CHECK(async_flips > prior);
     passed = true;
 done:
+    if (plugged) {
+        wlr_output_destroy(plugged);
+    }
+    tearing_output = fixture->output;
     if (hint) {
         wp_tearing_control_v1_destroy(hint);
     }
