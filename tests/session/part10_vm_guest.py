@@ -527,8 +527,10 @@ def missing_audio_device(repo, runtime, results, state):
         env["PIPEWIRE_REMOTE"] = str(server.socket)
         with InstalledSession(repo, results, env, label="part10-device") as session:
             probe = subprocess.run(["/usr/bin/wpctl", "get-volume", "@DEFAULT_AUDIO_SINK@"],
-                                   env=session.env, timeout=7, capture_output=True, check=False)
-            require(probe.returncode != 0, "The private PipeWire daemon unexpectedly exposed a playback sink")
+                                   env=session.env, timeout=7, text=True, capture_output=True, check=False)
+            # WirePlumber can report an unavailable default node with exit status zero.
+            require(not probe.stdout.strip() and "Translate ID error" in probe.stderr,
+                    f"Could not establish the private PipeWire server has no default sink: {probe!r}")
             event("part10-input", "try a package media key without a playback device", key="up")
             diagnostic = session.wait(
                 lambda: re.search(r"^seaside: command pid=\d+ wait-status=[1-9][0-9]*$",
@@ -536,7 +538,8 @@ def missing_audio_device(repo, runtime, results, state):
                 "the missing-device external command failure")
             require(session.ctl("status")["ready"], "Missing playback device disrupted the compositor")
             session.close()
-            state["missing_audio_device"] = {"status": "pass", "diagnostic": diagnostic[0]}
+            state["missing_audio_device"] = {"status": "pass", "diagnostic": diagnostic[0],
+                                             "probe": probe.stderr.strip()}
 
 
 def installed_trial(source, runtime, results, state):
