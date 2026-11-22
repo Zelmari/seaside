@@ -232,7 +232,7 @@ void Desktop::project(WindowId resize) {
     const auto *dragged =
         drag_ && drag_->started && drag_->resize ? windows_.state().window(drag_->window) : nullptr;
     auto *layer_focus = scene_.layer_keyboard_focus(focused_output_handle());
-    for (const auto id : views_) {
+    for (const auto &[id, state] : windows_.state().windows()) {
         const auto view = windows_.view(id);
         const auto output = windows_.window_output(id);
         auto geometry = view.geometry;
@@ -255,8 +255,8 @@ void Desktop::project(WindowId resize) {
             }
         }
         if (resized && view.visible &&
-            (id == resize || (view.tile_layout && windows_.state().window(id)->home_workspace ==
-                                                      resized->home_workspace)) &&
+            (id == resize ||
+             (view.tile_layout && state.home_workspace == resized->home_workspace)) &&
             (shown == presented_.end() || !same_size(geometry, shown->second))) {
             fitting_.insert(id);
         }
@@ -285,10 +285,10 @@ void Desktop::project(WindowId resize) {
                 .resizing = drag_ && drag_->started && drag_->resize && drag_->window == id,
                 .fit_resize_buffer = fitted,
                 .unconstrained_restore = choose_floating_size,
-                .interactive_resize = dragged && (drag_->window == id ||
-                                                  (fitted && view.tile_layout &&
-                                                   windows_.state().window(id)->home_workspace ==
-                                                       dragged->home_workspace)),
+                .interactive_resize =
+                    dragged &&
+                    (drag_->window == id || (fitted && view.tile_layout &&
+                                             state.home_workspace == dragged->home_workspace)),
             });
         if (view.visible) {
             presented_[id] = geometry;
@@ -317,8 +317,8 @@ void Desktop::update_keyboard_focus(wlr_surface *layer_focus, WindowId focused) 
 bool Desktop::stage_opening(WorkspaceId workspace) {
     std::map<WindowId, OpeningWindow> pending;
     bool has_previous_tile = false;
-    for (const auto candidate : views_) {
-        if (windows_.state().window(candidate)->home_workspace != workspace) {
+    for (const auto &[candidate, state] : windows_.state().windows()) {
+        if (state.home_workspace != workspace) {
             continue;
         }
         const auto tile = windows_.view(candidate);
@@ -436,7 +436,6 @@ std::uint64_t Desktop::window_event(const seaside_scene_window_event &event) {
         if (!id) {
             return 0;
         }
-        views_.insert(*id);
         if (projected_) {
             projected_();
         }
@@ -474,7 +473,6 @@ std::uint64_t Desktop::window_event(const seaside_scene_window_event &event) {
         presented_.erase(event.id);
         fitting_.erase(event.id);
         if (event.kind == SEASIDE_WINDOW_DESTROYED) {
-            views_.erase(event.id);
             windows_.destroy_window(event.id);
         } else {
             windows_.unmap_window(event.id);

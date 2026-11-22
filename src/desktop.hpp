@@ -103,7 +103,6 @@ class Desktop final {
     std::function<void(WindowId, WorkspaceId)> attention_;
     FullscreenAspect fullscreen_aspect_ = FullscreenAspect::preserve;
     std::map<wlr_output *, Output> outputs_;
-    std::set<WindowId> views_;
     std::map<WindowId, WindowRect> presented_;
     std::map<WindowId, OpeningWindow> opening_;
     std::set<WindowId> fitting_;
