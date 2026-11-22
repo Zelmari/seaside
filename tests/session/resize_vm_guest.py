@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import signal
+import socket
 import subprocess
 import tempfile
 import time
@@ -44,6 +45,24 @@ def paused(*clients):
         for child in suspended:
             if child.poll() is None:
                 child.send_signal(signal.SIGCONT)
+
+
+def ipc_request(stream, method, params=None):
+    """Read through subscribed events to the query's sequence watermark."""
+    record = {"v": 1, "id": 1, "method": method, "params": params or {}}
+    stream.write((json.dumps(record) + "\n").encode())
+    stream.flush()
+    focus_events = []
+    while True:
+        line = stream.readline(1024 * 1024 + 1)
+        require(line.endswith(b"\n"), f"Incomplete IPC record for {method}")
+        message = json.loads(line)
+        if "event" in message:
+            if message["event"] == "window.focused":
+                focus_events.append(message["data"])
+        else:
+            require(message["id"] == 1 and message["ok"], f"Invalid {method} reply: {message}")
+            return message["result"], focus_events
 
 
 def sample_row(session, origin, width):
@@ -128,9 +147,32 @@ def run_resize(session, state):
         session.wait(lambda: last_width(left_log) == width and session.window(LEFT) is not None and
                      divider(sample_row(session, (x, y), width)) == width,
                      "the settled single tile")
+        left_focus = session.ctl("focus")
+        channel = clients.enter_context(socket.socket(socket.AF_UNIX, socket.SOCK_STREAM))
+        channel.settimeout(3)
+        channel.connect(session.env["SEASIDE_SOCKET"])
+        stream = clients.enter_context(channel.makefile("rwb"))
+        reply, _ = ipc_request(stream, "events.subscribe")
+        require(reply["subscribed"], "Could not subscribe to the resize session")
         with paused(left):
             right = clients.enter_context(fixture(session, right_log, NATIVE_CLIENT, RIGHT,
                                                   GREEN.hex(), "--delay-resize=750", interactive=True))
+            # The old client is stopped. Query immediately after the new client's
+            # map, before the compositor's 90 ms fallback can present the split.
+            deadline = time.monotonic() + 3
+            early_events = []
+            while time.monotonic() < deadline:
+                windows, events = ipc_request(stream, "query.windows")
+                early_events.extend(events)
+                if any(row["mapped"] and row["title"] == RIGHT for row in windows["windows"]):
+                    break
+            else:
+                raise RuntimeError("The second tile did not map")
+            pending_focus, events = ipc_request(stream, "query.focus")
+            require(pending_focus == left_focus and not early_events and not events,
+                    f"Keyboard focus advanced before presentation: {pending_focus}, "
+                    f"events={early_events + events}")
+            state["pending_focus"] = pending_focus
             samples = []
             deadline = time.monotonic() + 0.6
             while time.monotonic() < deadline:
@@ -143,8 +185,11 @@ def run_resize(session, state):
         require(committed_sizes(right_log)[0] == (width - initial, height),
                 "The new tiled client did not receive its layout size on the first configure")
         right_window = session.window(RIGHT)
-        require(right_window and session.ctl("focus")["window_id"] == right_window["id"],
-                "The newly presented tile did not gain keyboard focus")
+        presented_focus, events = ipc_request(stream, "query.focus")
+        require(right_window and presented_focus["window_id"] == right_window["id"] and
+                events == [presented_focus],
+                f"The opening focus query and events disagreed: {presented_focus}, {events}")
+        state["presented_focus"] = presented_focus
         session.grab(output, "open-settled")
 
         span = width // 7

@@ -958,7 +958,8 @@ bool run_opening_transaction(const Fixture &fixture) {
     REQUIRE(connection.connect(third) && connection.open(third));
     REQUIRE(third.configured.tiled_edges == all_tiled_edges);
     REQUIRE(connection.attach_configured(third, blue));
-    REQUIRE(desktop.action(action(ActionKind::toggle_window_tiling)));
+    const auto opened = desktop.windows().focused_window();
+    REQUIRE(opened && desktop.dispatch(action(ActionKind::toggle_window_tiling), 0, opened));
     REQUIRE(connection.wait(third, [&] {
         return !third.configured.tiled_edges && !third.configured.width && !third.configured.height;
     }));
@@ -1113,22 +1114,36 @@ bool run_pending_opening_focus(const Fixture &fixture) {
     REQUIRE(connection.attach_configured(opening, green));
     REQUIRE(wait_tiled(connection, second, 80, 45));
 
+    const auto opening_id = desktop.windows().focused_window();
+    REQUIRE(opening_id && opening_id != second_id);
+    seat.key(KEY_C);
+    REQUIRE(desktop.dispatch(action(ActionKind::close_window)));
+    REQUIRE(connection.roundtrip(second) && connection.roundtrip(opening));
+    REQUIRE(second.keys == 1 && second.close_requested && !opening.close_requested);
+    REQUIRE(desktop.dispatch(action(ActionKind::close_window), 0, opening_id));
+    REQUIRE(connection.roundtrip(opening) && opening.close_requested);
+
     // Both keys must go to the visible client just clicked, before dispatch
     // can process a resize buffer or the opening deadline.
     seat.click(30, 45);
     seat.key(KEY_A);
     seat.click(210, 45);
     seat.key(KEY_B);
+    REQUIRE(desktop.dispatch(action(ActionKind::close_window)));
     seaside_scene_target shown{};
     REQUIRE(fixture.scene.window_at(110, 70, shown) && shown.id == second_id);
     REQUIRE(connection.roundtrip(first) && connection.roundtrip(second) &&
             connection.roundtrip(remote));
-    REQUIRE(first.keys == 1 && second.keys == 0 && remote.keys == 1);
+    REQUIRE(first.keys == 1 && second.keys == 1 && remote.keys == 1 && remote.close_requested);
     REQUIRE(remote.keyboard_surface == remote.surface);
 
     REQUIRE(connection.attach_configured(second, blue));
     REQUIRE(wait_pixel(connection, opening, left.get(), 110, 70, green));
     REQUIRE(desktop.windows().focused_window() == remote_id);
+    remote.destroy_window();
+    REQUIRE(connection.roundtrip(remote));
+    const auto empty_focus = desktop.dispatch(action(ActionKind::close_window));
+    REQUIRE(!empty_focus && empty_focus.error() == seaside::DesktopActionError::no_target);
     desktop.remove_output(part3_output_handle(right.get()));
     desktop.remove_output(part3_output_handle(left.get()));
     return true;

@@ -38,7 +38,7 @@ class Desktop final {
     wlr_output *focused_output_handle() const noexcept;
     WindowRect output_bounds(wlr_output *output) const noexcept;
     bool has_fullscreen(wlr_output *output) const noexcept;
-    bool layer_has_keyboard_focus() const noexcept { return layer_has_focus_; }
+    std::optional<WindowId> keyboard_window() const noexcept { return keyboard_window_; }
     bool action(const Action &action, std::uint8_t modifiers = 0) noexcept;
     std::expected<bool, DesktopActionError>
     dispatch(const Action &action, std::uint8_t modifiers = 0, std::optional<WindowId> window = {},
@@ -114,7 +114,7 @@ class Desktop final {
     std::uint8_t cycle_modifiers_ = 0;
     bool frame_paced_resize_ = false;
     bool failed_ = false;
-    bool layer_has_focus_ = false;
+    std::optional<WindowId> keyboard_window_;
 };
 
 } // namespace seaside

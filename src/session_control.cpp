@@ -194,8 +194,8 @@ IpcJson SessionControl::FocusState::json() const {
 
 SessionControl::FocusState SessionControl::focus_state() const {
     const auto &desktop = desktop_.windows();
-    return {desktop_.layer_has_keyboard_focus() ? std::nullopt : desktop.focused_window(),
-            desktop.focused_workspace(), std::optional<OutputId>(desktop.focused_output())};
+    return {desktop_.keyboard_window(), desktop.focused_workspace(),
+            std::optional<OutputId>(desktop.focused_output())};
 }
 
 IpcJson SessionControl::focus() const {

@@ -307,10 +307,10 @@ void Desktop::project(WindowId resize) {
 }
 
 void Desktop::update_keyboard_focus(wlr_surface *layer_focus, WindowId focused) noexcept {
-    layer_has_focus_ = layer_focus != nullptr;
+    auto *surface = layer_focus ? layer_focus : scene_.window_surface(focused);
+    keyboard_window_ = surface && !layer_focus ? std::optional{focused} : std::nullopt;
     if (input_) {
-        seaside_tty_input_set_focus(input_,
-                                    layer_focus ? layer_focus : scene_.window_surface(focused));
+        seaside_tty_input_set_focus(input_, surface);
     }
 }
 
@@ -512,7 +512,7 @@ std::uint64_t Desktop::window_event(const seaside_scene_window_event &event) {
         break;
     case SEASIDE_WINDOW_ATTENTION_REQUESTED:
         if (const auto *window = windows_.state().window(event.id);
-            attention_ && window && window->mapped && windows_.focused_window() != event.id) {
+            attention_ && window && window->mapped && keyboard_window_ != event.id) {
             attention_(event.id, window->home_workspace);
         }
         return 0;
@@ -534,7 +534,7 @@ std::uint64_t Desktop::window_event(const seaside_scene_window_event &event) {
 }
 
 bool Desktop::begin_client_drag(const seaside_scene_window_event &event) {
-    if (drag_ || !pointer_ || windows_.focused_window() != event.id || layer_has_focus_) {
+    if (drag_ || !pointer_ || keyboard_window_ != event.id) {
         return false;
     }
     const auto view = windows_.view(event.id);
@@ -608,7 +608,7 @@ Desktop::dispatch(const Action &action, std::uint8_t modifiers, std::optional<Wi
                   std::optional<WorkspaceId> workspace) noexcept try {
     using Error = DesktopActionError;
     const auto focused = windows_.focused_window();
-    const auto id = target.value_or(layer_has_focus_ ? 0 : focused.value_or(0));
+    const auto id = target.value_or(keyboard_window_.value_or(0));
     const auto before = windows_.view(id);
     const auto current_workspace = windows_.focused_workspace();
     const auto *entry = windows_.state().window(id);
