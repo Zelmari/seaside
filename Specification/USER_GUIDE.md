@@ -9,8 +9,9 @@ currently tested environments.
 Use an up-to-date x86-64 Arch Linux system with a normal local login managed
 by systemd and a graphics driver that exposes a working hardware cursor plane
 for your output. The package uses Arch's PipeWire audio stack, desktop portal
-services, and `foot`. The package manager resolves the declared runtime
-dependencies.
+services, and `foot`. The package manager resolves the runtime dependencies,
+including polkit for logind VT switching and RealtimeKit for PipeWire's audio
+and capture scheduling.
 
 ### Install a supplied package
 

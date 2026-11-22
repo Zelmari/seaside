@@ -10,7 +10,7 @@ depends=(
   'bash' 'cairo' 'foot' 'glib2' 'glibc' 'libdrm' 'libgcc' 'libinput'
   'libjpeg-turbo' 'libpipewire' 'libpng' 'libstdc++' 'libwebp' 'libxau'
   'libxkbcommon' 'mesa' 'pango' 'pipewire' 'pipewire-audio' 'pipewire-pulse'
-  'pixman' 'polkit' 'systemd' 'systemd-libs' 'tomlplusplus>=3.4.0' 'tomlplusplus<3.5.0'
+  'pixman' 'polkit' 'rtkit' 'systemd' 'systemd-libs' 'tomlplusplus>=3.4.0' 'tomlplusplus<3.5.0'
   'ttf-dejavu' 'wayland' 'wireplumber' 'wlroots0.20>=0.20.2' 'wlroots0.20<0.21.0'
   'wofi' 'xdg-desktop-portal' 'xdg-desktop-portal-gtk' 'xdg-desktop-portal-wlr>=0.8.4'
   'xorg-xwayland' 'xwayland-satellite'
