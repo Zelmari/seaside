@@ -601,9 +601,9 @@ std::expected<bool, DesktopActionError>
 Desktop::dispatch(const Action &action, std::uint8_t modifiers, std::optional<WindowId> target,
                   std::optional<WorkspaceId> workspace) noexcept try {
     using Error = DesktopActionError;
-    const auto id = target.value_or(windows_.focused_window().value_or(0));
-    const auto before = windows_.view(id);
     const auto focused = windows_.focused_window();
+    const auto id = target.value_or(layer_has_focus_ ? 0 : focused.value_or(0));
+    const auto before = windows_.view(id);
     const auto current_workspace = windows_.focused_workspace();
     const auto *entry = windows_.state().window(id);
     auto require_window = [&]() -> std::expected<void, Error> {

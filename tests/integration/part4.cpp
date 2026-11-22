@@ -1216,6 +1216,11 @@ bool run_layer_shell(const Fixture &fixture) {
     REQUIRE(scene.window_at(16, 17, popup_hit) && popup_hit.id == 0 && popup_hit.sx == 3 &&
             popup_hit.sy == 3 && scene.visible_output(popup_hit.surface) == first);
     seat.key(KEY_F8);
+    REQUIRE(connection.roundtrip(client) && seat.shortcuts == 1 && client.keys == 1 &&
+            !client.configured.fullscreen && !popup.dismissed);
+
+    const auto fullscreen = desktop.dispatch(action(ActionKind::toggle_window_fullscreen), 0, id);
+    REQUIRE(fullscreen && *fullscreen);
     REQUIRE(
         connection.wait(client, [&] { return popup.dismissed && client.configured.fullscreen; }));
     REQUIRE(seat.shortcuts == 1 && client.keys == 1 && client.keyboard_surface == client.surface &&
@@ -1232,6 +1237,16 @@ bool run_layer_shell(const Fixture &fixture) {
     REQUIRE(map_layer(connection, client, overlay, 40, 10, blue));
     REQUIRE(connection.wait(client, [&] { return client.keyboard_surface == overlay.surface; }));
     REQUIRE(wait_pixel(connection, client, primary.get(), 80, 5, blue));
+
+    const auto close = action(ActionKind::close_window);
+    const auto implicit = desktop.dispatch(close);
+    REQUIRE(!implicit && implicit.error() == seaside::DesktopActionError::no_target);
+    REQUIRE(connection.roundtrip(client) && !client.close_requested);
+    const auto explicit_target = desktop.dispatch(close, 0, id);
+    REQUIRE(explicit_target && !*explicit_target);
+    REQUIRE(connection.wait(client, [&] { return client.close_requested; }));
+    REQUIRE(client.keyboard_surface == overlay.surface);
+
     overlay.destroy();
     REQUIRE(connection.wait(client, [&] { return client.keyboard_surface == client.surface; }));
 
@@ -1251,7 +1266,9 @@ bool run_layer_shell(const Fixture &fixture) {
                               client.button_serial);
     const auto *server_seat = seaside_tty_input_get_seat(seat.input.get());
     REQUIRE(connection.wait(client, [&] { return part3_seat_has_drag(server_seat); }));
-    seat.key(KEY_F8);
+    const auto fullscreen_during_drag =
+        desktop.dispatch(action(ActionKind::toggle_window_fullscreen), 0, id);
+    REQUIRE(fullscreen_during_drag && *fullscreen_during_drag);
     REQUIRE(connection.wait(client, [&] { return client.configured.fullscreen; }));
     REQUIRE(!part3_seat_has_drag(server_seat));
     part3_input_button(seat.devices.get(), BTN_LEFT, false);
