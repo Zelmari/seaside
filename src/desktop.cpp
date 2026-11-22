@@ -314,12 +314,7 @@ void Desktop::update_keyboard_focus(wlr_surface *layer_focus, WindowId focused) 
     }
 }
 
-bool Desktop::stage_opening(WindowId id) {
-    const auto view = windows_.view(id);
-    if (!view.visible || !view.tile_layout || !valid_size(view.geometry)) {
-        return false;
-    }
-    const auto workspace = windows_.state().window(id)->home_workspace;
+bool Desktop::stage_opening(WorkspaceId workspace) {
     std::map<WindowId, OpeningWindow> pending;
     bool has_previous_tile = false;
     for (const auto candidate : views_) {
@@ -346,7 +341,18 @@ bool Desktop::stage_opening(WindowId id) {
                                                              candidate, to_scene(tile.geometry))});
         }
     }
-    if (pending.empty() || !has_previous_tile) {
+    if (!has_previous_tile) {
+        pending.clear();
+    }
+    // A full projection publishes every output together. Keep the exact
+    // configure serials from other workspaces under the original deadline.
+    for (const auto &[other, target] : opening_) {
+        const auto *window = windows_.state().window(other);
+        if (window && window->mapped && window->home_workspace != workspace) {
+            pending.emplace(other, target);
+        }
+    }
+    if (pending.empty()) {
         return false;
     }
     if (!opening_deadline_) {
@@ -361,7 +367,7 @@ bool Desktop::stage_opening(WindowId id) {
         return false;
     }
     opening_ = std::move(pending);
-    return true;
+    return !opening_ready();
 }
 
 bool Desktop::opening_ready() const {
@@ -445,28 +451,50 @@ std::uint64_t Desktop::window_event(const seaside_scene_window_event &event) {
             project();
         }
         return 0;
-    case SEASIDE_WINDOW_MAPPED:
+    case SEASIDE_WINDOW_MAPPED: {
         update_size_limits(event.id);
         windows_.map_window(event.id, from_scene(event.geometry), event.ordinary_commit);
-        if (stage_opening(event.id)) {
+        const auto view = windows_.view(event.id);
+        if (view.visible && view.tile_layout && valid_size(view.geometry) &&
+            stage_opening(windows_.state().window(event.id)->home_workspace)) {
             return 0;
         }
         break;
+    }
     case SEASIDE_WINDOW_UNMAPPED:
+    case SEASIDE_WINDOW_DESTROYED: {
+        const auto *window = windows_.state().window(event.id);
+        if (!window) {
+            return 0;
+        }
+        const auto workspace = window->home_workspace;
         if (drag_ && drag_->window == event.id) {
             discard_drag();
         }
-        windows_.unmap_window(event.id);
-        break;
-    case SEASIDE_WINDOW_DESTROYED:
-        if (drag_ && drag_->window == event.id) {
-            discard_drag();
-        }
-        views_.erase(event.id);
         presented_.erase(event.id);
         fitting_.erase(event.id);
-        windows_.destroy_window(event.id);
+        if (event.kind == SEASIDE_WINDOW_DESTROYED) {
+            views_.erase(event.id);
+            windows_.destroy_window(event.id);
+        } else {
+            windows_.unmap_window(event.id);
+        }
+        if (!opening_.empty() && stage_opening(workspace)) {
+            if (keyboard_window_ == event.id) {
+                const auto selected = windows_.focused_window().value_or(0);
+                update_keyboard_focus(scene_.layer_keyboard_focus(focused_output_handle()),
+                                      presented_.contains(selected) ? selected : 0);
+            }
+            if (input_) {
+                seaside_tty_input_refresh_pointer(input_);
+            }
+            if (projected_) {
+                projected_();
+            }
+            return 0;
+        }
         break;
+    }
     case SEASIDE_WINDOW_COMMITTED: {
         const bool limits_changed = update_size_limits(event.id);
         const auto current = windows_.view(event.id);

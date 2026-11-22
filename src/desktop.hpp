@@ -85,7 +85,7 @@ class Desktop final {
     std::uint64_t window_event(const seaside_scene_window_event &event);
     void project(WindowId resize = 0);
     void update_keyboard_focus(wlr_surface *layer_focus, WindowId focused) noexcept;
-    bool stage_opening(WindowId id);
+    bool stage_opening(WorkspaceId workspace);
     bool opening_ready() const;
     void project_if_opening_ready();
     void apply_drag_motion(double x, double y);

@@ -1193,6 +1193,68 @@ bool run_pending_opening_focus(const Fixture &fixture) {
     return true;
 }
 
+enum class OpeningFinish { right_first, left_first, close_right, close_focused, timeout };
+
+template <OpeningFinish finish> bool run_overlapping_openings(const Fixture &fixture) {
+    auto &desktop = fixture.desktop;
+    auto left = fixture.output();
+    auto right = fixture.output();
+    REQUIRE(left && right);
+    REQUIRE(desktop.add_output(part3_output_handle(left.get()), "left", "", output_bounds));
+    REQUIRE(desktop.add_output(part3_output_handle(right.get()), "right", "", {160, 0, 160, 90}));
+    Connection connection(fixture.display);
+    Client a, b, c, d;
+    WindowId left_old{}, right_old{};
+    desktop.button(0, BTN_LEFT, true, 0, 210, 45);
+    REQUIRE(map_tiled(fixture, connection, b, right_old, 160, 90, 0, blue));
+    desktop.button(0, BTN_LEFT, true, 0, 30, 45);
+    REQUIRE(map_tiled(fixture, connection, a, left_old, 160, 90, 0, red));
+    REQUIRE(connection.connect(c) && connection.connect(d));
+    REQUIRE(connection.open(c) && connection.attach_configured(c, green));
+    const auto left_new = desktop.windows().focused_window();
+    REQUIRE(left_new && left_new != left_old && wait_tiled(connection, a, 80, 90));
+    desktop.button(right_old, BTN_LEFT, true, 0, 210, 45);
+    REQUIRE(connection.open(d) && connection.attach_configured(d, green));
+    const auto right_new = desktop.windows().focused_window();
+    REQUIRE(right_new && right_new != right_old && wait_tiled(connection, b, 80, 90));
+    auto target = [&](int x) {
+        seaside_scene_target shown{};
+        return fixture.scene.window_at(x, 45, shown) ? shown.id : 0;
+    };
+    REQUIRE(target(110) == left_old && target(270) == right_old);
+    if constexpr (finish == OpeningFinish::timeout) {
+        REQUIRE(connection.wait(c, [&] { return target(110) == *left_new; }));
+    } else if constexpr (finish == OpeningFinish::close_right) {
+        // Removing the second opening changes the right layout again. The
+        // surviving left participant still owns its outstanding configure.
+        d.destroy_window();
+        REQUIRE(connection.roundtrip(d));
+        REQUIRE(target(110) == left_old && target(270) == right_old);
+        REQUIRE(connection.attach_configured(a, red));
+    } else if constexpr (finish == OpeningFinish::close_focused) {
+        REQUIRE(desktop.keyboard_window() == right_old);
+        b.destroy_window();
+        REQUIRE(connection.roundtrip(b));
+        REQUIRE(!desktop.keyboard_window() && target(110) == left_old);
+        REQUIRE(connection.attach_configured(a, red));
+        REQUIRE(desktop.keyboard_window() == right_new);
+    } else {
+        const bool right_first = finish == OpeningFinish::right_first;
+        REQUIRE(connection.attach_configured(right_first ? b : a, right_first ? blue : red));
+        REQUIRE(target(110) == left_old && target(270) == right_old);
+        REQUIRE(connection.attach_configured(right_first ? a : b, right_first ? red : blue));
+    }
+    REQUIRE(target(110) == *left_new);
+    REQUIRE(target(270) == (finish == OpeningFinish::close_right ? right_old : *right_new));
+    REQUIRE(wait_pixel(connection, c, left.get(), 110, 45, green));
+    REQUIRE(wait_pixel(connection, b, right.get(), 110, 45,
+                       finish == OpeningFinish::close_right ? blue : green));
+    desktop.remove_output(part3_output_handle(right.get()));
+    desktop.remove_output(part3_output_handle(left.get()));
+    REQUIRE(!desktop.failed() && !fixture.scene.snapshot().failed);
+    return true;
+}
+
 bool run_client_gestures(const Fixture &fixture) {
     auto &desktop = fixture.desktop;
     auto output = fixture.output();
@@ -1908,7 +1970,16 @@ int main(int argc, char **argv) {
         return run_fixture(config, run_dwindle) &&
                        run_fixture(transaction, run_opening_transaction) &&
                        run_fixture(transaction, run_workspace_during_opening) &&
-                       run_fixture(transaction, run_pending_opening_focus)
+                       run_fixture(transaction, run_pending_opening_focus) &&
+                       run_fixture(transaction,
+                                   run_overlapping_openings<OpeningFinish::right_first>) &&
+                       run_fixture(transaction,
+                                   run_overlapping_openings<OpeningFinish::left_first>) &&
+                       run_fixture(transaction,
+                                   run_overlapping_openings<OpeningFinish::close_right>) &&
+                       run_fixture(transaction,
+                                   run_overlapping_openings<OpeningFinish::close_focused>) &&
+                       run_fixture(transaction, run_overlapping_openings<OpeningFinish::timeout>)
                    ? EXIT_SUCCESS
                    : EXIT_FAILURE;
     }
