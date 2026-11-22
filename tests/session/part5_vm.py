@@ -94,7 +94,7 @@ def load_runner():
 
 
 def run(args, revision, bundle, *, scenario="part5", captures=None, send_input=route,
-        settings="", scenario_source=None):
+        settings="", scenario_source=None, downloads=None):
     runner = load_runner()
     if captures is None:
         captures = CAPTURES | {"dwindle.log", "scrolling.log"}
@@ -106,6 +106,7 @@ def run(args, revision, bundle, *, scenario="part5", captures=None, send_input=r
               f"exec(compile({standard_worker!r}, 'guest_trial.py', 'exec'), standard)\n"
               + settings + scenario_source).encode()
     parent = runner.RunBridge
+    files = {"worker": worker, "bundle": bundle, **(downloads or {})}
 
     class ScenarioBridge(parent):
         def __init__(self, directory, token):
@@ -132,10 +133,9 @@ def run(args, revision, bundle, *, scenario="part5", captures=None, send_input=r
 
             class BundleHandler(handler):
                 def do_GET(self):
-                    if self.path == prefix + "worker":
-                        self.send_bytes(worker)
-                    elif self.path == prefix + "bundle":
-                        self.send_bytes(bundle)
+                    name = self.path.removeprefix(prefix)
+                    if self.path.startswith(prefix) and name in files:
+                        self.send_bytes(files[name])
                     else:
                         super().do_GET()
 
