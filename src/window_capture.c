@@ -299,10 +299,12 @@ static void draw_surface(struct wlr_surface *surface, int x, int y, void *data) 
     if (!texture || x2 <= x1 || y2 <= y1) {
         return;
     }
-    // Round shared edges once so adjacent surfaces meet on the capture grid.
-    const int dx = (int)lround(x1 * render->scale_x), dy = (int)lround(y1 * render->scale_y);
-    const struct wlr_box destination = {dx, dy, (int)lround(x2 * render->scale_x) - dx,
-                                        (int)lround(y2 * render->scale_y) - dy};
+    // The clipped coordinates fit the bounded window geometry. Round shared
+    // edges once so adjacent surfaces meet on the capture grid.
+    const int dx = (int)lround((double)x1 * render->scale_x),
+              dy = (int)lround((double)y1 * render->scale_y);
+    const struct wlr_box destination = {dx, dy, (int)lround((double)x2 * render->scale_x) - dx,
+                                        (int)lround((double)y2 * render->scale_y) - dy};
     struct wlr_fbox source;
     wlr_surface_get_buffer_source_box(surface, &source);
     const enum wl_output_transform transform = surface->current.transform;
