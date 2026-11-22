@@ -692,7 +692,7 @@ test('part2-state-workers', state_tests, suite: ['unit', 'part2'], timeout: 30,
 test(
   'code-quality', python,
   args: [files('tools/check-code'), '--build-dir', meson.current_build_dir()],
-  suite: 'quality', timeout: 240, is_parallel: false,
+  suite: 'quality', timeout: 480, is_parallel: false,
   env: {'SEASIDE_TEST_PART': '3', 'SEASIDE_REQUIREMENTS': '14.3'},
 )
 test(

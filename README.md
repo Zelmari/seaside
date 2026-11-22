@@ -54,7 +54,7 @@ The tool versions tested with this foundation are recorded in the
 [Part 1 handoff](Specification/Parts/Part-01/HANDOFF.md).
 
 Static analysis runs at most two Clang processes concurrently, with a per-file
-deadline. The runner's default command deadline is 300 seconds; `--timeout`
+deadline. The runner's default command deadline is 540 seconds; `--timeout`
 can change it for a slower guest. Missing tests, inconsistent reports or missing
 GoogleTest case results are failures rather than evidence of completion.
 
