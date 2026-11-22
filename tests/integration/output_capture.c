@@ -408,6 +408,15 @@ static bool add_output(struct fixture *fixture) {
     return true;
 }
 
+static bool set_output_power(struct wlr_output *output, bool enabled) {
+    struct wlr_output_state state;
+    wlr_output_state_init(&state);
+    wlr_output_state_set_enabled(&state, enabled);
+    bool committed = wlr_output_commit_state(output, &state);
+    wlr_output_state_finish(&state);
+    return committed;
+}
+
 static void remove_output(struct fixture *fixture) {
     if (fixture->output) {
         wl_list_remove(&fixture->output_frame.link);
@@ -645,6 +654,18 @@ static bool check_two_outputs(struct fixture *fixture) {
     CHECK(request_capture(&first_frames) && request_capture(&second_frames));
     CHECK(pump_until(fixture, &first_frames.ready) && plain_frame(&first_frames, BACKGROUND_RGB));
     CHECK(pump_until(fixture, &second_frames.ready) && plain_frame(&second_frames, SECOND_RGB));
+    // A frame requested while asleep resumes on the same source after wake.
+    CHECK(set_output_power(second.output, false) && sync_client(fixture));
+    CHECK(!second_frames.stopped && request_capture(&second_frames));
+    CHECK(request_capture(&first_frames) && pump_until(fixture, &first_frames.ready) &&
+          plain_frame(&first_frames, BACKGROUND_RGB));
+    CHECK(!second_frames.ready && !second_frames.failed);
+    CHECK(set_output_power(second.output, true));
+    wlr_output_schedule_frame(second.output);
+    CHECK(pump_until(fixture, &second_frames.ready) && !second_frames.failed);
+    second.blue_output = false;
+    CHECK(request_capture(&second_frames));
+    CHECK(pump_until(fixture, &second_frames.ready) && plain_frame(&second_frames, BACKGROUND_RGB));
     remove_output(&second);
     CHECK(pump_until(fixture, &second_frames.stopped) && !first_frames.stopped);
     CHECK(request_capture(&first_frames) && pump_until(fixture, &first_frames.ready) &&

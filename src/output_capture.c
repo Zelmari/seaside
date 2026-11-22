@@ -251,11 +251,9 @@ static void on_output_commit(struct wl_listener *listener, void *data) {
     if (!capture->output->enabled) {
         release_pending(capture);
         release_composite(capture);
-        if (capture->constraints_ready) {
-            wlr_ext_image_capture_source_v1_finish(&capture->source);
-            wlr_ext_image_capture_source_v1_init(&capture->source, &capture_impl);
-            capture->constraints_ready = false;
-        }
+        // DPMS leaves the logical output and its capture sessions alive. Release
+        // transient buffers and refresh the advertised constraints on wake.
+        capture->constraints_ready = false;
         return;
     }
     if (event->state->committed &
