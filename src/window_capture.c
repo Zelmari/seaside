@@ -5,6 +5,7 @@
 #include <drm.h>
 #include <drm_fourcc.h>
 #include <glib.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -239,12 +240,26 @@ static bool update_constraints(struct seaside_window_source *target) {
     if (!valid_geometry(box)) {
         return false;
     }
-    if (target->swapchain && target->swapchain->width == box->width &&
-        target->swapchain->height == box->height) {
+    struct wlr_surface *root = target->toplevel->base->surface;
+    if (root->current.width <= 0 || root->current.height <= 0) {
+        return false;
+    }
+    struct wlr_fbox pixels;
+    wlr_surface_get_buffer_source_box(root, &pixels);
+    wlr_fbox_transform(&pixels, &pixels, root->current.transform, root->current.buffer_width,
+                       root->current.buffer_height);
+    // Window geometry is logical. Preserve its aspect ratio and the root
+    // buffer's detail, including fractional viewport crops and rotated buffers.
+    double density = fmax(pixels.width / root->current.width, pixels.height / root->current.height);
+    density = fmin(fmax(1, density), 8192.0 / fmax(box->width, box->height));
+    const int width = (int)lround(box->width * density);
+    const int height = (int)lround(box->height * density);
+    if (target->swapchain && target->swapchain->width == width &&
+        target->swapchain->height == height) {
         return true;
     }
-    struct wlr_swapchain *next = wlr_swapchain_create(target->owner->allocator, box->width,
-                                                      box->height, target->owner->format);
+    struct wlr_swapchain *next =
+        wlr_swapchain_create(target->owner->allocator, width, height, target->owner->format);
     if (!next) {
         return false;
     }
@@ -264,6 +279,7 @@ struct render_window {
     struct wlr_render_pass *pass;
     struct wlr_box geometry;
     struct seaside_window_source *target;
+    double scale_x, scale_y;
     bool failed;
 };
 
@@ -283,7 +299,10 @@ static void draw_surface(struct wlr_surface *surface, int x, int y, void *data) 
     if (!texture || x2 <= x1 || y2 <= y1) {
         return;
     }
-    const struct wlr_box destination = {(int)x1, (int)y1, (int)(x2 - x1), (int)(y2 - y1)};
+    // Round shared edges once so adjacent surfaces meet on the capture grid.
+    const int dx = (int)lround(x1 * render->scale_x), dy = (int)lround(y1 * render->scale_y);
+    const struct wlr_box destination = {dx, dy, (int)lround(x2 * render->scale_x) - dx,
+                                        (int)lround(y2 * render->scale_y) - dy};
     struct wlr_fbox source;
     wlr_surface_get_buffer_source_box(surface, &source);
     const enum wl_output_transform transform = surface->current.transform;
@@ -297,8 +316,8 @@ static void draw_surface(struct wlr_surface *surface, int x, int y, void *data) 
         wlr_output_transform_coords(transform, &buffer_width, &buffer_height);
         source.x += (double)(x1 - left) * source.width / width;
         source.y += (double)(y1 - top) * source.height / height;
-        source.width *= (double)destination.width / width;
-        source.height *= (double)destination.height / height;
+        source.width *= (double)(x2 - x1) / width;
+        source.height *= (double)(y2 - y1) / height;
         wlr_fbox_transform(&source, &source, wlr_output_transform_invert(transform), buffer_width,
                            buffer_height);
     }
@@ -386,7 +405,13 @@ static bool emit_frame(struct seaside_window_source *target, struct timespec whe
                                            .color = {0, 0, 0, 1},
                                            .blend_mode = WLR_RENDER_BLEND_MODE_NONE,
                                        });
-        struct render_window render = {.pass = pass, .geometry = geometry, .target = target};
+        struct render_window render = {
+            .pass = pass,
+            .geometry = geometry,
+            .target = target,
+            .scale_x = (double)buffer->width / geometry.width,
+            .scale_y = (double)buffer->height / geometry.height,
+        };
         wlr_xdg_surface_for_each_surface(target->toplevel->base, draw_surface, &render);
         rendered = wlr_render_pass_submit(pass) && !render.failed;
         if (rendered && explicit_sync) {
@@ -519,8 +544,15 @@ static bool paint_cursor(struct seaside_window_source *target, struct window_fra
     if (frame->with_cursor) {
         return true;
     }
+    const struct wlr_box geometry = target->toplevel->base->geometry;
+    if (geometry.width <= 0 || geometry.height <= 0) {
+        return false;
+    }
     struct wlr_render_texture_options cursor;
-    target->cursor_painted = target->presented && target->cursor(target->cursor_data, &cursor);
+    target->cursor_painted =
+        target->presented &&
+        target->cursor(target->cursor_data, (double)frame->buffer->width / geometry.width,
+                       (double)frame->buffer->height / geometry.height, &cursor);
     if (!target->cursor_painted) {
         return true;
     }
@@ -808,7 +840,7 @@ void seaside_window_capture_cursor_changed(struct seaside_window_capture *captur
         wl_list_for_each(target, &capture->painting, painted_link) {
             struct wlr_render_texture_options cursor;
             if (target->cursor_painted ||
-                (target->presented && target->cursor(target->cursor_data, &cursor))) {
+                (target->presented && target->cursor(target->cursor_data, 1.0, 1.0, &cursor))) {
                 target->damaged = true;
                 schedule(target);
             }

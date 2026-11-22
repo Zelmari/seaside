@@ -633,7 +633,8 @@ static void end_focus(struct seaside_scene_bridge *scene, bool deactivate) {
     scene->focus(scene->focus_data, NULL);
 }
 
-static bool capture_window_cursor(void *data, struct wlr_render_texture_options *texture) {
+static bool capture_window_cursor(void *data, double pixel_scale_x, double pixel_scale_y,
+                                  struct wlr_render_texture_options *texture) {
     struct scene_view *view = data;
     struct seaside_scene_bridge *scene = view->owner;
     struct seaside_scene_target hit = {0};
@@ -661,9 +662,10 @@ static bool capture_window_cursor(void *data, struct wlr_render_texture_options 
         *texture = (struct wlr_render_texture_options){
             .texture = cursor->texture,
             .src_box = cursor->src_box,
-            .dst_box = {clamp_rounded_coordinate(floor(x)), clamp_rounded_coordinate(floor(y)),
-                        clamp_rounded_coordinate(ceil(cursor->width / scale_x)),
-                        clamp_rounded_coordinate(ceil(cursor->height / scale_y))},
+            .dst_box = {clamp_rounded_coordinate(floor(x * pixel_scale_x)),
+                        clamp_rounded_coordinate(floor(y * pixel_scale_y)),
+                        clamp_rounded_coordinate(ceil(cursor->width * pixel_scale_x / scale_x)),
+                        clamp_rounded_coordinate(ceil(cursor->height * pixel_scale_y / scale_y))},
             .transform = wlr_output_transform_invert(cursor->transform),
         };
         return true;

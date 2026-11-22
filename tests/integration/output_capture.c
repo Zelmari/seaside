@@ -1027,6 +1027,31 @@ static bool check_selected_window(struct fixture *fixture) {
     CHECK(pump_until(fixture, &window.ready) && plain_frame(&window, selected_rgb) &&
           fixture->output->hardware_cursor == fixture->cursor &&
           fixture->output->software_cursor_locks == 0);
+    // A rotated 2x buffer has a color boundary halfway through a logical pixel.
+    // The selected source and embedded cursor both use the advertised pixel grid.
+    wl_surface_set_buffer_scale(selected.surface, 2);
+    wl_surface_set_buffer_transform(selected.surface, WL_OUTPUT_TRANSFORM_90);
+    window.constrained = painted.constrained = false;
+    CHECK(paint_pattern(fixture, selected.surface, 30, 42, 0, true));
+    CHECK(pump_until(fixture, &window.constrained) && pump_until(fixture, &painted.constrained));
+    CHECK(window.width == 42 && window.height == 30 && painted.width == 42 && painted.height == 30);
+    release_buffer(&window);
+    release_buffer(&painted);
+    CHECK(create_buffer(fixture, &window) && create_buffer(fixture, &painted));
+    CHECK(request_capture(&window) && request_capture(&painted) &&
+          pump_until(fixture, &window.ready) && pump_until(fixture, &painted.ready));
+    CHECK((window.pixels[20] & 0xffffff) == SECOND_RGB &&
+          (window.pixels[21] & 0xffffff) == CURSOR_RGB &&
+          (painted.pixels[12 * painted.width + 12] & 0xffffff) == CURSOR_RGB &&
+          (painted.pixels[11 * painted.width + 11] & 0xffffff) == SECOND_RGB);
+    wl_surface_set_buffer_transform(selected.surface, WL_OUTPUT_TRANSFORM_NORMAL);
+    wl_surface_set_buffer_scale(selected.surface, 1);
+    window.constrained = false;
+    CHECK(paint(fixture, selected.surface, 20, 14, selected_rgb) &&
+          pump_until(fixture, &window.constrained) && window.width == 20 && window.height == 14);
+    release_buffer(&window);
+    CHECK(create_buffer(fixture, &window) && request_capture(&window) &&
+          pump_until(fixture, &window.ready) && plain_frame(&window, selected_rgb));
     finish_session(&painted);
     CHECK(sync_client(fixture));
 

@@ -13,7 +13,8 @@ struct wlr_xdg_toplevel;
 struct seaside_window_capture;
 struct seaside_window_source;
 
-typedef bool (*seaside_window_cursor_fn)(void *data, struct wlr_render_texture_options *cursor);
+typedef bool (*seaside_window_cursor_fn)(void *data, double pixel_scale_x, double pixel_scale_y,
+                                         struct wlr_render_texture_options *cursor);
 
 /* All calls belong to the display thread. Destroy sources before the manager
  * and tear the manager down before the borrowed display and renderer. */
