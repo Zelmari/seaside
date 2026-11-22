@@ -1966,6 +1966,7 @@ void seaside_scene_place_window(struct seaside_scene_bridge *scene, uint64_t id,
     if (toplevel->scheduled.activated != placement->activated) {
         wlr_xdg_toplevel_set_activated(toplevel, placement->activated);
     }
+    const bool was_configured_tiled = toplevel->scheduled.tiled != 0;
     const uint32_t tiled =
         placement->tiled ? WLR_EDGE_TOP | WLR_EDGE_BOTTOM | WLR_EDGE_LEFT | WLR_EDGE_RIGHT : 0;
     if (toplevel->scheduled.tiled != tiled) {
@@ -1976,7 +1977,10 @@ void seaside_scene_place_window(struct seaside_scene_bridge *scene, uint64_t id,
     }
     const bool managed = maximized || placement->fullscreen || placement->tiled;
     const bool restoring =
-        !managed && (previous.maximized || previous.fullscreen || previous.tiled);
+        !managed &&
+        (previous.maximized || previous.fullscreen || previous.tiled || was_configured_tiled ||
+         (placement->unconstrained_restore &&
+          (toplevel->scheduled.width || toplevel->scheduled.height)));
     const struct wlr_box content = toplevel->base->geometry;
     const bool unchanged_floating_grab = !managed && !previous.interactive_resize &&
                                          placement->interactive_resize &&

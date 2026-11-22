@@ -668,6 +668,7 @@ struct painted_window {
     struct wl_surface *surface;
     struct xdg_surface *xdg;
     struct xdg_toplevel *toplevel;
+    int32_t width, height;
     bool configured;
 };
 
@@ -680,11 +681,11 @@ static const struct xdg_surface_listener xdg_listener = {.configure = xdg_config
 
 static void top_configure(void *data, struct xdg_toplevel *toplevel, int32_t width, int32_t height,
                           struct wl_array *states) {
-    (void)data;
     (void)toplevel;
-    (void)width;
-    (void)height;
     (void)states;
+    struct painted_window *window = data;
+    window->width = width;
+    window->height = height;
 }
 
 static const struct xdg_toplevel_listener top_listener = {.configure = top_configure};
@@ -1017,8 +1018,20 @@ static bool check_selected_window(struct fixture *fixture) {
         .tiled = true,
         .fit_resize_buffer = true,
     };
+    selected.configured = false;
+    CHECK(seaside_scene_configure_tiled_window(scene, 1, resize.geometry));
+    CHECK(pump_until(fixture, &selected.configured) && selected.width == 31 &&
+          selected.height == 23);
+    struct seaside_scene_window_placement floating = resize;
+    floating.tiled = false;
+    floating.unconstrained_restore = true;
+    selected.configured = false;
+    seaside_scene_place_window(scene, 1, &floating);
+    CHECK(pump_until(fixture, &selected.configured) && selected.width == 0 && selected.height == 0);
+
+    selected.configured = false;
     const uint32_t resize_serial = seaside_scene_configure_tiled_window(scene, 1, resize.geometry);
-    CHECK(resize_serial && sync_client(fixture));
+    CHECK(resize_serial && pump_until(fixture, &selected.configured));
     CHECK(seaside_scene_configure_tiled_window(scene, 1, resize.geometry) == resize_serial);
     const struct seaside_scene_rect source = seaside_scene_window_content_geometry(scene, 1);
     CHECK(source.width == 20 && source.height == 14);
