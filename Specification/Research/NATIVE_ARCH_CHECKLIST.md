@@ -5,6 +5,17 @@ with first login, then exercise the relevant apps, physical devices, and
 workloads. Record results in a test report using the details below.
 [Seaside design](../SEASIDE_SPEC.md) · [Part 7 handoff](../Parts/Part-07/HANDOFF.md) · [Part 8 handoff](../Parts/Part-08/HANDOFF.md) · [Part 9 handoff](../Parts/Part-09/HANDOFF.md) · [Performance investigations](PERFORMANCE.md)
 
+## Evidence going into the native run
+
+On 2026-11-22 the Arch VirtualBox guest at `d198f789a2a2` passed 50
+suite checks and all 301 GoogleTest cases. The standalone DRM probe also
+passed on `vmwgfx`. With Pixman, the terminal shell kept its PID across a
+VT switch and accepted input after returning. Earlier trials with the same
+compositor code verified display sleep and wake, startup with the only virtual
+connector disabled, and client, focus and cursor recovery on reconnect.
+A disposable guest did not return from its RTC suspend request. System resume
+and the AMD display checks below remain open on physical hardware. [Hardening review](HARDENING_REVIEW.md#implementation-and-verification)
+
 ## First login
 
 - [ ] Install the candidate package on the native Arch system. Record the
@@ -17,6 +28,31 @@ workloads. Record results in a test report using the details below.
 - [ ] Switch away from the active VT and back with applications open. Check
   input, focus, display layout, and cursor recovery. Repeat after suspend and
   resume once that path is ready.
+
+## Window handling and configuration
+
+- [ ] In both Dwindle and scrolling layouts, open a tile beside a slow-redrawing
+  test window and immediately reselect the current workspace. Watch
+  `seasidectl events` and query `seasidectl focus` from a separate shell.
+  Check that a typed key and the close shortcut reach the window visibly
+  focused at the time of each action. Repeat with openings on two outputs,
+  alternating which client redraws first. Both outputs should keep their
+  previous pixels and pointer targets until the remaining client redraws
+  or the opening deadline expires.
+- [ ] Resize a floating window with a child dialog. Drag to its size limit
+  and reverse direction. Verify the window responds as soon as the requested
+  size moves back within bounds, the dialog stays aligned and clickable, and
+  keyboard focus is preserved. Record window count, refresh rate and any
+  missed frames when comparing small and busy desktops. [Host CPU measurements](HARDENING_PERFORMANCE.md)
+- [ ] In a test profile on the usual config filesystem, change `gaps_inner`
+  with the editor normally used and switch an intermediate profile symlink.
+  A half-written save must leave the active settings intact. After the save
+  completes, check the visible gaps and `seasidectl status`. Record the editor,
+  filesystem and any additional save needed for a managed file. [Config recovery](../USER_GUIDE.md#configure-seaside)
+- [ ] Start with a fresh test state directory. Run `seasidectl trace start`,
+  resize a window, then run `seasidectl trace stop` and `seasidectl trace export`.
+  Verify the returned file contains frame records, has mode `0600`, and its
+  enclosing `traces` directory has mode `0700`.
 
 ## Part 7 checks still open
 
@@ -103,7 +139,9 @@ python3 tests/hardware/part8_display.py 'fullscreen before sharing' --seconds 5
   adjust the temperature, and turn it off. Verify color restoration through
   a VT switch, modeset and resume, and on mixed-capability outputs. Observe
   direct scanout with and without the LUT. An unsupported monitor should stay
-  available with its prior colors.
+  available with its prior colors. If a commit is rejected during a transition,
+  compare the visible result with `seasidectl night-light status` and record
+  whether the requested state recovers when synchronized composition resumes.
 
 ## Part 9 native display checks
 
@@ -115,7 +153,9 @@ python3 tests/hardware/part8_display.py 'fullscreen before sharing' --seconds 5
 - [ ] On AMD, verify visible display sleep, input wake, the restored mode and
   hardware cursor, and continuity of focus and workspace assignment. Include
   different refresh rates and scales, an active share when sleep is requested,
-  and live idle or display configuration edits while a monitor sleeps.
+  and live idle or display configuration edits while a monitor sleeps. If the
+  driver rejects a sleep request, give the monitor fresh input, leave it idle
+  for another configured interval, and record whether it sleeps and wakes.
 - [ ] Suspend and resume with several clients open. Repeat with one display
   asleep, across a VT switch, and after a connector or input device changes.
   Check display power, cursor readback, pointer and keyboard focus, workspaces,
