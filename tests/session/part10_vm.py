@@ -28,6 +28,8 @@ def send_input(runner, vm, message):
         runner.type_command(vm, "Monitor" if key == "monitor" else "Part 10 Package Pattern")
     elif key in {"up", "down", "mute", "cancel"}:
         runner.keys(vm, *KEYS[key])
+    elif key == "wake":
+        runner.keys(vm, "2a", "aa")
     else:
         raise RuntimeError(f"Unexpected Part 10 input request {key!r}")
 

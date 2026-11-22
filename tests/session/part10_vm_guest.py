@@ -212,6 +212,7 @@ def first_use(session, temporary, state):
     (session.results / "part10-first-use.toml").write_bytes(generated)
     output = session.focused_output()
     require(output and output["hardware_cursor"], "No packaged session output exposes a hardware cursor")
+    require(output["power_state"] == "awake", "The initial output did not report awake power")
     x, y = output["position"]["x"], output["position"]["y"]
     require(session.pixel(x + 1, y + 1) == (0, 0, 0), "First-use wallpaper is not black")
     session.grab(output, "first-use")
@@ -266,13 +267,55 @@ def recover_config(session, generated, state):
         return session.ctl("status")["config"]
 
     initial = config()
+    require(initial["active_tiling"] and initial["active_layout"] == "dwindle",
+            "The installed CLI did not report the default layout")
+    require({"chord": "Super+Return", "action": "exec foot"} in session.ctl("bindings")["bindings"],
+            "The installed CLI did not disclose the default terminal binding")
     session.replace(b"[window\n")
     session.wait(lambda: config()["error"], "a reported bad package configuration")
-    require(config()["source"] == initial["source"],
-            "A rejected configuration replaced the active source")
+    require(all(config()[key] == initial[key] for key in ("source", "active_tiling", "active_layout")),
+            "A rejected configuration replaced the active layout")
+    edited = generated.replace(b"tiling = true", b"tiling = false").replace(
+        b'layout = "dwindle"', b'layout = "scrolling"')
+    edited = edited.replace(b"exec foot", b"exec foot --title Preview")
+    session.replace(edited)
+
+    def applied():
+        active = config()
+        return (not active["error"] and active["active_tiling"] is False and
+                active["active_layout"] == "scrolling" and
+                {"chord": "Super+Return", "action": "exec foot --title Preview"}
+                in session.ctl("bindings")["bindings"])
+
+    session.wait(applied, "the active layout and remapped binding")
     session.replace(generated)
-    session.wait(lambda: not config()["error"], "the repaired configuration")
-    state["config_recovery"] = "invalid edit rejected and accepted bytes restored"
+    session.wait(lambda: not config()["error"] and config()["active_tiling"] and
+                 config()["active_layout"] == "dwindle", "the repaired configuration")
+    state["config_recovery"] = "invalid edit held the layout and valid layout and bindings were reported"
+
+
+def verify_output_power(session, generated, state):
+    replacement = b"display_off_after_minutes = 15"
+    require(generated.count(replacement) == 1, "Expected one default idle timeout")
+    asleep_config = generated.replace(replacement, b"display_off_after_minutes = 1")
+    snapshot = session.state_dir / "seaside/last-good-config.toml"
+    output = session.focused_output()
+    session.replace(asleep_config)
+    session.wait(lambda: snapshot.is_file() and snapshot.read_bytes() == asleep_config,
+                 "the one-minute packaged display timeout")
+    event("part10-input", "start the idle interval with a guest key", key="wake")
+    event("part10", "verify the displayed power state after idle power-off")
+    asleep = wait_for(lambda: row if (row := session.focused_output()) and
+                      row["power_state"] == "asleep" else None, 85,
+                      "the packaged CLI's asleep output", session.process)
+    require(asleep["id"] == output["id"] and asleep["mode"] == output["mode"] and
+            asleep["hardware_cursor"] is None, "Sleep changed the logical output or left a cursor")
+    event("part10-input", "wake the display with a guest key", key="wake")
+    session.wait(lambda: (row := session.focused_output()) and row["power_state"] == "awake" and
+                 row["hardware_cursor"] is True, "output power and hardware cursor after waking")
+    session.replace(generated)
+    session.wait(lambda: snapshot.read_bytes() == generated, "the restored idle timeout")
+    state["display_power"] = {"status": "pass", "sequence": ["awake", "asleep", "awake"]}
 
 
 def media_keys(session, state):
@@ -498,14 +541,18 @@ def stability(session, generated, state):
         pattern.stdin.flush()
         require(pattern.wait(timeout=8) == 0, "The stability fixture did not stop")
     session.wait(lambda: not session.window("Part 10 Stability Pattern"), "removal of the stability client")
-    after = compatibility["memory"](session.process.pid)
-    require(after["fds"] <= before["fds"] + 2 and
-            after["VmRSS"] <= before["VmRSS"] + 32 * 1024,
-            "The bounded stability cycle retained more descriptors or memory than expected")
-    regressions.update(status="pass", workspace_cycles=WORKSPACE_CYCLES, fullscreen_frames=frames,
+    regressions.update(status="fail", workspace_cycles=WORKSPACE_CYCLES, fullscreen_frames=frames,
                        fullscreen_seconds=FULLSCREEN_SECONDS,
-                       seconds=round(time.monotonic() - first, 2), before=before, after=after)
+                       seconds=round(time.monotonic() - first, 2), before=before)
     state["stability"] = regressions
+
+    def resources_released():
+        after = compatibility["memory"](session.process.pid)
+        regressions["after"] = after
+        return after["fds"] <= before["fds"] + 2 and after["VmRSS"] <= before["VmRSS"] + 32 * 1024
+
+    session.wait(resources_released, "descriptor and memory cleanup after the stability workload")
+    regressions["status"] = "pass"
 
 
 def starts_and_failure(repo, results, env, state):
@@ -594,6 +641,7 @@ def installed_trial(source, runtime, results, state):
             portal_recovery_and_capture(session, generated, state)
             event("part10", "verify lazy X11 startup and satellite restart")
             satellite_restart(session, state)
+            verify_output_power(session, generated, state)
             event("part10", "exercise mode changes, slow IPC and fullscreen stability")
             stability(session, generated, state)
             session.close()
