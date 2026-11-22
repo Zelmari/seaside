@@ -362,6 +362,7 @@ void IpcServer::Impl::Peer::consume() {
         if (newline == std::string::npos) {
             if (input.size() - begin >= ipc::request_limit) {
                 auto id = oversized_id(std::string_view(input).substr(begin));
+                subscribed = false;
                 input_closed = true;
                 begin = input.size();
                 respond(id, false,
@@ -540,7 +541,7 @@ void IpcServer::Impl::Peer::update_mask() noexcept {
     }
     // A full deferred pipeline or a client that only shut down its writing
     // half can have no readiness interests until a completion queues a reply.
-    if ((!mask && !requests) || wl_event_source_fd_update(source.get(), mask) < 0) {
+    if ((!mask && !requests && !subscribed) || wl_event_source_fd_update(source.get(), mask) < 0) {
         disconnect();
     }
 }

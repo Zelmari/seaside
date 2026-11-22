@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <gtest/gtest.h>
 #include <map>
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -302,6 +303,23 @@ TEST_F(IpcFixture, QueuesSubscriptionReplyBeforeEventsAndTracksSnapshotWatermark
     EXPECT_EQ(event["data"]["workspace_id"], 2);
     EXPECT_EQ(receive(fd)["id"], 2);
     EXPECT_EQ(receive(fd)["seq"], 2);
+}
+
+TEST_F(IpcFixture, HalfClosedSubscriberReceivesLaterEventsAfterQuietPeriod) {
+    const int fd = connect_to();
+    ASSERT_GE(fd, 0);
+    send_all(fd, request(1, "events.subscribe"));
+    ASSERT_EQ(shutdown(fd, SHUT_WR), 0);
+    ASSERT_EQ(receive(fd)["result"]["subscribed"], true);
+    ASSERT_EQ(wl_event_loop_dispatch(loop, 1), 0);
+    pollfd events{.fd = wl_event_loop_get_fd(loop), .events = POLLIN, .revents = 0};
+    EXPECT_EQ(poll(&events, 1, 5), 0);
+    server->event("workspace.changed", {{"workspace_id", 2}});
+    EXPECT_EQ(receive(fd)["event"], "workspace.changed");
+    clients.erase(fd);
+    ASSERT_EQ(close(fd), 0);
+    ASSERT_EQ(wl_event_loop_dispatch(loop, 1), 0);
+    EXPECT_EQ(poll(&events, 1, 5), 0);
 }
 
 TEST_F(IpcFixture, DeferredReplyKeepsIdUntilFlushAndUsesCompletionWatermark) {
