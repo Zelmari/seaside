@@ -1,5 +1,6 @@
 #include "config_store.hpp"
 #include "config.hpp"
+#include "storage_fd.hpp"
 
 #include <array>
 #include <atomic>
@@ -15,21 +16,6 @@
 
 namespace seaside {
 namespace {
-class Fd {
-  public:
-    explicit Fd(int value) noexcept : value_(value) {}
-    ~Fd() {
-        if (value_ >= 0)
-            ::close(value_);
-    }
-    Fd(const Fd &) = delete;
-    Fd &operator=(const Fd &) = delete;
-    int get() const noexcept { return value_; }
-    int close() noexcept { return ::close(std::exchange(value_, -1)); }
-
-  private:
-    int value_;
-};
 std::error_code system_error() {
     return {errno, std::generic_category()};
 }
@@ -78,7 +64,7 @@ std::expected<void, StorageError> prepare_storage_directory(const std::filesyste
         // A concurrent creator can win mkdir; synchronize the same directory
         // chain without changing permissions on its already-existing directory.
         for (const auto &path : {*it, parent}) {
-            Fd fd(::open(path.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC));
+            StorageFd fd(::open(path.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC));
             if (fd.get() < 0)
                 return std::unexpected(failure(StorageStep::open_directory, path));
             auto sync_error = io.check(StorageStep::sync_ancestor);
@@ -110,7 +96,7 @@ std::expected<std::optional<std::string>, StorageError>
 ConfigStore::read(const std::filesystem::path &path, bool private_state) const {
     if (auto error = io_->check(StorageStep::open_read))
         return std::unexpected(failure(StorageStep::open_read, path, error));
-    Fd fd(
+    StorageFd fd(
         ::open(path.c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC | (private_state ? O_NOFOLLOW : 0)));
     if (fd.get() < 0) {
         if (errno == ENOENT)
@@ -185,7 +171,7 @@ ConfigStore::publish(const std::filesystem::path &path, std::string_view text, P
         return std::unexpected(failure(StorageStep::open_directory, path, error));
     if (auto prepared = prepare_storage_directory(parent, *io_); !prepared)
         return std::unexpected(std::move(prepared.error()));
-    Fd directory(::open(parent.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC));
+    StorageFd directory(::open(parent.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC));
     if (directory.get() < 0)
         return std::unexpected(failure(StorageStep::open_directory, path));
     const auto name = path.filename().string();
@@ -203,7 +189,7 @@ ConfigStore::publish(const std::filesystem::path &path, std::string_view text, P
     }
     if (raw < 0)
         return std::unexpected(failure(StorageStep::create_temporary, path));
-    Fd file(raw);
+    StorageFd file(raw);
     struct stat authored{};
     bool temporary_exists = true;
     auto remove_private = [&](const std::string &entry) -> std::error_code {

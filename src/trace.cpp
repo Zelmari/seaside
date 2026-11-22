@@ -1,6 +1,7 @@
 #include "trace.hpp"
 
 #include "config_store.hpp"
+#include "storage_fd.hpp"
 #include "work_queue.hpp"
 
 #include <atomic>
@@ -20,23 +21,6 @@ namespace {
 struct SampleBuffer {
     std::deque<std::string> lines;
     std::size_t bytes = 0;
-};
-
-class Fd {
-  public:
-    explicit Fd(int value) noexcept : value_(value) {}
-    ~Fd() {
-        if (value_ >= 0) {
-            ::close(value_);
-        }
-    }
-    Fd(const Fd &) = delete;
-    Fd &operator=(const Fd &) = delete;
-    int get() const noexcept { return value_; }
-    int close() noexcept { return ::close(std::exchange(value_, -1)); }
-
-  private:
-    int value_;
 };
 
 struct TraceFile {
@@ -92,7 +76,7 @@ IpcResult write_trace(const std::filesystem::path &state, const SampleBuffer &sa
     if (auto prepared = prepare_storage_directory(state, storage); !prepared) {
         return export_error("could not prepare the state directory", prepared.error().error);
     }
-    const Fd parent(open(state.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+    const StorageFd parent(open(state.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
     struct stat state_status{};
     if (parent.get() < 0 || fstat(parent.get(), &state_status) < 0) {
         return export_error("could not open the state directory", system_error());
@@ -105,7 +89,7 @@ IpcResult write_trace(const std::filesystem::path &state, const SampleBuffer &sa
     if (!created && errno != EEXIST) {
         return export_error("could not create the traces directory", system_error());
     }
-    const Fd directory(
+    const StorageFd directory(
         openat(parent.get(), "traces", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
     struct stat directory_status{};
     if (directory.get() < 0 || (created && fchmod(directory.get(), 0700) < 0) ||
@@ -132,8 +116,8 @@ IpcResult write_trace(const std::filesystem::path &state, const SampleBuffer &sa
     if (auto error = storage.check(StorageStep::create_temporary)) {
         return export_error("could not create a private temporary file", error);
     }
-    Fd file(openat(directory.get(), temporary.c_str(),
-                   O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600));
+    StorageFd file(openat(directory.get(), temporary.c_str(),
+                          O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600));
     if (file.get() < 0) {
         return export_error("could not create a private temporary file", system_error());
     }
