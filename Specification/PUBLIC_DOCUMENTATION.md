@@ -11,15 +11,16 @@ checks remain open. [Install prerequisites](USER_GUIDE.md#install-on-arch) · [N
 |---|---|---|
 | Arch development builds | Unit tests and real clients on offscreen Wayland outputs. Coverage includes configuration, layouts, IPC, sharing, layer-shell, idle inhibition, and trace export. | The source-tree fixtures exercise software behavior. |
 | Dedicated Arch VirtualBox guest | Real TTY start and exit, virtual cursor placement, application/workspace behavior, portal capture and audio routing with test clients, live config, display sleep and wake, and service recovery. The guest uses `vmwgfx` with the Pixman renderer. | Coverage is scoped to the virtual device and the cases recorded in the guest reports. |
+| Disposable Arch package-test guest | The installed Part 10 package passed first use, VT return, media keys and playback, monitor and chosen-window capture, X11 restart, bounded stability, and package reinstall and removal. | The independently rebuilt candidate is ready for native testing. |
 | Native Framework Desktop on Arch | Test actions and the read-only display collector are available. | Real AMD renderer and cursor paths, DMA-BUF and explicit sync, scanout, VRR and tearing, night light, mixed outputs and hotplug, suspend/resume, physical audio and input, Steam/Proton, and OBS/Discord compatibility remain in the native checklist. |
 
 The [Part 7 handoff](Parts/Part-07/HANDOFF.md) records the underlying sharing
 and audio trials. The [Part 8 handoff](Parts/Part-08/HANDOFF.md) records the
 virtual display and render trials. The [Part 9 handoff](Parts/Part-09/HANDOFF.md)
 records portal recovery, layer-shell, virtual sleep and wake, and diagnostic
-checks. The [Part 10 plan](Parts/Part-10/PLAN.md) defines package and release
-qualification. Its handoff records the exact candidate and environment results
-as those checks finish.
+checks. The [Part 10 handoff](Parts/Part-10/HANDOFF.md) records the package
+candidate, build provenance, installed guest checks, and remaining release
+qualification.
 
 The installed session provides compositing, layouts, local control, Wayland
 layer-shell support, and integrations for external clients. An optional panel
