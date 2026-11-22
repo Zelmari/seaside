@@ -81,7 +81,8 @@ sha256sum "$package"
 
 Resolve any failing command before continuing. The final commands inspect
 package metadata, list installed paths and print the checksum to record
-with the candidate. Retain the staged recipe and source archive, the build
+with the candidate. The version includes the commit count and full Git SHA.
+Retain the staged recipe and source archive, the build
 log, built archive, revision, repository or snapshot details, dependency
 versions and checksums. From the checkout, `tools/record-baseline --build-dir
 build --output test-results/baseline.json` captures the configured compiler,
@@ -95,6 +96,10 @@ and an idle foreground guest shell. Its results supplement the normal Meson
 suite. [Part 10 test plan](Parts/Part-10/PLAN.md#harness-and-arch-vm-acceptance) · [Native desktop checklist](Research/NATIVE_ARCH_CHECKLIST.md)
 
 ## Share changes and evidence
+
+Keep each change focused and add an acceptance or regression check where
+practical. Use a short Conventional Commit subject such as
+`fix(capture): preserve the selected source on workspace change`.
 
 Explain what the change fixes, how to reproduce or verify it, and what
 remains open. Include the revision, package version when installed, exact
