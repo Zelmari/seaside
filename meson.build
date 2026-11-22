@@ -591,6 +591,17 @@ test('part8-display-protocols', part3_fixture, args: ['--display-protocols'],
   env: {'SEASIDE_TEST_PART': '8', 'SEASIDE_REQUIREMENTS': '6.1,8.2,11,12.2b'},
 )
 
+part8_night_light = executable(
+  'seaside-part8-night-light', 'tests/integration/part8_night_light.c',
+  include_directories: include_directories('src'),
+  dependencies: [wlroots, wayland_server],
+  link_args: ['-Wl,--wrap=wlr_output_commit_state', '-Wl,--wrap=wlr_output_get_gamma_size'],
+  link_with: core, install: false,
+)
+test('part8-night-light', part8_night_light, suite: ['integration', 'part8'], timeout: 20,
+  env: {'SEASIDE_TEST_PART': '8', 'SEASIDE_REQUIREMENTS': '8.2,11,12.2b'},
+)
+
 appearance_tests = executable(
   'seaside-appearance-tests',
   ['tests/unit/render_assets_test.cpp', 'tests/integration/part6_appearance.cpp',

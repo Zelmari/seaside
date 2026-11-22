@@ -315,11 +315,18 @@ def run_night_light(session, state, output):
     session.edit("[night_light]\ntemperature_kelvin = 5000\n")
     session.wait(lambda: status()["temperature_kelvin"] == 5000, "live night light temperature")
     require(status()["enabled"], "A temperature-only reload lost the runtime night light override")
+    size = session.grab(output, "night-light-5000K")
+    require(size == (output["mode"]["width"], output["mode"]["height"]),
+            f"Unexpected output capture after temperature change: {size}")
+    at_5000k = capability()
+    require(at_5000k["applied"] == on["applied"] and at_5000k["reason"] == on["reason"],
+            f"Temperature change lost the guest LUT or its reported capability: {at_5000k}")
     require(session.ctl("night-light", "off")["accepted"], "Night light off was not accepted")
     session.wait(lambda: not status()["enabled"] and capability()["applied"] is False, "night light off")
     require(session.focused_output()["mode"] == output["mode"] and session.focused_output()["hardware_cursor"],
             "Night light changed output availability, mode, or cursor policy")
-    state["night_light"] = {"status": "pass", "on": on, "off": capability()}
+    state["night_light"] = {"status": "pass", "on": on, "5000K": at_5000k, "capture_size": size,
+                             "off": capability()}
     session.edit()
     session.wait(lambda: status()["temperature_kelvin"] == 4500, "restored night light temperature")
 

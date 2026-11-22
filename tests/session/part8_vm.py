@@ -9,7 +9,7 @@ from part5_vm import revision_bundle, run
 
 ARTIFACTS = {
     "baseline.json", "part8-session.log", "part8-pattern.log", "part8-portal-monitor.log",
-    "part8-portal-window.log",
+    "part8-portal-window.log", "part8-night-light-5000K.png",
     "part8-preserve.png", "part8-stretch.png", "part8-rotated-90.png",
     "part8-rotated-180.png", "part8-rotated-270.png", "part8-rotated-0.png",
 }

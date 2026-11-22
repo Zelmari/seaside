@@ -129,7 +129,7 @@ struct scene_output {
     struct wlr_drm_syncobj_timeline *unsubmitted_scanout;
     uint64_t unsubmitted_point;
     bool retry_synchronized, retry_composed, retry_frame;
-    bool night_light_dirty;
+    enum { LUT_CLEAN, LUT_PENDING, LUT_RETRY } lut_request;
 };
 
 struct scene_image {
@@ -1174,7 +1174,7 @@ static void output_commit(struct wl_listener *listener, void *data) {
                                    WLR_OUTPUT_STATE_SCALE | WLR_OUTPUT_STATE_TRANSFORM)) {
         update_output_appearance(view);
         if (view->owner->night_light || view->render_status.night_light_applied) {
-            view->night_light_dirty = true;
+            view->lut_request = LUT_PENDING;
             wlr_output_schedule_frame(view->viewport->output);
         }
     }
@@ -1233,7 +1233,7 @@ static enum seaside_output_support tearing_support(struct wlr_output *output) {
 
 static bool wants_tearing(const struct scene_output *output) {
     const struct seaside_scene_bridge *scene = output->owner;
-    if (!scene->allow_tearing || output->retry_synchronized || output->night_light_dirty ||
+    if (!scene->allow_tearing || output->retry_synchronized || output->lut_request != LUT_CLEAN ||
         output->render_status.tearing == SEASIDE_OUTPUT_UNSUPPORTED ||
         output->banner->node.enabled || !wl_list_empty(&scene->drag_icons->children) ||
         seaside_layer_scene_has_overlay(scene->layers, output->viewport->output) ||
@@ -1283,10 +1283,10 @@ static struct wlr_color_transform *night_light_transform(size_t size, int kelvin
 }
 
 static bool prepare_night_light(struct scene_output *view, struct wlr_output_state *state) {
-    if (!view->night_light_dirty) {
+    if (view->lut_request == LUT_CLEAN) {
         return false;
     }
-    view->night_light_dirty = false;
+    view->lut_request = LUT_CLEAN;
     const struct seaside_scene_bridge *scene = view->owner;
     const size_t size = wlr_output_get_gamma_size(view->viewport->output);
     if (size < 2 || size > UINT16_MAX + 1u) {
@@ -1313,17 +1313,19 @@ static bool prepare_night_light(struct scene_output *view, struct wlr_output_sta
 static bool commit_frame(struct scene_output *view) {
     struct wlr_scene_output *scene_output = view->viewport;
     struct wlr_output *output = scene_output->output;
-    if (!wlr_scene_output_needs_frame(scene_output) && !view->night_light_dirty) {
+    if (!wlr_scene_output_needs_frame(scene_output) && view->lut_request == LUT_CLEAN) {
         return true;
     }
 
     struct wlr_output_state state;
     wlr_output_state_init(&state);
-    if (view->retry_composed) {
+    const bool retry_lut = view->lut_request == LUT_RETRY;
+    const bool compose = view->retry_composed || retry_lut;
+    if (compose) {
         wlr_output_lock_attach_render(output, true);
     }
     bool built = wlr_scene_output_build_state(scene_output, &state, NULL);
-    if (view->retry_composed) {
+    if (compose) {
         wlr_output_lock_attach_render(output, false);
     }
     const bool scanout =
@@ -1375,8 +1377,16 @@ static bool commit_frame(struct scene_output *view) {
         view->retry_synchronized = true;
         wlr_output_schedule_frame(output);
     } else if (lut) {
-        view->render_status.night_light_reason = "backend rejected hardware gamma LUT";
-        fprintf(stderr, "seaside: %s: %s\n", output->name, view->render_status.night_light_reason);
+        // A combined commit cannot distinguish a bad scanout buffer from a
+        // rejected LUT. Try the same LUT once on a synchronized composed frame.
+        view->retry_composed |= scanout;
+        if (!retry_lut) {
+            view->lut_request = LUT_RETRY;
+        } else {
+            view->render_status.night_light_reason = "backend rejected hardware gamma LUT";
+            fprintf(stderr, "seaside: %s: %s\n", output->name,
+                    view->render_status.night_light_reason);
+        }
         wlr_output_schedule_frame(output);
     } else if (scanout) {
         view->retry_composed = true;
@@ -1570,7 +1580,9 @@ void seaside_scene_set_render_policy(struct seaside_scene_bridge *scene, bool di
     if (redraw) {
         struct scene_output *view;
         wl_list_for_each(view, &scene->outputs, link) {
-            view->night_light_dirty |= color_changed;
+            if (color_changed) {
+                view->lut_request = LUT_PENDING;
+            }
             if (!allow_tearing) {
                 view->render_status.tearing_reason = NULL;
             }
@@ -1686,7 +1698,7 @@ bool seaside_scene_add_output(struct seaside_scene_bridge *scene, struct wlr_out
     view->present.notify = output_present;
     view->render_status.tearing = tearing_support(output);
     view->render_status.presentation_mode = "unknown";
-    view->night_light_dirty = scene->night_light;
+    view->lut_request = scene->night_light ? LUT_PENDING : LUT_CLEAN;
     wl_signal_add(&output->events.frame, &view->frame);
     wl_signal_add(&view->viewport->events.destroy, &view->destroy);
     wl_signal_add(&output->events.commit, &view->commit);
