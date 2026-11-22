@@ -656,6 +656,12 @@ test('part3-real-portals', python,
   suite: ['integration', 'part3'], timeout: 35,
   env: {'SEASIDE_TEST_PART': '3', 'SEASIDE_REQUIREMENTS': '3.1,7,12.2b'},
 )
+test('part3-real-portals-zero-outputs', python,
+  args: [files('tests/integration/test_real_portals.py'), portal_smoke,
+         files('packaging/seaside-portals.conf'), '--no-outputs'],
+  suite: ['integration', 'part3'], timeout: 35,
+  env: {'SEASIDE_TEST_PART': '3', 'SEASIDE_REQUIREMENTS': '3.1,5.2,7.2,12.2b'},
+)
 test('part7-headless-portal-stream', python,
   args: [files('tests/integration/test_real_portals.py'), portal_smoke,
          files('packaging/seaside-portals.conf'), '--stream-receiver', portal_stream,

@@ -32,8 +32,8 @@ void seaside_output_capture_remove_output(struct seaside_output_capture *capture
 /* A hardware cursor update may leave the underlying scene undamaged. */
 void seaside_output_capture_cursor_changed(struct seaside_output_capture *capture);
 
-/* Require one live client with the peer credentials and the relevant bound
- * resources on this display. This is a portal readiness check. */
+/* Require one live client with the peer credentials and the capture bindings
+ * on this display, including an output binding when an output is enabled. */
 bool seaside_output_capture_client_ready(const struct seaside_output_capture *capture, pid_t pid,
                                          uid_t uid);
 

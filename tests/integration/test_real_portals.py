@@ -12,7 +12,7 @@ import tempfile
 import time
 
 
-def run(fixture, routing, package_root, receiver=None, native_client=None):
+def run(fixture, routing, package_root, receiver=None, native_client=None, no_outputs=False):
     lib = package_root / "lib"
     data = package_root / "share"
     definitions = [
@@ -23,7 +23,9 @@ def run(fixture, routing, package_root, receiver=None, native_client=None):
     ]
     grim = package_root / "bin/grim"
     wireplumber = package_root / "bin/wireplumber"
-    required = [grim, *(row[1] for row in definitions)]
+    required = [row[1] for row in definitions]
+    if not no_outputs:
+        required.append(grim)
     if receiver:
         required.append(wireplumber)
     missing = [str(binary) for binary in required if not binary.is_file()]
@@ -173,18 +175,23 @@ context.modules = [
             wait_for(lambda: (root / "bus").is_socket() and (root / "pipewire-0").is_socket(), bus, pw)
             if receiver:
                 start("wireplumber", [wireplumber], child_env=package_env)
-            compositor = start("compositor", [fixture, address, "--stream"] if receiver else
-                               [fixture, address], handshake=True)
+            fixture_command = [fixture, address]
+            if receiver:
+                fixture_command.append("--stream")
+            elif no_outputs:
+                fixture_command.append("--no-outputs")
+            compositor = start("compositor", fixture_command, handshake=True)
             wait_for(lambda: (root / env["WAYLAND_DISPLAY"]).is_socket(), compositor)
             for label, executable, service in definitions:
                 command = [executable, "-l", "TRACE"] if receiver and label == "wlr" else [executable]
                 child = start(label, command, child_env=package_env)
                 wait_for(lambda: name_exists(service), child)
-            screenshot = root / "cursor.png"
-            subprocess.run([grim, "-c", screenshot], env=package_env, check=True, timeout=4)
-            png = screenshot.read_bytes()
-            if png[:8] != b"\x89PNG\r\n\x1a\n" or struct.unpack(">II", png[16:24]) != (160, 90):
-                raise RuntimeError("grim produced an unexpected PNG size")
+            if not no_outputs:
+                screenshot = root / "cursor.png"
+                subprocess.run([grim, "-c", screenshot], env=package_env, check=True, timeout=4)
+                png = screenshot.read_bytes()
+                if png[:8] != b"\x89PNG\r\n\x1a\n" or struct.unpack(">II", png[16:24]) != (160, 90):
+                    raise RuntimeError("grim produced an unexpected PNG size")
             send(compositor, b"\n")
             if receiver:
                 wait_for(lambda: log_has("compositor", "portal smoke PASS"), compositor,
@@ -195,6 +202,8 @@ context.modules = [
                 raise RuntimeError("Real portal readiness check failed")
             if receiver:
                 print("Real headless portal monitor, window updates and target closure PASS")
+            elif no_outputs:
+                print("Real Arch portal monitor and window readiness with zero outputs PASS")
             else:
                 print("Real Arch portal readiness and grim capture PASS")
             return 0
@@ -223,10 +232,13 @@ if __name__ == "__main__":
     parser.add_argument("package_root", type=Path, nargs="?", default=Path("/usr"))
     parser.add_argument("--stream-receiver", type=Path)
     parser.add_argument("--native-client", type=Path)
+    parser.add_argument("--no-outputs", action="store_true")
     args = parser.parse_args()
     if (args.stream_receiver is None) != (args.native_client is None):
         parser.error("--stream-receiver and --native-client must be used together")
+    if args.no_outputs and args.stream_receiver is not None:
+        parser.error("--no-outputs requires the readiness-only check")
     receiver = args.stream_receiver.resolve() if args.stream_receiver is not None else None
     native = args.native_client.resolve() if args.native_client is not None else None
     sys.exit(run(args.fixture.resolve(), args.routing.resolve(), args.package_root.resolve(),
-                 receiver, native))
+                 receiver, native, args.no_outputs))

@@ -589,7 +589,7 @@ seaside_output_capture_copy_manager(const struct seaside_output_capture *capture
 struct client_bindings {
     const struct seaside_output_capture *capture;
     bool shm;
-    bool output;
+    bool awaiting_output;
     bool output_manager;
     bool copy_manager;
 };
@@ -602,7 +602,9 @@ static enum wl_iterator_result check_resource(struct wl_resource *resource, void
     } else if (strcmp(name, wl_output_interface.name) == 0) {
         struct capture_output *target =
             find_output(bindings->capture, wlr_output_from_resource(resource));
-        bindings->output |= target && target->constraints_ready && target->output->enabled;
+        if (target && target->constraints_ready && target->output->enabled) {
+            bindings->awaiting_output = false;
+        }
     } else if (wl_resource_instance_of(resource,
                                        &ext_output_image_capture_source_manager_v1_interface,
                                        &output_manager_impl)) {
@@ -611,15 +613,24 @@ static enum wl_iterator_result check_resource(struct wl_resource *resource, void
         bindings->copy_manager |=
             wl_resource_get_user_data(resource) == bindings->capture->copy_manager;
     }
-    return bindings->shm && bindings->output && bindings->output_manager && bindings->copy_manager
+    return bindings->shm && !bindings->awaiting_output && bindings->output_manager &&
+                   bindings->copy_manager
                ? WL_ITERATOR_STOP
                : WL_ITERATOR_CONTINUE;
 }
 
 bool seaside_output_capture_client_ready(const struct seaside_output_capture *capture, pid_t pid,
                                          uid_t uid) {
-    if (!capture || !capture->display || wl_list_empty(&capture->outputs) || pid <= 0) {
+    if (!capture || !capture->display || pid <= 0) {
         return false;
+    }
+    // The protocol managers are available before the first monitor or when all
+    // monitors are asleep. Require a usable monitor binding whenever one can
+    // exist, and always verify the manager bindings on this Wayland server.
+    bool output_enabled = false;
+    struct capture_output *target;
+    wl_list_for_each(target, &capture->outputs, link) {
+        output_enabled |= target->output->enabled;
     }
     struct wl_client *client;
     wl_client_for_each(client, wl_display_get_client_list(capture->display)) {
@@ -627,9 +638,10 @@ bool seaside_output_capture_client_ready(const struct seaside_output_capture *ca
         uid_t client_uid;
         wl_client_get_credentials(client, &client_pid, &client_uid, NULL);
         if (client_pid == pid && client_uid == uid) {
-            struct client_bindings bindings = {.capture = capture};
+            struct client_bindings bindings = {.capture = capture,
+                                               .awaiting_output = output_enabled};
             wl_client_for_each_resource(client, check_resource, &bindings);
-            if (bindings.shm && bindings.output && bindings.output_manager &&
+            if (bindings.shm && !bindings.awaiting_output && bindings.output_manager &&
                 bindings.copy_manager) {
                 return true;
             }

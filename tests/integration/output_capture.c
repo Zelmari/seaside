@@ -1162,10 +1162,8 @@ int main(int argc, char **argv) {
     CHECK(fixture.allocator);
     CHECK(wlr_renderer_init_wl_shm(fixture.renderer, fixture.server));
     CHECK(wlr_backend_start(fixture.backend));
-    CHECK(add_output(&fixture));
     fixture.capture = seaside_output_capture_create(fixture.server);
-    CHECK(fixture.capture &&
-          seaside_output_capture_add_output(fixture.capture, fixture.output, 0, 0));
+    CHECK(fixture.capture);
     CHECK(!seaside_output_capture_client_ready(fixture.capture, getpid(), getuid()));
 
     int socket_fds[2];
@@ -1182,6 +1180,13 @@ int main(int argc, char **argv) {
     fixture.registry = wl_display_get_registry(fixture.client);
     CHECK(fixture.registry);
     wl_registry_add_listener(fixture.registry, &registry_listener, &fixture);
+    CHECK(sync_client(&fixture) && sync_client(&fixture));
+    CHECK(fixture.shm && !fixture.client_output && fixture.copy_manager && fixture.output_manager);
+    CHECK(seaside_output_capture_client_ready(fixture.capture, getpid(), getuid()));
+    CHECK(!seaside_output_capture_client_ready(fixture.capture, getpid(), getuid() + 1));
+    CHECK(add_output(&fixture));
+    CHECK(seaside_output_capture_add_output(fixture.capture, fixture.output, 0, 0));
+    CHECK(!seaside_output_capture_client_ready(fixture.capture, getpid(), getuid()));
     CHECK(sync_client(&fixture) && sync_client(&fixture));
     CHECK(fixture.shm && fixture.client_output && fixture.copy_manager && fixture.output_manager);
     CHECK(verify_layout(&fixture));
@@ -1203,7 +1208,7 @@ int main(int argc, char **argv) {
 
     remove_output(&fixture);
     CHECK(pump_until(&fixture, &hidden.stopped) && pump_until(&fixture, &embedded.stopped));
-    CHECK(!seaside_output_capture_client_ready(fixture.capture, getpid(), getuid()));
+    CHECK(seaside_output_capture_client_ready(fixture.capture, getpid(), getuid()));
     finish_session(&hidden);
     finish_session(&embedded);
     ext_image_capture_source_v1_destroy(fixture.source);

@@ -50,7 +50,8 @@ bool wait_for_handshake(wl_display *display, Clock::duration limit) {
 
 int main(int argc, char **argv) {
     const bool stream = argc == 3 && std::string_view(argv[2]) == "--stream";
-    if (argc != 2 && !stream) {
+    const bool no_outputs = argc == 3 && std::string_view(argv[2]) == "--no-outputs";
+    if (argc != 2 && !stream && !no_outputs) {
         return EXIT_FAILURE;
     }
     auto server = seaside::Server::create();
@@ -78,18 +79,22 @@ int main(int argc, char **argv) {
         return EXIT_FAILURE;
     }
     const std::unique_ptr<part3_output, decltype(&part3_output_destroy)> output(
-        part3_output_create(display, backend, (*server)->allocator(), renderer),
+        no_outputs ? nullptr
+                   : part3_output_create(display, backend, (*server)->allocator(), renderer),
         part3_output_destroy);
     auto *head = part3_output_handle(output.get());
-    if (!head || !(*scene)->add_output(head) || !(*server)->listen("seaside-portal-smoke")) {
+    if ((!no_outputs && (!head || !(*scene)->add_output(head))) ||
+        !(*server)->listen("seaside-portal-smoke")) {
         return EXIT_FAILURE;
     }
     const std::unique_ptr<seaside_output_capture, decltype(&seaside_output_capture_destroy)>
         capture(seaside_output_capture_create(display), seaside_output_capture_destroy);
-    if (!capture || !seaside_output_capture_add_output(capture.get(), head, 0, 0)) {
+    if (!capture ||
+        (!no_outputs && !seaside_output_capture_add_output(capture.get(), head, 0, 0))) {
         return EXIT_FAILURE;
     }
-    if (stream &&
+    const bool window_capture = stream || no_outputs;
+    if (window_capture &&
         !(*scene)->enable_window_capture((*server)->allocator(), renderer,
                                          seaside_output_capture_copy_manager(capture.get()))) {
         return EXIT_FAILURE;
@@ -108,7 +113,7 @@ int main(int argc, char **argv) {
         **bus, getuid(),
         [&](pid_t pid, uid_t uid) {
             return seaside_output_capture_client_ready(capture.get(), pid, uid) &&
-                   (!stream || (*scene)->window_capture_client_ready(pid, uid));
+                   (!window_capture || (*scene)->window_capture_client_ready(pid, uid));
         },
         [&](seaside::StartupService service, seaside::ServiceReport result) {
             std::fprintf(stderr, "portal service=%d failure=%d native=%d\n",
@@ -118,8 +123,8 @@ int main(int argc, char **argv) {
             ++reports;
         },
         7s, {},
-        stream ? seaside::PortalProbe::Sources::monitor_and_window
-               : seaside::PortalProbe::Sources::monitor);
+        window_capture ? seaside::PortalProbe::Sources::monitor_and_window
+                       : seaside::PortalProbe::Sources::monitor);
     if (probe && dispatch_until(display, 8s, [&] { return failed || reports == 2; }) && !failed) {
         std::puts("portal smoke PASS frontend and capture backend");
         std::fflush(stdout);
