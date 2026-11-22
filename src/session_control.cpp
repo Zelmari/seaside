@@ -186,24 +186,39 @@ IpcAction decode_ipc_action(std::string_view method, const IpcJson &params) {
     return request;
 }
 
-IpcJson SessionControl::focus() const {
+IpcJson SessionControl::FocusState::json() const {
+    return {{"window_id", nullable(window)},
+            {"workspace_id", nullable(workspace)},
+            {"output_id", nullable(output)}};
+}
+
+SessionControl::FocusState SessionControl::focus_state() const {
     const auto &desktop = desktop_.windows();
-    return {{"window_id", desktop_.layer_has_keyboard_focus() ? Json(nullptr)
-                                                              : nullable(desktop.focused_window())},
-            {"workspace_id", nullable(desktop.focused_workspace())},
-            {"output_id", nullable(desktop.focused_output())}};
+    return {desktop_.layer_has_keyboard_focus() ? std::nullopt : desktop.focused_window(),
+            desktop.focused_workspace(), std::optional<OutputId>(desktop.focused_output())};
+}
+
+IpcJson SessionControl::focus() const {
+    return focus_state().json();
+}
+
+SessionControl::WorkspaceState SessionControl::workspace_state(WorkspaceId id) const {
+    const auto &desktop = desktop_.windows();
+    const auto output = desktop.workspace_output(id);
+    const auto *state = output ? desktop.state().output(*output) : nullptr;
+    return {std::optional<OutputId>(desktop.workspace_owner(id)), std::optional<OutputId>(output),
+            state && state->shown == id};
 }
 
 IpcJson SessionControl::workspaces() const {
     const auto &desktop = desktop_.windows();
     auto result = Json::array();
     for (const auto &[id, workspace] : desktop.state().workspaces()) {
-        const auto output = desktop.workspace_output(id);
-        const auto *state = output ? desktop.state().output(*output) : nullptr;
+        const auto state = workspace_state(id);
         result.push_back({{"id", id},
-                          {"owner_output_id", nullable(desktop.workspace_owner(id))},
-                          {"output_id", nullable(output)},
-                          {"visible", state && state->shown == id},
+                          {"owner_output_id", nullable(state.owner)},
+                          {"output_id", nullable(state.output)},
+                          {"visible", state.visible},
                           {"focused", desktop.focused_workspace() == id}});
     }
     return result;
@@ -385,36 +400,37 @@ void SessionControl::publish(IpcServer &ipc) {
     }
     for (const auto &[id, output] : outputs_.outputs()) {
         const auto &state = output.status.settings;
-        Json next{{"connected", output.handle != nullptr},
-                  {"enabled", output.enabled},
-                  {"mode",
-                   {state.width, state.height, state.refresh_millihz, state.scale, state.rotation}},
-                  {"position", {state.x, state.y}},
-                  {"adaptive_sync", output.status.adaptive_sync},
-                  {"connector", output.connector}};
-        if (published_outputs_[output.id] != next) {
+        const OutputState next{
+            .connector = output.connector,
+            .geometry = {state.x, state.y, state.width, state.height},
+            .refresh_millihz = state.refresh_millihz,
+            .rotation = state.rotation,
+            .scale = state.scale,
+            .connected = output.handle != nullptr,
+            .enabled = output.enabled,
+            .adaptive_sync = output.status.adaptive_sync,
+        };
+        auto [previous, inserted] = published_outputs_.try_emplace(output.id, next);
+        if (inserted || previous->second != next) {
             ipc.event("output.changed", {{"output_id", output.id},
-                                         {"connected", output.handle != nullptr},
-                                         {"enabled", output.enabled}});
-            published_outputs_[output.id] = std::move(next);
+                                         {"connected", next.connected},
+                                         {"enabled", next.enabled}});
+            previous->second = next;
         }
     }
-    for (const auto &row : workspaces()) {
-        const auto id = row.at("id").get<WorkspaceId>();
-        Json next{{"workspace_id", id},
-                  {"output_id", row.at("output_id")},
-                  {"owner_output_id", row.at("owner_output_id")},
-                  {"visible", row.at("visible")}};
-        if (published_workspaces_[id] != next) {
+    for (const auto &[id, workspace] : desktop.state().workspaces()) {
+        const auto next = workspace_state(id);
+        auto [previous, inserted] = published_workspaces_.try_emplace(id, next);
+        if (inserted || previous->second != next) {
             ipc.event("workspace.changed", {{"workspace_id", id},
-                                            {"output_id", row.at("output_id")},
-                                            {"visible", row.at("visible")}});
-            published_workspaces_[id] = std::move(next);
+                                            {"output_id", nullable(next.output)},
+                                            {"visible", next.visible}});
+            previous->second = next;
         }
     }
-    auto focused = focus();
+    auto focused = focus_state();
     if (published_focus_ != focused) {
-        ipc.event("window.focused", focused);
+        ipc.event("window.focused", focused.json());
         published_focus_ = std::move(focused);
     }
 }

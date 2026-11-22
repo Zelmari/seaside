@@ -28,22 +28,53 @@ class SessionControl {
     void set_renderer(const char *renderer) noexcept { renderer_ = renderer; }
 
   private:
+    struct FocusState {
+        std::optional<WindowId> window;
+        std::optional<WorkspaceId> workspace;
+        std::optional<OutputId> output;
+
+        bool operator==(const FocusState &) const = default;
+        IpcJson json() const;
+    };
+
+    struct WorkspaceState {
+        std::optional<OutputId> owner;
+        std::optional<OutputId> output;
+        bool visible;
+
+        bool operator==(const WorkspaceState &) const = default;
+    };
+
+    struct OutputState {
+        std::string connector;
+        WindowRect geometry;
+        int refresh_millihz;
+        int rotation;
+        float scale;
+        bool connected;
+        bool enabled;
+        bool adaptive_sync;
+
+        bool operator==(const OutputState &) const = default;
+    };
+
     IpcJson focus() const;
     IpcJson workspaces() const;
     IpcJson windows() const;
     IpcJson output_rows() const;
     IpcJson night_light(const ConfigTransaction &config) const;
     IpcJson diagnostics() const;
+    FocusState focus_state() const;
+    WorkspaceState workspace_state(WorkspaceId id) const;
 
     Scene &scene_;
     Desktop &desktop_;
     OutputConfig &outputs_;
     const char *renderer_ = nullptr;
     std::map<WindowId, std::pair<WorkspaceId, bool>> published_windows_;
-    std::map<WorkspaceId, IpcJson> published_workspaces_;
-    std::map<std::string, IpcJson> published_outputs_;
-    IpcJson published_focus_ = {
-        {"window_id", nullptr}, {"workspace_id", nullptr}, {"output_id", nullptr}};
+    std::map<WorkspaceId, WorkspaceState> published_workspaces_;
+    std::map<OutputId, OutputState> published_outputs_;
+    FocusState published_focus_;
 };
 
 } // namespace seaside

@@ -263,6 +263,7 @@ TEST_F(OutputTrial, ReportsNoUsableOutputsAndRecoversTheSameOutputAndWorkspace) 
     ASSERT_TRUE(ipc_server) << ipc_server.error();
     const auto address = ipc::address((*ipc_server)->path());
     ASSERT_TRUE(address);
+    std::uint64_t watermark = 0;
     const auto query = [&](std::string_view method) -> IpcJson {
         const int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
         const auto request =
@@ -294,13 +295,20 @@ TEST_F(OutputTrial, ReportsNoUsableOutputsAndRecoversTheSameOutputAndWorkspace) 
         }
         auto response = IpcJson::parse(reply);
         EXPECT_EQ(response["ok"], true);
+        watermark = response.at("seq").get<std::uint64_t>();
         return response.value("result", IpcJson::object());
     };
+    control.publish(**ipc_server);
     const auto first = query("query.outputs")["outputs"].at(0);
     const auto workspace = query("query.focus")["workspace_id"];
     EXPECT_TRUE(first["connected"].get<bool>());
     EXPECT_EQ(first["power_state"], "awake");
     EXPECT_TRUE(workspace.is_number_unsigned());
+    const auto initial_watermark = watermark;
+    EXPECT_GT(initial_watermark, 0U);
+    control.publish(**ipc_server);
+    EXPECT_EQ(query("query.outputs")["outputs"].at(0), first);
+    EXPECT_EQ(watermark, initial_watermark);
 
     auto &status = drm.state.at(part3_output_handle(output.get()));
     status.last_mode = {160, 90, 60000};
@@ -314,6 +322,7 @@ TEST_F(OutputTrial, ReportsNoUsableOutputsAndRecoversTheSameOutputAndWorkspace) 
     EXPECT_EQ(query("query.outputs")["outputs"].at(0), first);
 
     detach(output, "monitor");
+    control.publish(**ipc_server);
     const auto disconnected = query("query.outputs")["outputs"].at(0);
     EXPECT_EQ(disconnected["id"], first["id"]);
     EXPECT_EQ(disconnected["connected"], false);
@@ -324,12 +333,16 @@ TEST_F(OutputTrial, ReportsNoUsableOutputsAndRecoversTheSameOutputAndWorkspace) 
     EXPECT_EQ(remembered["owner_output_id"], first["id"]);
     EXPECT_TRUE(remembered["output_id"].is_null());
     EXPECT_EQ(remembered["visible"], false);
+    const auto detached_watermark = watermark;
+    EXPECT_GT(detached_watermark, initial_watermark);
 
     output = make_output();
     ASSERT_TRUE(output);
     ASSERT_NO_FATAL_FAILURE(attach(output.get(), "monitor", 0));
+    control.publish(**ipc_server);
     EXPECT_EQ(query("query.outputs")["outputs"].at(0), first);
     EXPECT_EQ(query("query.focus")["workspace_id"], workspace);
+    EXPECT_GT(watermark, detached_watermark);
 }
 
 TEST_F(OutputTrial, ReportsOnlyActiveConfigAndShortcutsAcrossReloads) {
