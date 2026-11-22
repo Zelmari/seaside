@@ -25,7 +25,7 @@ CAPTURES = {"dwindle.png", "scrolling.png"}
 BUNDLE_LIMIT = 64 * 1024 * 1024
 
 
-def mouse(runner, vm, request, *, hold_ms=150):
+def mouse(runner, vm, request, *, hold_ms=150, steps=1):
     start = request["start"]
     end = request.get("end", start)
     for point in (start, end):
@@ -36,10 +36,19 @@ def mouse(runner, vm, request, *, hold_ms=150):
         raise RuntimeError("Invalid Part 5 pointer button")
     if type(hold_ms) is not int or not 0 < hold_ms <= 3000:
         raise RuntimeError("Invalid pointer hold duration")
+    if type(steps) is not int or not 1 <= steps <= 60:
+        raise RuntimeError("Invalid pointer step count")
     x, y = (p + 1 for p in start)
     end_x, end_y = (p + 1 for p in end)
     before_x = x + 17 if x < 16367 else x - 17
     machine = "'" + vm.replace("'", "''") + "'"
+    moves = []
+    for step in range(1, steps + 1):
+        move_x = x + round((end_x - x) * step / steps)
+        move_y = y + round((end_y - y) * step / steps)
+        moves.append(f"$mouse.PutMouseEventAbsolute({move_x}, {move_y}, 0, 0, {button})")
+        if step < steps:
+            moves.append("Start-Sleep -Milliseconds 16")
     actions = (
         "$ErrorActionPreference = 'Stop'",
         "$virtualbox = New-Object -ComObject VirtualBox.VirtualBox",
@@ -54,7 +63,7 @@ def mouse(runner, vm, request, *, hold_ms=150):
         "Start-Sleep -Milliseconds 120",
         f"$pressed = $true; $mouse.PutMouseEventAbsolute({x}, {y}, 0, 0, {button})",
         "Start-Sleep -Milliseconds 150",
-        f"$mouse.PutMouseEventAbsolute({end_x}, {end_y}, 0, 0, {button})",
+        *moves,
         f"Start-Sleep -Milliseconds {hold_ms}",
         "} finally { try { if ($pressed) { "
         f"$mouse.PutMouseEventAbsolute({end_x}, {end_y}, 0, 0, 0)"

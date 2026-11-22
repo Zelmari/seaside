@@ -86,11 +86,12 @@ def run_resize(session, state):
         sizes = committed_sizes(log)
         return sizes[-1][0] if sizes and sizes[-1][1] == height else None
 
-    def covered(name):
+    def covered(name, *, opening=False):
         split = divider(sample_row(session, (x, y), width))
         if split is None:
             session.grab(output, name)
             raise RuntimeError(f"{name}: a pixel between the two tiles showed uncovered wallpaper")
+        require(opening or split < width, f"{name}: the second tile disappeared during the drag")
         return split
 
     def settled(expected):
@@ -114,6 +115,9 @@ def run_resize(session, state):
             observed.append(covered(f"drag-{name}"))
             if abs(observed[-1] - expected) <= 3:
                 session.grab(output, f"drag-{name}")
+                lower, upper = sorted((initial, expected))
+                require(any(lower + 3 < split < upper - 3 for split in observed),
+                        f"The {name} drag jumped directly to its final position: {observed}")
                 return {"sampled_columns": observed, "expected_column": expected}
         session.grab(output, f"drag-{name}")
         raise RuntimeError(f"The {name} drag did not move while the clients were paused: {observed}")
@@ -130,7 +134,7 @@ def run_resize(session, state):
             samples = []
             deadline = time.monotonic() + 0.6
             while time.monotonic() < deadline:
-                samples.append(covered("opening"))
+                samples.append(covered("opening", opening=True))
             require(samples, "The opening trial took no frame samples")
             session.grab(output, "opening")
             state["opening_columns"] = samples

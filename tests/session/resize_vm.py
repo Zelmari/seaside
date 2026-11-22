@@ -20,7 +20,7 @@ ARTIFACTS = {
 
 
 def send_input(runner, vm, message):
-    mouse(runner, vm, message["mouse"], hold_ms=1000)
+    mouse(runner, vm, message["mouse"], hold_ms=1000, steps=16)
 
 
 def follow(runner, vm, bridge, directory):
