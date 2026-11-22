@@ -62,15 +62,29 @@ def installed_payload(source, build, stage):
     return {name: stage / path for name, path in binaries.items()}
 
 
-def check_entrypoints(binaries, home):
+def check_entrypoints(binaries, home, source, build):
     for binary in binaries.values():
         assert not binary.is_symlink(), binary
         assert binary.open("rb").read(4) == b"\x7fELF", binary
         assert os.access(binary, os.X_OK), binary
     environment = dict(os.environ, HOME=str(home), XDG_CONFIG_HOME=str(home / "config"),
                        XDG_STATE_HOME=str(home / "state"))
-    cli = run(binaries["seasidectl"], "--help", env=environment)
-    assert cli.returncode == 0 and "Usage: seasidectl" in cli.stdout, cli
+    options = json.loads((build / "meson-info/intro-buildoptions.json").read_text())
+    package_version = next(row["value"] for row in options if row["name"] == "package_version")
+    project = json.loads((build / "meson-info/intro-projectinfo.json").read_text())
+    version = package_version or project["version"]
+    revision = (source / "packaging/source-revision").read_text().strip()
+    if (source / ".git").exists():
+        revision = run("git", "rev-parse", "--verify", "HEAD", cwd=source).stdout.strip()
+    if not revision or revision.startswith("$Format:"):
+        revision = "unknown"
+    for name, binary in binaries.items():
+        help_result = run(binary, "--help", stdin=subprocess.DEVNULL, env=environment)
+        assert help_result.returncode == 0 and f"Usage: {name}" in help_result.stdout, help_result
+        assert not help_result.stderr, help_result
+        version_result = run(binary, "--version", stdin=subprocess.DEVNULL, env=environment)
+        assert version_result.returncode == 0 and not version_result.stderr, version_result
+        assert version_result.stdout.strip() == f"{name} {version} (revision {revision})", version_result
     entry = run(binaries["seaside"], stdin=subprocess.DEVNULL, env=environment)
     assert entry.returncode == 1 and "active Linux console" in entry.stderr, entry
     assert not list(home.iterdir()), "An off-console launch wrote persistent state"
@@ -81,5 +95,6 @@ if __name__ == "__main__":
         trial = Path(directory)
         home = trial / "home"
         home.mkdir()
-        binaries = installed_payload(Path(sys.argv[1]), Path(sys.argv[2]), trial / "stage")
-        check_entrypoints(binaries, home)
+        source, build = map(Path, sys.argv[1:])
+        binaries = installed_payload(source, build, trial / "stage")
+        check_entrypoints(binaries, home, source, build)

@@ -1,3 +1,4 @@
+#include "build_info.hpp"
 #include "idle_power.hpp"
 #include "output_capture.h"
 #include "satellite.hpp"
@@ -1304,9 +1305,20 @@ int report_exit(const std::expected<Outcome, const char *> &result) noexcept {
 }
 } // namespace
 
-int main(int argc, char **) try {
+int main(int argc, char **argv) try {
+    if (argc == 2 && std::string_view(argv[1]) == "--help") {
+        std::fputs("Usage: seaside [--help | --version]\n"
+                   "Start Seaside as your normal user on the active Linux console.\n"
+                   "Run seasidectl --help for session controls.\n",
+                   stdout);
+        return EXIT_SUCCESS;
+    }
+    if (argc == 2 && std::string_view(argv[1]) == "--version") {
+        std::printf("seaside %s (revision %s)\n", SEASIDE_BUILD_VERSION, SEASIDE_BUILD_REVISION);
+        return EXIT_SUCCESS;
+    }
     if (argc != 1) {
-        std::fputs("Usage: seaside\n", stderr);
+        std::fputs("Usage: seaside [--help | --version]\n", stderr);
         return EXIT_FAILURE;
     }
     if (!seaside_tty_active_console()) {

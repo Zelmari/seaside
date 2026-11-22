@@ -299,13 +299,26 @@ TEST_F(OutputTrial, ReportsNoUsableOutputsAndRecoversTheSameOutputAndWorkspace) 
     const auto first = query("query.outputs")["outputs"].at(0);
     const auto workspace = query("query.focus")["workspace_id"];
     EXPECT_TRUE(first["connected"].get<bool>());
+    EXPECT_EQ(first["power_state"], "awake");
     EXPECT_TRUE(workspace.is_number_unsigned());
+
+    auto &status = drm.state.at(part3_output_handle(output.get()));
+    status.last_mode = {160, 90, 60000};
+    status.sleeping = true;
+    const auto sleeping = query("query.outputs")["outputs"].at(0);
+    EXPECT_EQ(sleeping["power_state"], "asleep");
+    EXPECT_EQ(sleeping["enabled"], true);
+    EXPECT_EQ(sleeping["mode"], first["mode"]);
+    EXPECT_TRUE(sleeping["hardware_cursor"].is_null());
+    status.sleeping = false;
+    EXPECT_EQ(query("query.outputs")["outputs"].at(0), first);
 
     detach(output, "monitor");
     const auto disconnected = query("query.outputs")["outputs"].at(0);
     EXPECT_EQ(disconnected["id"], first["id"]);
     EXPECT_EQ(disconnected["connected"], false);
     EXPECT_EQ(disconnected["enabled"], false);
+    EXPECT_EQ(disconnected["power_state"], "disabled");
     EXPECT_TRUE(query("query.focus")["output_id"].is_null());
     const auto remembered = query("query.workspaces")["workspaces"].at(0);
     EXPECT_EQ(remembered["owner_output_id"], first["id"]);
@@ -317,6 +330,41 @@ TEST_F(OutputTrial, ReportsNoUsableOutputsAndRecoversTheSameOutputAndWorkspace) 
     ASSERT_NO_FATAL_FAILURE(attach(output.get(), "monitor", 0));
     EXPECT_EQ(query("query.outputs")["outputs"].at(0), first);
     EXPECT_EQ(query("query.focus")["workspace_id"], workspace);
+}
+
+TEST_F(OutputTrial, ReportsOnlyActiveConfigAndShortcutsAcrossReloads) {
+    auto output = make_output();
+    ASSERT_TRUE(output);
+    ASSERT_NO_FATAL_FAILURE(attach(output.get(), "monitor", 0));
+    SessionControl control(*scene, *desktop, *outputs);
+    const auto query = [&](std::string_view method) {
+        auto result = control.query(method, *live, paths.user.string(), "ready", nullptr);
+        EXPECT_TRUE(result);
+        return result.value_or(IpcJson::object());
+    };
+    const auto startup = query("query.status")["config"];
+    EXPECT_EQ(startup["active_tiling"], true);
+    EXPECT_EQ(startup["active_layout"], "dwindle");
+    EXPECT_EQ(query("query.bindings")["bindings"].size(), default_bindings().size());
+
+    ASSERT_NO_FATAL_FAILURE(replace("[window]\ntiling=false\nlayout='scrolling'\n"
+                                    "[keybinds]\n'Ctrl+Super+M'='toggle_window_maximize'\n"));
+    ASSERT_TRUE(wait([this] { return !live->transaction().active().window.tiling; }));
+    const auto active = query("query.status")["config"];
+    EXPECT_EQ(active["active_tiling"], false);
+    EXPECT_EQ(active["active_layout"], "scrolling");
+    const auto accepted = query("query.bindings")["bindings"];
+    EXPECT_EQ(accepted, (IpcJson::array(
+                            {{{"chord", "Super+Ctrl+M"}, {"action", "toggle_window_maximize"}}})));
+
+    ASSERT_NO_FATAL_FAILURE(replace("[window]\nlayout='invalid'\n[keybinds]\n"));
+    ASSERT_TRUE(wait([this] { return live->transaction().diagnostic().has_value(); }));
+    EXPECT_EQ(query("query.status")["config"]["active_layout"], "scrolling");
+    EXPECT_EQ(query("query.bindings")["bindings"], accepted);
+
+    ASSERT_NO_FATAL_FAILURE(replace("[keybinds]\n"));
+    ASSERT_TRUE(wait([this] { return live->transaction().active().keybinds.empty(); }));
+    EXPECT_EQ(query("query.bindings")["bindings"], IpcJson::array());
 }
 
 TEST_F(OutputTrial, RanksAdvertisedModesAndKeepsTheAutomaticPrimaryStable) {

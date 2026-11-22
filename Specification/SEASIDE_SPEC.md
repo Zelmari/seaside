@@ -697,11 +697,12 @@ Every mutating operation executes the exact already-approved compositor action; 
 | JSON `method` | Parameters | Return / effect |
 |---|---|---|
 | `query.status` | `{}` | readiness and active/recovered config status; last error and pending restart |
-| `query.outputs` | `{}` | connected/disabled outputs, selectors, applied modes, cursor, VRR/tearing and color status |
+| `query.outputs` | `{}` | connected/disabled outputs, selectors, applied modes, power state, cursor, VRR/tearing and color status |
 | `query.workspaces` | `{}` | IDs, ownership, output association, visibility and focus |
 | `query.windows` | `{}` | ephemeral window ID, workspace, app ID/title, mapped/floating/fullscreen/maximized/pinned flags |
 | `query.focus` | `{}` | currently focused output/workspace/window IDs if any |
-| `query.config` | `{}` | active vs requested restart-only mode, TOML parse errors, last-good recovery status |
+| `query.config` | `{}` | active layout and tiling, active vs requested restart-only mode, TOML parse errors, last-good recovery status |
+| `query.bindings` | `{}` | active shortcuts and actions in normalized configuration syntax |
 | `query.diagnostics` | `{}` | per-output frame/presentation and direct-scanout results **where measurable** |
 | `query.night_light` | `{}` | configured enable value, effective global runtime enable state, temperature, and actual per-output support/applied state |
 | `action.focus` | `{"direction":"left"}` or other direction | focus neighbor in the same workspace using the edge rules in §4.4 |
@@ -752,6 +753,7 @@ The `seasidectl` CLI is a thin client for exactly these same methods. Its v1 com
 
 ```text
 seasidectl status                  -> query.status
+seasidectl bindings                -> query.bindings
 seasidectl outputs                 -> query.outputs
 seasidectl workspaces              -> query.workspaces
 seasidectl windows                  -> query.windows
@@ -790,11 +792,13 @@ Mode = {width: positive integer, height: positive integer, refresh_millihz: posi
 Capability = {supported: boolean?, applied: boolean?, reason: string?}
 Diagnostic = {component: string, message: string, path: string?, line: positive integer?, field: string?}
 ConfigStatus = {path: string, source: "user"|"last_good"|"defaults",
+                active_layout: "dwindle"|"scrolling", active_tiling: boolean,
                 active_workspace_mode: "global"|"per-monitor",
                 requested_workspace_mode: "global"|"per-monitor",
                 pending_restart: boolean, recovery_persisted: boolean, error: Diagnostic?}
 Output = {id: string, selector: string, identity_selector: string?, connector: string,
           connected: boolean, enabled: boolean, focused: boolean, disabled_reason: string?,
+          power_state: "awake"|"asleep"|"disabled",
           position: {x: integer, y: integer}, scale: number, rotation: 0|90|180|270,
           mode: Mode?, hardware_cursor: boolean?,
           adaptive_sync: Capability, tearing: Capability, night_light: Capability}
@@ -814,7 +818,7 @@ OutputDiagnostic = {output_id: string, backend: string?, renderer: string?,
                     discarded_frames: integer?, last_presentation_ns: decimal string?}
 ```
 
-An output record's geometry/config values describe its last applied/remembered state; `mode:null` means none is known. Unsupported or unobservable facts use the capability reason/nullable fields, not invented measurements. Workspace `owner_output_id` describes the remembered owner/last assignment, including a disconnected output; `output_id` is the current association, including temporary migration. A hidden workspace can retain that association without being visible. A window may have `workspace_id:null` before initial placement; focus IDs may be null when there is no eligible object. Nanosecond timestamps use decimal strings to preserve precision.
+An output record's geometry/config values describe its last applied or remembered state. A null `mode` means none is known. An asleep output keeps its logical assignment and remains enabled. A disconnected output reports disabled power state. Unsupported or unobservable facts use the capability reason and nullable fields. Workspace `owner_output_id` describes the remembered owner or last assignment, including a disconnected output. `output_id` describes the current association, including temporary migration. A hidden workspace can retain that association without being visible. A window may have `workspace_id:null` before initial placement. Focus IDs may be null when there is no eligible object. Nanosecond timestamps use decimal strings to preserve precision.
 
 | Method | Exact `result` object |
 |---|---|
@@ -824,6 +828,7 @@ An output record's geometry/config values describe its last applied/remembered s
 | `query.windows` | `{windows: array of Window}` |
 | `query.focus` | `Focus` |
 | `query.config` | `ConfigStatus` |
+| `query.bindings` | `{bindings: array of {chord: string, action: string}}` |
 | `query.diagnostics` | `{outputs: array of OutputDiagnostic, trace: TraceStatus}` |
 | `query.night_light` | `{configured_enabled: boolean, enabled: boolean, temperature_kelvin: integer, outputs: array of {output_id: string, supported: boolean?, applied: boolean?, reason: string?}}` |
 | `action.*` | `{accepted: true, changed: boolean}`; `accepted` means the action was dispatched, not that a client honored a close request; `changed` reports a committed compositor state change |

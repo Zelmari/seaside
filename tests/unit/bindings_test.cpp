@@ -69,7 +69,9 @@ TEST_F(BindingsTest, EveryApprovedKeyboardActionParsesWithItsArguments) {
                         "exit",
                         "exec foot"}) {
         SCOPED_TRACE(action);
-        EXPECT_TRUE(seaside::parse_action(action, chord));
+        auto parsed = seaside::parse_action(action, chord);
+        ASSERT_TRUE(parsed);
+        EXPECT_EQ(seaside::parse_action(seaside::format_action(*parsed), chord), parsed);
     }
     EXPECT_EQ(seaside::parse_action("resize_window left", chord).value().argument, 32);
     EXPECT_EQ(seaside::parse_action("workspace 2147483647", chord).value().argument, 2147483647);
@@ -179,6 +181,17 @@ TEST_F(BindingsTest, TypedActionResultsRetainTheirSpecificKindsAndArguments) {
 TEST_F(BindingsTest, MouseGestureAndActionContextsMustMatch) {
     auto left = seaside::parse_chord("Super+MouseLeftDrag").value();
     auto right = seaside::parse_chord("Super+MouseRightDrag").value();
+    EXPECT_EQ(seaside::format_chord(left), "Super+MouseLeftDrag");
+    EXPECT_EQ(seaside::format_chord(right), "Super+MouseRightDrag");
+    const auto alias = seaside::parse_chord("Ctrl+Super+Page_Up");
+    ASSERT_TRUE(alias);
+    const auto canonical = seaside::format_chord(*alias);
+    EXPECT_TRUE(canonical.starts_with("Super+Ctrl+"));
+    EXPECT_EQ(seaside::parse_chord(canonical), alias);
+    EXPECT_EQ(seaside::format_action(seaside::parse_action("move_window", left).value()),
+              "move_window");
+    EXPECT_EQ(seaside::format_action(seaside::parse_action("resize_window", right).value()),
+              "resize_window");
     EXPECT_TRUE(seaside::parse_action("move_window", left));
     EXPECT_TRUE(seaside::parse_action("resize_window", right));
     EXPECT_FALSE(seaside::parse_action("resize_window", left));
@@ -198,6 +211,7 @@ TEST_F(BindingsTest, ShellCommandBytesArePreservedAsData) {
     ASSERT_TRUE(parsed);
     EXPECT_EQ(parsed->text, command);
     EXPECT_EQ(parsed->kind, seaside::ActionKind::exec);
+    EXPECT_EQ(seaside::format_action(*parsed), "exec " + command);
 }
 
 TEST_F(BindingsTest, SelectorsUseExactPrefixesAndOpaqueValues) {

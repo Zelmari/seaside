@@ -34,6 +34,7 @@ def main():
     binary = sys.argv[1]
     commands = [
         (["status"], "query.status", {}),
+        (["bindings"], "query.bindings", {}),
         (["outputs"], "query.outputs", {}),
         (["workspaces"], "query.workspaces", {}),
         (["windows"], "query.windows", {}),

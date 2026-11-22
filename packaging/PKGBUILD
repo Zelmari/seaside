@@ -28,7 +28,7 @@ sha256sums=('@SOURCE_SHA256@')
 
 build() {
   cd "$srcdir/$pkgname-$pkgver"
-  arch-meson --sysconfdir=/etc . build
+  arch-meson --sysconfdir=/etc -Dpackage_version="$pkgver-$pkgrel" . build
   meson compile -C build seaside seasidectl
 }
 

@@ -1,3 +1,4 @@
+#include "build_info.hpp"
 #include "ipc_protocol.hpp"
 
 #include <algorithm>
@@ -24,7 +25,7 @@ using Command = std::pair<std::string_view, IpcJson>;
 
 constexpr auto connection_timeout = std::chrono::seconds(5);
 constexpr std::string_view usage =
-    "Usage: seasidectl status|outputs|workspaces|windows|exit|events\n"
+    "Usage: seasidectl status|bindings|outputs|workspaces|windows|exit|events\n"
     "       seasidectl focus [left|right|up|down]\n"
     "       seasidectl workspace ID\n"
     "       seasidectl workspace transfer ID SELECTOR\n"
@@ -34,7 +35,8 @@ constexpr std::string_view usage =
     "       seasidectl window to-workspace ID\n"
     "       seasidectl night-light status|on|off\n"
     "       seasidectl debug render\n"
-    "       seasidectl trace start|stop|export\n";
+    "       seasidectl trace start|stop|export\n"
+    "       seasidectl --help | --version\n";
 
 IpcJson integer(std::string_view input) {
     std::uint64_t value = 0;
@@ -86,13 +88,10 @@ std::optional<Command> command(Args args) {
         return {};
     }
     constexpr std::pair<std::string_view, std::string_view> simple[]{
-        {"status", "query.status"},
-        {"outputs", "query.outputs"},
-        {"workspaces", "query.workspaces"},
-        {"windows", "query.windows"},
-        {"focus", "query.focus"},
-        {"events", "events.subscribe"},
-        {"exit", "action.exit"},
+        {"status", "query.status"},     {"bindings", "query.bindings"},
+        {"outputs", "query.outputs"},   {"workspaces", "query.workspaces"},
+        {"windows", "query.windows"},   {"focus", "query.focus"},
+        {"events", "events.subscribe"}, {"exit", "action.exit"},
     };
     const std::string_view group = args[0];
     if (args.size() == 1) {
@@ -281,6 +280,11 @@ int error(std::string_view message) {
 int run(Args args) {
     if (args.size() == 1 && std::string_view(args.front()) == "--help") {
         std::cout << usage;
+        return 0;
+    }
+    if (args.size() == 1 && std::string_view(args.front()) == "--version") {
+        std::cout << "seasidectl " << SEASIDE_BUILD_VERSION << " (revision "
+                  << SEASIDE_BUILD_REVISION << ")\n";
         return 0;
     }
     const auto selected = command(args);

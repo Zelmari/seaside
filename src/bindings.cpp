@@ -1,5 +1,6 @@
 #include "bindings.hpp"
 
+#include <algorithm>
 #include <array>
 #include <charconv>
 #include <limits>
@@ -9,6 +10,35 @@
 
 namespace seaside {
 namespace {
+using Modifier = std::pair<std::string_view, std::uint8_t>;
+constexpr std::array modifiers{Modifier{"Super", 1}, Modifier{"Ctrl", 2}, Modifier{"Alt", 4},
+                               Modifier{"Shift", 8}};
+
+using ActionName = std::pair<std::string_view, ActionKind>;
+constexpr std::array actions{
+    ActionName{"toggle_window_tiling", ActionKind::toggle_window_tiling},
+    ActionName{"focus", ActionKind::focus},
+    ActionName{"cycle_focus_mru", ActionKind::cycle_focus_mru},
+    ActionName{"move_window", ActionKind::move_window},
+    ActionName{"resize_window", ActionKind::resize_window},
+    ActionName{"swap_window", ActionKind::swap_window},
+    ActionName{"workspace", ActionKind::workspace},
+    ActionName{"move_to_workspace", ActionKind::move_to_workspace},
+    ActionName{"transfer_workspace", ActionKind::transfer_workspace},
+    ActionName{"toggle_window_pin", ActionKind::toggle_window_pin},
+    ActionName{"toggle_window_maximize", ActionKind::toggle_window_maximize},
+    ActionName{"toggle_window_fullscreen", ActionKind::toggle_window_fullscreen},
+    ActionName{"close_window", ActionKind::close_window},
+    ActionName{"night_light", ActionKind::night_light},
+    ActionName{"exit", ActionKind::exit},
+    ActionName{"exec", ActionKind::exec},
+};
+
+using DirectionName = std::pair<std::string_view, Direction>;
+constexpr std::array directions{
+    DirectionName{"left", Direction::left}, DirectionName{"right", Direction::right},
+    DirectionName{"up", Direction::up}, DirectionName{"down", Direction::down}};
+
 Diagnostic error(std::string_view field, std::string_view message) {
     return {"", 0, 0, std::string(field.substr(0, 256)), std::string(message.substr(0, 512))};
 }
@@ -40,15 +70,8 @@ std::vector<std::string_view> words(std::string_view input) {
 }
 
 Direction direction(std::string_view value) {
-    if (value == "left")
-        return Direction::left;
-    if (value == "right")
-        return Direction::right;
-    if (value == "up")
-        return Direction::up;
-    if (value == "down")
-        return Direction::down;
-    return Direction::none;
+    const auto found = std::ranges::find(directions, value, &DirectionName::first);
+    return found == directions.end() ? Direction::none : found->second;
 }
 
 std::optional<std::int64_t> positive(std::string_view value, std::int64_t maximum) {
@@ -86,16 +109,12 @@ std::expected<Chord, Diagnostic> parse_chord(std::string_view value) {
         auto split = value.find('+');
         if (split == std::string_view::npos)
             break;
-        auto modifier = value.substr(0, split);
-        std::uint8_t bit = modifier == "Super"   ? 1
-                           : modifier == "Ctrl"  ? 2
-                           : modifier == "Alt"   ? 4
-                           : modifier == "Shift" ? 8
-                                                 : 0;
-        if (!bit || (result.modifiers & bit)) {
+        const auto modifier =
+            std::ranges::find(modifiers, value.substr(0, split), &Modifier::first);
+        if (modifier == modifiers.end() || (result.modifiers & modifier->second)) {
             return std::unexpected(error("keybinds", "Unknown or duplicate modifier"));
         }
-        result.modifiers |= bit;
+        result.modifiers |= modifier->second;
         value.remove_prefix(split + 1);
     }
     if (value == "MouseLeftDrag" || value == "MouseRightDrag") {
@@ -122,10 +141,15 @@ std::expected<Action, Diagnostic> parse_action(std::string_view value, const Cho
     if (tokens.empty()) {
         return std::unexpected(error("keybinds", "Expected an action"));
     }
-    Action result;
     const auto command = tokens[0];
+    const auto operation = std::ranges::find(actions, command, &ActionName::first);
+    if (operation == actions.end()) {
+        return std::unexpected(error("keybinds", "Unknown action or invalid argument count"));
+    }
+    Action result;
+    result.kind = operation->second;
     const bool keyboard = chord.kind == ChordKind::keyboard;
-    if (command == "exec") {
+    if (result.kind == ActionKind::exec) {
         auto position = value.find(command) + command.size();
         while (position < value.size() && whitespace(value[position]))
             ++position;
@@ -133,15 +157,12 @@ std::expected<Action, Diagnostic> parse_action(std::string_view value, const Cho
             return std::unexpected(
                 error("keybinds", "exec requires a keyboard chord and shell command"));
         }
-        result.kind = ActionKind::exec;
         result.text = value.substr(position);
         return result;
     }
-    if (command == "move_window" || command == "resize_window") {
-        result.kind =
-            command == "move_window" ? ActionKind::move_window : ActionKind::resize_window;
+    if (result.kind == ActionKind::move_window || result.kind == ActionKind::resize_window) {
         if (!keyboard) {
-            const bool matched = command == "move_window"
+            const bool matched = result.kind == ActionKind::move_window
                                      ? chord.kind == ChordKind::mouse_left_drag
                                      : chord.kind == ChordKind::mouse_right_drag;
             if (tokens.size() == 1 && matched)
@@ -152,33 +173,17 @@ std::expected<Action, Diagnostic> parse_action(std::string_view value, const Cho
     } else if (!keyboard) {
         return std::unexpected(error("keybinds", "Only move/resize actions accept mouse gestures"));
     }
-    const std::array simple{
-        std::pair{"toggle_window_tiling", ActionKind::toggle_window_tiling},
-        std::pair{"cycle_focus_mru", ActionKind::cycle_focus_mru},
-        std::pair{"toggle_window_pin", ActionKind::toggle_window_pin},
-        std::pair{"toggle_window_maximize", ActionKind::toggle_window_maximize},
-        std::pair{"toggle_window_fullscreen", ActionKind::toggle_window_fullscreen},
-        std::pair{"close_window", ActionKind::close_window},
-        std::pair{"exit", ActionKind::exit},
-    };
-    for (const auto &[name, kind] : simple) {
-        if (command == name && tokens.size() == 1) {
-            result.kind = kind;
-            return result;
-        }
-    }
-    if (command == "focus" || command == "swap_window" || command == "move_window" ||
-        command == "resize_window") {
-        const bool resize = command == "resize_window";
+    switch (result.kind) {
+    case ActionKind::focus:
+    case ActionKind::swap_window:
+    case ActionKind::move_window:
+    case ActionKind::resize_window: {
+        const bool resize = result.kind == ActionKind::resize_window;
         if ((tokens.size() != 2 && !(resize && tokens.size() == 3)) ||
             (result.direction = direction(tokens[1])) == Direction::none) {
             return std::unexpected(
                 error("keybinds", "Expected a direction and permitted arguments"));
         }
-        result.kind = command == "focus"         ? ActionKind::focus
-                      : command == "swap_window" ? ActionKind::swap_window
-                      : command == "move_window" ? ActionKind::move_window
-                                                 : ActionKind::resize_window;
         if (resize) {
             result.argument = 32;
             if (tokens.size() == 3) {
@@ -191,16 +196,17 @@ std::expected<Action, Diagnostic> parse_action(std::string_view value, const Cho
         }
         return result;
     }
-    if ((command == "workspace" || command == "move_to_workspace") && tokens.size() == 2) {
+    case ActionKind::workspace:
+    case ActionKind::move_to_workspace: {
+        if (tokens.size() != 2)
+            break;
         auto number = positive(tokens[1], std::numeric_limits<std::int32_t>::max());
         if (!number)
             return std::unexpected(error("keybinds", "Workspace ID is outside 1..2147483647"));
-        result.kind =
-            command == "workspace" ? ActionKind::workspace : ActionKind::move_to_workspace;
         result.argument = *number;
         return result;
     }
-    if (command == "transfer_workspace") {
+    case ActionKind::transfer_workspace: {
         auto position = value.find(command) + command.size();
         while (position < value.size() && whitespace(value[position]))
             ++position;
@@ -210,21 +216,68 @@ std::expected<Action, Diagnostic> parse_action(std::string_view value, const Cho
         auto selector = parse_output_selector(suffix);
         if (!selector)
             return std::unexpected(selector.error());
-        result.kind = ActionKind::transfer_workspace;
         result.text = suffix;
         return result;
     }
-    if (command == "night_light" && tokens.size() == 2) {
+    case ActionKind::night_light:
+        if (tokens.size() != 2)
+            break;
         if (tokens[1] != "on" && tokens[1] != "off" && tokens[1] != "toggle") {
             return std::unexpected(error("keybinds", "Expected night_light on, off or toggle"));
         }
-        result.kind = ActionKind::night_light;
         result.night_light = tokens[1] == "on"    ? NightLightAction::on
                              : tokens[1] == "off" ? NightLightAction::off
                                                   : NightLightAction::toggle;
         return result;
+    default:
+        if (tokens.size() == 1)
+            return result;
+        break;
     }
     return std::unexpected(error("keybinds", "Unknown action or invalid argument count"));
+}
+
+std::string format_chord(const Chord &chord) {
+    std::string result;
+    for (const auto &[name, bit] : modifiers) {
+        if (chord.modifiers & bit) {
+            result += name;
+            result += '+';
+        }
+    }
+    if (chord.kind != ChordKind::keyboard) {
+        result += chord.kind == ChordKind::mouse_left_drag ? "MouseLeftDrag" : "MouseRightDrag";
+    } else {
+        std::array<char, 64> name{};
+        xkb_keysym_get_name(chord.keysym, name.data(), name.size());
+        result += name.data();
+    }
+    return result;
+}
+
+std::string format_action(const Action &action) {
+    const auto operation = std::ranges::find(actions, action.kind, &ActionName::second);
+    std::string result(operation->first);
+    if (action.direction != Direction::none) {
+        const auto named = std::ranges::find(directions, action.direction, &DirectionName::second);
+        result += ' ';
+        result += named->first;
+    }
+    if (action.argument > 0 &&
+        (action.kind != ActionKind::resize_window || action.argument != 32)) {
+        result += ' ';
+        result += std::to_string(action.argument);
+    }
+    if (!action.text.empty()) {
+        result += ' ';
+        result += action.text;
+    }
+    if (action.kind == ActionKind::night_light) {
+        result += action.night_light == NightLightAction::on    ? " on"
+                  : action.night_light == NightLightAction::off ? " off"
+                                                                : " toggle";
+    }
+    return result;
 }
 
 BindingMap default_bindings() {

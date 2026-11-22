@@ -62,6 +62,7 @@ struct Method {
 
 constexpr std::array methods{
     Method{"query.status"},
+    Method{"query.bindings"},
     Method{"query.outputs"},
     Method{"query.workspaces"},
     Method{"query.windows"},

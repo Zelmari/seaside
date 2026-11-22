@@ -75,15 +75,26 @@ std::string_view workspace_mode(WorkspaceMode mode) {
 
 Json config_status(const LiveConfig &config, std::string_view path) {
     const auto &transaction = config.transaction();
+    const auto &active = transaction.active();
     constexpr std::string_view sources[] = {"user", "last_good", "defaults"};
     return {{"path", path},
             {"source", sources[static_cast<unsigned>(config.source())]},
-            {"active_workspace_mode", workspace_mode(transaction.active().workspaces.mode)},
+            {"active_layout", active.window.layout == Layout::dwindle ? "dwindle" : "scrolling"},
+            {"active_tiling", active.window.tiling},
+            {"active_workspace_mode", workspace_mode(active.workspaces.mode)},
             {"requested_workspace_mode", workspace_mode(transaction.requested().workspaces.mode)},
             {"pending_restart", transaction.restart_pending()},
             {"recovery_persisted", transaction.recovery_persisted()},
             {"error",
              transaction.diagnostic() ? ipc_diagnostic(*transaction.diagnostic()) : Json(nullptr)}};
+}
+
+Json bindings(const BindingMap &active) {
+    auto entries = Json::array();
+    for (const auto &[chord, action] : active) {
+        entries.push_back({{"chord", format_chord(chord)}, {"action", format_action(action)}});
+    }
+    return {{"bindings", std::move(entries)}};
 }
 } // namespace
 
@@ -238,6 +249,9 @@ IpcJson SessionControl::output_rows() const {
             {"connector", output.connector},
             {"connected", output.handle != nullptr},
             {"enabled", output.enabled},
+            {"power_state", !output.enabled || !output.handle ? "disabled"
+                            : output.status.sleeping          ? "asleep"
+                                                              : "awake"},
             {"focused", desktop_.windows().focused_output() == id},
             {"disabled_reason",
              output.disabled_reason.empty() ? Json(nullptr) : Json(output.disabled_reason)},
@@ -316,6 +330,9 @@ IpcResult SessionControl::query(std::string_view method, const LiveConfig &confi
                     {"phase", phase},
                     {"config", config_status(config, path)},
                     {"last_error", last_error}};
+    }
+    if (method == "query.bindings") {
+        return bindings(config.transaction().active().keybinds);
     }
     if (method == "query.outputs") {
         outputs_.refresh();

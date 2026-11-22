@@ -13,6 +13,29 @@ if host_machine.system() != 'linux'
   error('Seaside targets Arch Linux; use a Linux build environment.')
 endif
 
+fs = import('fs')
+archive_revision = fs.read('packaging/source-revision').strip()
+if archive_revision.startswith('$Format:')
+  archive_revision = 'unknown'
+endif
+git = find_program('git', required: false)
+in_checkout = git.found() and fs.exists('.git')
+package_version = get_option('package_version')
+build_info_data = configuration_data()
+build_info_data.set_quoted('SEASIDE_BUILD_VERSION', package_version == '' ? meson.project_version() : package_version)
+revision_placeholder = 'SEASIDE_REVISION_PLACEHOLDER'
+build_info_data.set_quoted('SEASIDE_BUILD_REVISION', in_checkout ? revision_placeholder : archive_revision)
+build_info = configure_file(input: 'src/build_info.hpp.in',
+  output: in_checkout ? 'build_info.hpp.in' : 'build_info.hpp',
+  configuration: build_info_data,
+)
+if in_checkout
+  build_info = vcs_tag(input: build_info, output: 'build_info.hpp',
+    command: [git, 'rev-parse', '--verify', 'HEAD'], fallback: archive_revision,
+    replace_string: revision_placeholder,
+  )
+endif
+
 add_project_arguments('-DWLR_USE_UNSTABLE', language: 'c')
 
 wlroots = dependency('wlroots-0.20', version: ['>=0.20.2', '<0.21.0'], include_type: 'system')
@@ -426,7 +449,7 @@ ipc_foundation = static_library(
   link_with: config_foundation, install: false,
 )
 seasidectl = executable(
-  'seasidectl', 'src/seasidectl.cpp',
+  'seasidectl', ['src/seasidectl.cpp', build_info],
   include_directories: include_directories('src'),
   dependencies: nlohmann_json, link_with: ipc_foundation, install: true,
 )
@@ -481,7 +504,7 @@ executable('seaside-part9-panel',
 )
 
 seaside = executable(
-  'seaside', ['src/session_entry.cpp', 'src/session_control.cpp', 'src/output_config.cpp'],
+  'seaside', ['src/session_entry.cpp', 'src/session_control.cpp', 'src/output_config.cpp', build_info],
   include_directories: include_directories('src'),
   dependencies: [wlroots, wayland_server, pixman, libdrm, systemd, pipewire, xkbcommon, xau, threads, nlohmann_json],
   link_with: [core, tty_foundation, config_foundation, capture_foundation, session_foundation,

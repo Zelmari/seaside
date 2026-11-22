@@ -1,0 +1,7 @@
+#ifndef SEASIDE_BUILD_INFO_HPP
+#define SEASIDE_BUILD_INFO_HPP
+
+#mesondefine SEASIDE_BUILD_VERSION
+#mesondefine SEASIDE_BUILD_REVISION
+
+#endif

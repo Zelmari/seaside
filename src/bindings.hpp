@@ -67,6 +67,8 @@ using BindingMap = std::map<Chord, Action>;
 std::expected<OutputSelector, Diagnostic> parse_output_selector(std::string_view value);
 std::expected<Chord, Diagnostic> parse_chord(std::string_view value);
 std::expected<Action, Diagnostic> parse_action(std::string_view value, const Chord &chord);
+std::string format_chord(const Chord &chord);
+std::string format_action(const Action &action);
 BindingMap default_bindings();
 
 } // namespace seaside
