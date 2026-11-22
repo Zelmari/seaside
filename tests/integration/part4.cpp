@@ -887,15 +887,20 @@ bool run_opening_transaction(const Fixture &fixture) {
     // Keep the previous layout until the existing client submits its
     // response. The new client already has a buffer at the right size.
     REQUIRE(wait_pixel(connection, first, output.get(), 110, 55, red));
-    REQUIRE(connection.attach_configured(first, red));
-    REQUIRE(connection.wait(second, [&] { return second.configured.activated; }));
-    REQUIRE(wait_pixel(connection, second, output.get(), 110, 55, green));
-    REQUIRE(wait_pixel(connection, first, output.get(), 40, 55, red));
     const auto right = desktop.windows().focused_window();
     REQUIRE(right && right != left);
+    REQUIRE(!desktop.button(left, BTN_LEFT, true, 0, 110, 45));
+    REQUIRE(!desktop.button(left, BTN_LEFT, false, 0, 110, 45));
+    seaside_scene_target shown{};
+    REQUIRE(fixture.scene.window_at(110, 45, shown) && shown.id == left);
+    REQUIRE(desktop.windows().focused_window() == left);
+    REQUIRE(connection.attach_configured(first, red));
+    REQUIRE(wait_pixel(connection, second, output.get(), 110, 55, green));
+    REQUIRE(wait_pixel(connection, first, output.get(), 40, 55, red));
 
     desktop.enable_frame_paced_resize();
     REQUIRE(begin_drag(fixture, *right, BTN_RIGHT, 110, 45));
+    REQUIRE(connection.wait(second, [&] { return second.configured.activated; }));
     desktop.motion(115, 45);
     desktop.motion(130, 45);
     REQUIRE(desktop.windows().view(left).geometry.width == 80);

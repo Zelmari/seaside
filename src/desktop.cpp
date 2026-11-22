@@ -801,22 +801,20 @@ bool Desktop::button(WindowId id, std::uint32_t button, bool pressed, std::uint8
         }
         windows_.focus_output_at(x, y);
     }
-    if (!id || (button != BTN_LEFT && button != BTN_RIGHT) || !std::isfinite(x) ||
-        !std::isfinite(y)) {
-        project();
-        return false;
+    if (id && (button == BTN_LEFT || button == BTN_RIGHT) && std::isfinite(x) && std::isfinite(y)) {
+        const auto chord =
+            button == BTN_LEFT ? ChordKind::mouse_left_drag : ChordKind::mouse_right_drag;
+        const auto binding = bindings_.find({modifiers, chord, 0});
+        const auto view = windows_.view(id);
+        if (binding != bindings_.end() && view.visible && !view.maximized && !view.fullscreen) {
+            drag_ = Drag{id, button, binding->second.kind == ActionKind::resize_window, x, y};
+        }
     }
-    const auto chord =
-        button == BTN_LEFT ? ChordKind::mouse_left_drag : ChordKind::mouse_right_drag;
-    const auto binding = bindings_.find({modifiers, chord, 0});
-    const auto view = windows_.view(id);
-    if (binding == bindings_.end() || !view.visible || view.maximized || view.fullscreen) {
+    // Focusing by click or arming a drag must not publish an unfinished tiled opening.
+    if (opening_.empty()) {
         project();
-        return false;
     }
-    drag_ = Drag{id, button, binding->second.kind == ActionKind::resize_window, x, y};
-    project();
-    return true;
+    return drag_.has_value();
 } catch (...) {
     failed_ = true;
     return false;
