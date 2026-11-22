@@ -612,6 +612,17 @@ test('part8-night-light', part8_night_light, suite: ['integration', 'part8'], ti
   env: {'SEASIDE_TEST_PART': '8', 'SEASIDE_REQUIREMENTS': '8.2,11,12.2b'},
 )
 
+scanout_release = executable(
+  'seaside-scanout-release', 'tests/integration/scanout_release.c',
+  include_directories: include_directories('src'),
+  dependencies: [wlroots, wayland_server, libdrm],
+  link_args: ['-Wl,--wrap=wlr_output_commit_state', '-Wl,--wrap=wlr_scene_output_build_state'],
+  link_with: core, install: false,
+)
+test('part8-scanout-release', scanout_release, suite: ['integration', 'part8'], timeout: 20,
+  env: {'SEASIDE_TEST_PART': '8', 'SEASIDE_REQUIREMENTS': '6.1,12.2b'},
+)
+
 appearance_tests = executable(
   'seaside-appearance-tests',
   ['tests/unit/render_assets_test.cpp', 'tests/integration/part6_appearance.cpp',
