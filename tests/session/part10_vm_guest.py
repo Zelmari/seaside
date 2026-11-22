@@ -38,6 +38,7 @@ TITLE = "Part 10 Package Pattern"
 STARTS = 3
 WORKSPACE_CYCLES = 48
 MODE_CYCLES = 2
+FULLSCREEN_SECONDS = 45
 
 
 def download(name, path, limit):
@@ -214,8 +215,13 @@ def first_use(session, temporary, state):
     x, y = output["position"]["x"], output["position"]["y"]
     require(session.pixel(x + 1, y + 1) == (0, 0, 0), "First-use wallpaper is not black")
     session.grab(output, "first-use")
+    render = session.diagnostics(output)
+    plane = re.search(r"^seaside READY cursor-plane=([1-9][0-9]*)$",
+                      session.log.read_text(errors="replace"), re.MULTILINE)
     state["first_use"] = {"config": "matches canonical example", "default_autostart": "empty",
-                          "wallpaper": "black", "connector": output["connector"], "mode": output["mode"]}
+                          "wallpaper": "black", "connector": output["connector"], "mode": output["mode"],
+                          "renderer": render["renderer"], "backend": render["backend"],
+                          "cursor_plane": int(plane[1])}
 
     event("open-foot", "launch the packaged default terminal shortcut")
     wait_for(lambda: standard["foot_started"](session.process), 12, "foot launched from the clean config",
@@ -256,13 +262,16 @@ def first_use(session, temporary, state):
 
 
 def recover_config(session, generated, state):
-    initial = session.ctl("config")
+    def config():
+        return session.ctl("status")["config"]
+
+    initial = config()
     session.replace(b"[window\n")
-    session.wait(lambda: session.ctl("config")["error"], "a reported bad package configuration")
-    require(session.ctl("config")["source"] == initial["source"],
+    session.wait(lambda: config()["error"], "a reported bad package configuration")
+    require(config()["source"] == initial["source"],
             "A rejected configuration replaced the active source")
     session.replace(generated)
-    session.wait(lambda: not session.ctl("config")["error"], "the repaired configuration")
+    session.wait(lambda: not config()["error"], "the repaired configuration")
     state["config_recovery"] = "invalid edit rejected and accepted bytes restored"
 
 
@@ -450,7 +459,7 @@ def stability(session, generated, state):
                             session.window("Part 10 Stability Pattern")["id"] == mapped["id"],
                             "Slow IPC churn disrupted the mapped client")
         require(session.ctl("window", "toggle-fullscreen")["changed"], "The stability client did not fullscreen")
-        deadline = time.monotonic() + 15
+        deadline = time.monotonic() + FULLSCREEN_SECONDS
         frames = 0
         while time.monotonic() < deadline:
             old = session.diagnostics(session.focused_output())["presented_frames"]
@@ -469,6 +478,7 @@ def stability(session, generated, state):
             after["VmRSS"] <= before["VmRSS"] + 32 * 1024,
             "The bounded stability cycle retained more descriptors or memory than expected")
     regressions.update(status="pass", workspace_cycles=WORKSPACE_CYCLES, fullscreen_frames=frames,
+                       fullscreen_seconds=FULLSCREEN_SECONDS,
                        seconds=round(time.monotonic() - first, 2), before=before, after=after)
     state["stability"] = regressions
 
@@ -540,16 +550,26 @@ def installed_trial(source, runtime, results, state):
             event("package", "pacman install on the disposable guest")
             pacman(["-U", "--noconfirm", archive], package_log, env)
         verify_installed(archive, version, results, env)
+        packages = checked(["/usr/bin/pacman", "-Q", "systemd", "polkit", "mesa", "wlroots0.20",
+                            "wayland-protocols", "pipewire", "wireplumber", "xdg-desktop-portal",
+                            "xdg-desktop-portal-wlr", "wofi", "foot", "xwayland-satellite"], env=env)
+        state["guest_packages"] = dict(line.split(maxsplit=1) for line in packages.decode().splitlines())
         require(not config.exists(), "Package installation created a user configuration")
         repo = prepare_fixtures(source, results, env)
         with InstalledSession(repo, results, env) as session:
             generated = first_use(session, runtime, state)
+            event("part10", "verify live configuration recovery")
             recover_config(session, generated, state)
+            event("part10", "verify packaged media keys and playback")
             media_keys(session, state)
+            event("part10", "verify portal recovery and installed capture routes")
             portal_recovery_and_capture(session, generated, state)
+            event("part10", "verify lazy X11 startup and satellite restart")
             satellite_restart(session, state)
+            event("part10", "exercise mode changes, slow IPC and fullscreen stability")
             stability(session, generated, state)
             session.close()
+        event("part10", "verify restart paths and missing playback device")
         starts_and_failure(repo, results, env, state)
         missing_audio_device(repo, runtime, results, state)
         if installing:
