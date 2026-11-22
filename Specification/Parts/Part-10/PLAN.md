@@ -14,7 +14,8 @@ native Framework Desktop evidence remains a release requirement.
 | 10B. Verify the installed session | Run the packaged binaries from a logged-in foreground TTY. Exercise generated defaults, ordinary desktop use, strict service preflight, actual portal capture and failure recovery. | The installed binary starts with package-owned defaults, launches `foot` on demand, survives a VT round trip and returns to the same TTY on exit. Induced preflight failure returns a useful error to that TTY. A real chooser and receiver verify installed capture paths. |
 | 10C. Extend the regression and stability harness | Add a requirement-tagged `part10` package suite and an installed-package leg for the existing Arch VM runner. Run the full Meson harness, code-quality checks, sanitizers and bounded repeat scenarios. | Reports include exact source and package IDs, commands, test outcomes, relevant logs and visual evidence, and cleanup observations. Prior parts' suites still run through the normal harness. |
 | 10D. Qualify the native Framework Desktop | Install the candidate on native Arch and work through the carried-forward desktop checklist. Automate measurements and assertions where the native session allows them. | Record actual AMD display/input behavior, playback and capture in the intended applications, gaming, recovery, and reproducible performance measurements. Mark unavailable checks with their specific blocker. |
-| 10E. Document the candidate and close release gates | Update install, first-use, troubleshooting, and supported-environment documentation. Reconcile the actual results against the v1 gates and record decisions and artifacts in `HANDOFF.md`. | Report package readiness and release qualification using observed evidence. Required failures or unavailable native evidence keep v1 release qualification open. |
+| 10E. Make the README and documentation usable | Review the whole public documentation tree, organize it around reader tasks, and audit what belongs in Git, release assets, and local test output. | A clean-checkout reader can find and follow the install, use, troubleshoot and contribute paths. Links, documented commands, and tracked/ignored examples are checked. |
+| 10F. Document the candidate and close release gates | Reconcile actual results against the v1 gates. Record decisions, supported environments and evidence in `HANDOFF.md`, and prepare release notes matched to the package. | Report package readiness and release qualification using observed evidence. Required failures or unavailable native evidence keep v1 release qualification open. |
 
 ## Build and install acceptance
 
@@ -75,6 +76,41 @@ native Framework Desktop evidence remains a release requirement.
   VM's usual checkout, rebuild `build/seaside`, and verify its exact revision
   and TTY startup through the Council runner.
   [Harness contract](../../SEASIDE_SPEC.md#122b-incremental-test-harness-and-minimum-human-involvement)
+
+## README, navigation, and what to share
+
+- Rewrite the root README as the starting point. Explain what Seaside does,
+  the current project status and supported environments, prerequisites, how
+  to install the available package or build from source, and how to start and
+  exit from a logged-in TTY. Make first-use actions easy to scan. Include the
+  default terminal shortcut, config location and example, and clear next
+  steps for troubleshooting and contributing. Put detailed workflows in the
+  documentation linked from the README.
+- Organize the docs index by reader task. Give users direct routes to install,
+  first use, settings and bindings, `seasidectl`, X11/audio/sharing, supported
+  hardware and troubleshooting. Give contributors direct routes to build
+  and test, package and reproduce a result, and find the design and historical
+  handoffs. Explain the roles of the design, canonical config, release status,
+  and dated evidence. Audit the entire tree for stale present-tense claims,
+  duplicate instructions, unexplained terms, and commands that depend on local
+  paths or preinstalled tools. The current public documentation record stops
+  at Part 3 groundwork and needs reconciliation with the later evidence.
+- Audit tracked files and `.gitignore` together. Track source, test fixtures,
+  package recipes and intentional assets, canonical examples, durable docs,
+  and curated evidence that explains verified behavior. Attach the built
+  package, checksum, and supporting provenance to the authorized release or
+  handoff. Keep build trees, package archives, caches, generated test output,
+  personal instructions, local configs, and raw captures and logs local by
+  default. When a report needs an extract, share only the useful portion and
+  remove private paths, device identifiers, tokens, and desktop content as
+  applicable. Check intentional fixtures and package sources remain trackable
+  while representative generated artifacts stay ignored.
+- Review the docs from a clean checkout and the installed guest package.
+  Start at the root README and follow the paths to installation, first launch,
+  a config change, a failed-startup diagnosis, and the contributor test run.
+  Verify links and anchors, config and command examples, stated defaults,
+  package paths, and the prerequisites and expected outcome for each common
+  workflow. Fix reader-facing gaps as part of qualification.
 
 ## Native evidence and release decision
 
