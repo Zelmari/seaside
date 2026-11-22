@@ -7,6 +7,7 @@
 #include <sys/types.h>
 
 struct wl_display;
+struct wl_event_loop;
 struct wlr_allocator;
 struct wlr_buffer;
 struct wlr_drag_icon;
@@ -55,6 +56,7 @@ struct seaside_scene_frame_observation {
 
 typedef void (*seaside_scene_frame_fn)(void *data, struct wlr_output *output,
                                        const struct seaside_scene_frame_observation *observation);
+typedef void (*seaside_scene_before_frame_fn)(void *data, struct wlr_output *output);
 
 enum seaside_scene_window_event_kind {
     SEASIDE_WINDOW_CREATED,
@@ -85,6 +87,7 @@ struct seaside_scene_window_event {
     bool enabled;
     bool ordinary_commit;
     struct wlr_seat_client *seat_client;
+    /* The XDG configure for a map/commit, or the input serial for a gesture. */
     uint32_t serial;
     uint32_t resize_edges;
 };
@@ -98,6 +101,9 @@ struct seaside_scene_window_placement {
     uint64_t stacking;
     int border_width;
     bool visible, activated, maximized, fullscreen, stretch_fullscreen, tiled, resize, resizing;
+    bool fit_resize_buffer;
+    bool unconstrained_restore;
+    bool interactive_resize;
 };
 
 struct seaside_scene_target {
@@ -138,6 +144,10 @@ void seaside_scene_set_render_policy(struct seaside_scene_bridge *scene, bool di
                                      bool allow_tearing, bool night_light, int temperature_kelvin);
 void seaside_scene_set_frame_observer(struct seaside_scene_bridge *scene,
                                       seaside_scene_frame_fn callback, void *data);
+void seaside_scene_set_before_frame(struct seaside_scene_bridge *scene,
+                                    seaside_scene_before_frame_fn callback, void *data);
+void seaside_scene_schedule_frame(struct wlr_output *output);
+struct wl_event_loop *seaside_scene_event_loop(const struct seaside_scene_bridge *scene);
 struct seaside_scene_render_status
 seaside_scene_get_render_status(const struct seaside_scene_bridge *scene,
                                 struct wlr_output *output);
@@ -194,6 +204,12 @@ bool seaside_scene_window_capture_client_ready(const struct seaside_scene_bridge
 void seaside_scene_capture_pointer(struct seaside_scene_bridge *scene, double x, double y);
 void seaside_scene_place_window(struct seaside_scene_bridge *scene, uint64_t id,
                                 const struct seaside_scene_window_placement *placement);
+uint32_t seaside_scene_configure_tiled_window(struct seaside_scene_bridge *scene, uint64_t id,
+                                              struct seaside_scene_rect geometry);
+uint32_t seaside_scene_window_commit_serial(const struct seaside_scene_bridge *scene, uint64_t id);
+struct seaside_scene_rect
+seaside_scene_window_content_geometry(const struct seaside_scene_bridge *scene, uint64_t id);
+void seaside_scene_set_fit_resize_buffer(struct seaside_scene_bridge *scene, uint64_t id, bool fit);
 struct wlr_surface *seaside_scene_window_surface(struct seaside_scene_bridge *scene, uint64_t id);
 bool seaside_scene_close_window(struct seaside_scene_bridge *scene, uint64_t id);
 struct seaside_scene_size_limits

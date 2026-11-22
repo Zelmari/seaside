@@ -251,6 +251,18 @@ void Scene::set_frame_observer(seaside_scene_frame_fn callback, void *data) noex
     seaside_scene_set_frame_observer(bridge_, callback, data);
 }
 
+void Scene::set_before_frame(seaside_scene_before_frame_fn callback, void *data) noexcept {
+    seaside_scene_set_before_frame(bridge_, callback, data);
+}
+
+void Scene::schedule_frame(wlr_output *output) noexcept {
+    seaside_scene_schedule_frame(output);
+}
+
+wl_event_loop *Scene::event_loop() const noexcept {
+    return seaside_scene_event_loop(bridge_);
+}
+
 seaside_scene_render_status Scene::render_status(wlr_output *output) const noexcept {
     return seaside_scene_get_render_status(bridge_, output);
 }
@@ -309,6 +321,23 @@ void Scene::capture_pointer(double x, double y) noexcept {
 void Scene::place_window(std::uint64_t id,
                          const seaside_scene_window_placement &placement) noexcept {
     seaside_scene_place_window(bridge_, id, &placement);
+}
+
+std::uint32_t Scene::configure_tiled_window(std::uint64_t id,
+                                            seaside_scene_rect geometry) noexcept {
+    return seaside_scene_configure_tiled_window(bridge_, id, geometry);
+}
+
+std::uint32_t Scene::window_commit_serial(std::uint64_t id) const noexcept {
+    return seaside_scene_window_commit_serial(bridge_, id);
+}
+
+seaside_scene_rect Scene::window_content_geometry(std::uint64_t id) const noexcept {
+    return seaside_scene_window_content_geometry(bridge_, id);
+}
+
+void Scene::set_fit_resize_buffer(std::uint64_t id, bool fit) noexcept {
+    seaside_scene_set_fit_resize_buffer(bridge_, id, fit);
 }
 
 wlr_surface *Scene::window_surface(std::uint64_t id) noexcept {

@@ -1008,6 +1008,32 @@ static bool check_selected_window(struct fixture *fixture) {
     finish_session(&painted);
     CHECK(sync_client(fixture));
 
+    const struct seaside_scene_window_placement resize = {
+        .geometry = {2, 3, 31, 23},
+        .output = {0, 0, WIDTH, HEIGHT},
+        .clip = {7, 6, WIDTH - 7, HEIGHT - 6},
+        .stacking = 1,
+        .visible = true,
+        .tiled = true,
+        .fit_resize_buffer = true,
+    };
+    const uint32_t resize_serial = seaside_scene_configure_tiled_window(scene, 1, resize.geometry);
+    CHECK(resize_serial && sync_client(fixture));
+    CHECK(seaside_scene_configure_tiled_window(scene, 1, resize.geometry) == resize_serial);
+    const struct seaside_scene_rect source = seaside_scene_window_content_geometry(scene, 1);
+    CHECK(source.width == 20 && source.height == 14);
+    seaside_scene_place_window(scene, 1, &resize);
+    struct seaside_scene_target target = {0};
+    CHECK(seaside_scene_window_at(scene, 31, 10, &target) && target.id == 1 && target.surface &&
+          target.sx > 18.70 && target.sx < 18.72 && target.sy > 4.25 && target.sy < 4.27);
+    CHECK(seaside_scene_window_at(scene, 31, 10, &target) && target.id == 1 && target.sx > 18.70 &&
+          target.sx < 18.72 && target.sy > 4.25 && target.sy < 4.27);
+    target = (struct seaside_scene_target){0};
+    CHECK(!seaside_scene_window_at(scene, 6, 10, &target));
+    seaside_scene_set_fit_resize_buffer(scene, 1, false);
+    target = (struct seaside_scene_target){0};
+    CHECK(!seaside_scene_window_at(scene, 31, 10, &target));
+
     // Moving and then hiding the selected scene view must not change its source.
     place_window(scene, 1, 25, 9, true);
     place_window(scene, 1, 25, 9, false);

@@ -60,9 +60,11 @@ struct seaside_scene_bridge {
     int temperature_kelvin;
     seaside_scene_frame_fn frame_observer;
     void *frame_observer_data;
+    seaside_scene_before_frame_fn before_frame;
+    void *before_frame_data;
 };
 
-struct fullscreen_projection {
+struct window_projection {
     double scale_x, scale_y;
     int x, y;
 };
@@ -86,11 +88,12 @@ struct scene_view {
     struct wl_listener request_resize;
     struct wl_listener set_parent;
     struct seaside_scene_window_placement placement;
-    struct fullscreen_projection fullscreen;
+    struct window_projection projection;
     struct wlr_box source_clip;
+    struct wlr_box resize_clip;
     struct wl_list projected_surfaces;
     uint64_t id;
-    uint32_t restore_serial;
+    uint32_t restore_serial, size_configure_serial;
     bool mapped;
 };
 
@@ -184,7 +187,7 @@ void seaside_scene_drop_image(struct wlr_buffer *buffer) {
     }
 }
 
-static struct scene_view *find_view(struct seaside_scene_bridge *scene, uint64_t id) {
+static struct scene_view *find_view(const struct seaside_scene_bridge *scene, uint64_t id) {
     if (!id) {
         return NULL;
     }
@@ -250,20 +253,20 @@ static int clamp_rounded_coordinate(double value) {
 }
 
 static bool is_projected(const struct scene_view *view) {
-    return view->fullscreen.scale_x > 0;
+    return view->projection.scale_x > 0;
 }
 
-static void update_fullscreen_projection(struct scene_view *view) {
+static void update_window_projection(struct scene_view *view) {
     const struct seaside_scene_rect box = view->placement.geometry;
     const struct wlr_box source = view->toplevel->base->geometry;
-    view->fullscreen = (struct fullscreen_projection){0};
-    if (!view->placement.fullscreen || !has_viewport(box) || wlr_box_empty(&source) ||
-        (box.width == source.width && box.height == source.height)) {
+    view->projection = (struct window_projection){0};
+    if ((!view->placement.fullscreen && !view->placement.fit_resize_buffer) || !has_viewport(box) ||
+        wlr_box_empty(&source) || (box.width == source.width && box.height == source.height)) {
         return;
     }
 
     int width = box.width, height = box.height;
-    if (!view->placement.stretch_fullscreen) {
+    if (view->placement.fullscreen && !view->placement.stretch_fullscreen) {
         const int64_t width_by_height = (int64_t)width * source.height;
         const int64_t height_by_width = (int64_t)height * source.width;
         if (width_by_height > height_by_width) {
@@ -272,7 +275,7 @@ static void update_fullscreen_projection(struct scene_view *view) {
             height = (int)fmax(1, round((double)width_by_height / source.width));
         }
     }
-    view->fullscreen = (struct fullscreen_projection){
+    view->projection = (struct window_projection){
         .scale_x = (double)width / source.width,
         .scale_y = (double)height / source.height,
         .x = (box.width - width) / 2,
@@ -286,8 +289,8 @@ static void view_source_position(const struct scene_view *view, double *x, doubl
     *x -= view->placement.geometry.x;
     *y -= view->placement.geometry.y;
     if (is_projected(view)) {
-        *x = (*x - view->fullscreen.x) / view->fullscreen.scale_x;
-        *y = (*y - view->fullscreen.y) / view->fullscreen.scale_y;
+        *x = (*x - view->projection.x) / view->projection.scale_x;
+        *y = (*y - view->projection.y) / view->projection.scale_y;
     }
 }
 
@@ -310,6 +313,7 @@ static void clip_toplevel(struct scene_view *view) {
     const struct seaside_scene_rect box = placement->geometry;
     const struct wlr_box geometry = view->toplevel->base->geometry;
     view->source_clip = (struct wlr_box){0};
+    view->resize_clip = (struct wlr_box){0};
     if (placement->fullscreen && has_viewport(box) && !wlr_box_empty(&geometry)) {
         view->source_clip = (struct wlr_box){0, 0, geometry.width, geometry.height};
         wlr_scene_subsurface_tree_set_clip(&view->xdg_tree->node,
@@ -331,6 +335,18 @@ static void clip_toplevel(struct scene_view *view) {
         return;
     }
     const int64_t source_x = (int64_t)clip.x - box.x, source_y = (int64_t)clip.y - box.y;
+    if (is_projected(view)) {
+        /* Crop after scaling. Integer source-space clipping would otherwise
+         * underfill or bleed past a partly visible scrolling tile. */
+        view->resize_clip = (struct wlr_box){clamp_coordinate(source_x), clamp_coordinate(source_y),
+                                             clip.width, clip.height};
+        if (placement->tiled) {
+            view->source_clip = (struct wlr_box){0, 0, geometry.width, geometry.height};
+        }
+        wlr_scene_subsurface_tree_set_clip(&view->xdg_tree->node, NULL);
+        wlr_scene_node_set_enabled(&view->xdg_tree->node, true);
+        return;
+    }
     view->source_clip = (struct wlr_box){clamp_coordinate(source_x), clamp_coordinate(source_y),
                                          clip.width, clip.height};
     clip.x = clamp_coordinate(source_x + geometry.x);
@@ -346,7 +362,7 @@ struct projected_surface {
     struct scene_view *view;
     struct wlr_scene_surface *scene_surface;
     wlr_scene_buffer_point_accepts_input_func_t original_point_accepts_input;
-    struct wlr_box source;
+    struct wlr_fbox source;
     int width, height;
     struct wl_listener commit, destroy;
     struct wl_list link;
@@ -414,7 +430,7 @@ static struct projected_surface *get_projected_surface(struct scene_view *view,
     return projected;
 }
 
-static struct wlr_fbox cropped_source(struct wlr_surface *surface, const struct wlr_box *crop) {
+static struct wlr_fbox cropped_source(struct wlr_surface *surface, const struct wlr_fbox *crop) {
     struct wlr_fbox source;
     wlr_surface_get_buffer_source_box(surface, &source);
     if (!crop->x && !crop->y && crop->width == surface->current.width &&
@@ -427,16 +443,36 @@ static struct wlr_fbox cropped_source(struct wlr_surface *surface, const struct 
     wlr_output_transform_coords(transform, &width, &height);
     source.x += crop->x * source.width / surface->current.width;
     source.y += crop->y * source.height / surface->current.height;
-    source.width *= (double)crop->width / surface->current.width;
-    source.height *= (double)crop->height / surface->current.height;
+    source.width *= crop->width / surface->current.width;
+    source.height *= crop->height / surface->current.height;
     wlr_fbox_transform(&source, &source, wlr_output_transform_invert(transform), width, height);
     source.x = fmax(0, source.x);
     source.y = fmax(0, source.y);
     return source;
 }
 
+static void clip_projected_destination(struct wlr_box *destination, struct wlr_fbox *source,
+                                       const struct wlr_box *clip) {
+    if (!clip || wlr_box_empty(destination)) {
+        return;
+    }
+    const struct wlr_box original = *destination;
+    const struct seaside_scene_rect viewport = {clip->x, clip->y, clip->width, clip->height};
+    *destination = intersection(viewport, original.x, original.y, original.width, original.height);
+    if (wlr_box_empty(destination)) {
+        return;
+    }
+    const double scale_x = source->width / original.width;
+    const double scale_y = source->height / original.height;
+    source->x += ((double)destination->x - original.x) * scale_x;
+    source->y += ((double)destination->y - original.y) * scale_y;
+    source->width = destination->width * scale_x;
+    source->height = destination->height * scale_y;
+}
+
 static void project_buffer(struct scene_view *view, struct wlr_scene_buffer *buffer,
-                           struct wlr_box clip, int64_t x, int64_t y) {
+                           struct wlr_box clip, const struct wlr_box *destination_clip, int64_t x,
+                           int64_t y) {
     const bool scaling = is_projected(view);
     struct projected_surface *projected =
         buffer->point_accepts_input == projected_point_accepts_input ? buffer->node.data : NULL;
@@ -471,15 +507,15 @@ static void project_buffer(struct scene_view *view, struct wlr_scene_buffer *buf
         return;
     }
 
-    const struct wlr_box crop = {clamp_coordinate((int64_t)visible.x - x),
-                                 clamp_coordinate((int64_t)visible.y - y), visible.width,
-                                 visible.height};
-    const struct wlr_fbox source = cropped_source(surface, &crop);
+    const struct wlr_box pixels = {clamp_coordinate((int64_t)visible.x - x),
+                                   clamp_coordinate((int64_t)visible.y - y), visible.width,
+                                   visible.height};
+    struct wlr_fbox crop = {pixels.x, pixels.y, pixels.width, pixels.height};
     struct wlr_box destination = visible;
     pixman_region32_t opaque;
     pixman_region32_init(&opaque);
     if (scaling) {
-        const struct fullscreen_projection mapping = view->fullscreen;
+        const struct window_projection mapping = view->projection;
         destination.x = clamp_rounded_coordinate(mapping.x + round(visible.x * mapping.scale_x));
         destination.y = clamp_rounded_coordinate(mapping.y + round(visible.y * mapping.scale_y));
         destination.width = clamp_rounded_coordinate(
@@ -488,12 +524,16 @@ static void project_buffer(struct scene_view *view, struct wlr_scene_buffer *buf
         destination.height = clamp_rounded_coordinate(
             mapping.y + round(((double)visible.y + visible.height) * mapping.scale_y) -
             destination.y);
+        clip_projected_destination(&destination, &crop, destination_clip);
         projected->source = crop;
         projected->width = destination.width;
         projected->height = destination.height;
         /* Fractional projection can put a filtering footprint across an
          * opaque-region edge. Only mark a wholly opaque crop as opaque. */
-        pixman_box32_t limits = {crop.x, crop.y, crop.x + crop.width, crop.y + crop.height};
+        const pixman_box32_t limits = {clamp_rounded_coordinate(floor(crop.x)),
+                                       clamp_rounded_coordinate(floor(crop.y)),
+                                       clamp_rounded_coordinate(ceil(crop.x + crop.width)),
+                                       clamp_rounded_coordinate(ceil(crop.y + crop.height))};
         if (pixman_region32_contains_rectangle(&surface->opaque_region, &limits) ==
                 PIXMAN_REGION_IN &&
             !wlr_box_empty(&destination)) {
@@ -501,14 +541,15 @@ static void project_buffer(struct scene_view *view, struct wlr_scene_buffer *buf
                                        destination.height);
         }
     } else {
-        pixman_region32_intersect_rect(&opaque, &surface->opaque_region, crop.x, crop.y, crop.width,
-                                       crop.height);
-        pixman_region32_translate(&opaque, -crop.x, -crop.y);
+        pixman_region32_intersect_rect(&opaque, &surface->opaque_region, pixels.x, pixels.y,
+                                       pixels.width, pixels.height);
+        pixman_region32_translate(&opaque, -pixels.x, -pixels.y);
     }
 
     const bool visible_pixels = !wlr_box_empty(&destination);
     wlr_scene_node_set_enabled(&buffer->node, visible_pixels);
     if (visible_pixels) {
+        const struct wlr_fbox source = cropped_source(surface, &crop);
         wlr_scene_buffer_set_source_box(buffer, &source);
         wlr_scene_buffer_set_opaque_region(buffer, &opaque);
         wlr_scene_buffer_set_dest_size(buffer, destination.width, destination.height);
@@ -519,39 +560,42 @@ static void project_buffer(struct scene_view *view, struct wlr_scene_buffer *buf
 }
 
 static void project_surface_tree(struct scene_view *view, struct wlr_scene_node *node,
-                                 struct wlr_box clip, int64_t x, int64_t y) {
+                                 struct wlr_box clip, const struct wlr_box *destination_clip,
+                                 int64_t x, int64_t y) {
     if (node->type == WLR_SCENE_NODE_BUFFER) {
-        project_buffer(view, wlr_scene_buffer_from_node(node), clip, x, y);
+        project_buffer(view, wlr_scene_buffer_from_node(node), clip, destination_clip, x, y);
     } else if (node->type == WLR_SCENE_NODE_TREE) {
         struct wlr_scene_node *child;
         wl_list_for_each(child, &wlr_scene_tree_from_node(node)->children, link) {
-            project_surface_tree(view, child, clip, x + node->x, y + node->y);
+            project_surface_tree(view, child, clip, destination_clip, x + node->x, y + node->y);
         }
     }
 }
 
-static void project_tree(struct scene_view *view, struct wlr_scene_node *node,
-                         struct wlr_box clip) {
+static void project_tree(struct scene_view *view, struct wlr_scene_node *node, struct wlr_box clip,
+                         const struct wlr_box *destination_clip) {
     int64_t x, y;
     source_node_position(view, &node->parent->node, &x, &y);
-    project_surface_tree(view, node, clip, x, y);
+    project_surface_tree(view, node, clip, destination_clip, x, y);
 }
 
 static void project_view_surfaces(struct scene_view *view) {
     if (!is_projected(view) && wl_list_empty(&view->projected_surfaces)) {
         return;
     }
-    project_tree(view, &view->xdg_tree->node, view->source_clip);
+    const struct wlr_box *resize_clip =
+        wlr_box_empty(&view->resize_clip) ? NULL : &view->resize_clip;
+    project_tree(view, &view->xdg_tree->node, view->source_clip, resize_clip);
     struct scene_popup *popup;
     wl_list_for_each(popup, &view->owner->popups, link) {
         if (popup->view == view) {
-            project_tree(view, &popup->surface_tree->node, popup->source_clip);
+            project_tree(view, &popup->surface_tree->node, popup->source_clip, NULL);
         }
     }
 }
 
 static void project_view_content(struct scene_view *view) {
-    update_fullscreen_projection(view);
+    update_window_projection(view);
     clip_toplevel(view);
     clip_view_popups(view);
     project_view_surfaces(view);
@@ -577,6 +621,9 @@ static uint64_t emit_window(struct scene_view *view, enum seaside_scene_window_e
         .geometry = {box.x, box.y, box.width, box.height},
         .enabled = enabled,
         .ordinary_commit = ordinary_commit,
+        .serial = kind == SEASIDE_WINDOW_MAPPED || kind == SEASIDE_WINDOW_COMMITTED
+                      ? view->toplevel->base->current.configure_serial
+                      : 0,
     };
     return scene->window(scene->window_data, &event);
 }
@@ -616,8 +663,8 @@ static bool capture_window_cursor(void *data, struct wlr_render_texture_options 
         double x = scene->cursor_x - (double)cursor->hotspot_x / output->scale;
         double y = scene->cursor_y - (double)cursor->hotspot_y / output->scale;
         view_source_position(view, &x, &y);
-        const double scale_x = output->scale * (is_projected(view) ? view->fullscreen.scale_x : 1);
-        const double scale_y = output->scale * (is_projected(view) ? view->fullscreen.scale_y : 1);
+        const double scale_x = output->scale * (is_projected(view) ? view->projection.scale_x : 1);
+        const double scale_y = output->scale * (is_projected(view) ? view->projection.scale_y : 1);
         *texture = (struct wlr_render_texture_options){
             .texture = cursor->texture,
             .src_box = cursor->src_box,
@@ -646,6 +693,38 @@ static void consider_focus(struct scene_view *view) {
     scene->focus(scene->focus_data, view->toplevel->base->surface);
 }
 
+static bool configure_applied(const struct scene_view *view, uint32_t requested) {
+    const uint32_t serial = view->toplevel->base->current.configure_serial;
+    return !requested || (serial && (uint32_t)(serial - requested) < UINT32_C(0x80000000));
+}
+
+static bool ordinary_buffer(const struct scene_view *view) {
+    const struct wlr_xdg_toplevel_state *state = &view->toplevel->current;
+    return !state->maximized && !state->fullscreen && !state->tiled &&
+           configure_applied(view, view->restore_serial);
+}
+
+static void request_placed_size(struct scene_view *view, bool managed, bool restoring) {
+    const struct seaside_scene_window_placement *placement = &view->placement;
+    const struct seaside_scene_rect box = placement->geometry;
+    struct wlr_xdg_toplevel *toplevel = view->toplevel;
+    /* A client that mapped straight into a managed state may have no saved
+     * floating size. Zero lets that client choose its new size. */
+    const bool unconstrained = restoring && placement->unconstrained_restore;
+    const int width = !unconstrained && box.width > 0 ? box.width : 0;
+    const int height = !unconstrained && box.height > 0 ? box.height : 0;
+    if (width == toplevel->scheduled.width && height == toplevel->scheduled.height && !restoring) {
+        return;
+    }
+    if (placement->interactive_resize && !configure_applied(view, view->size_configure_serial)) {
+        return;
+    }
+    view->size_configure_serial = wlr_xdg_toplevel_set_size(toplevel, width, height);
+    if (!managed) {
+        view->restore_serial = view->size_configure_serial;
+    }
+}
+
 static void view_map(struct wl_listener *listener, void *data) {
     (void)data;
     struct scene_view *view = wl_container_of(listener, view, map);
@@ -655,7 +734,7 @@ static void view_map(struct wl_listener *listener, void *data) {
         view->owner->snapshot.map_events++;
     }
     if (view->id) {
-        emit_window(view, SEASIDE_WINDOW_MAPPED, false, false);
+        emit_window(view, SEASIDE_WINDOW_MAPPED, false, ordinary_buffer(view));
     } else {
         wlr_scene_node_set_enabled(&view->tree->node, true);
         consider_focus(view);
@@ -682,6 +761,7 @@ static void view_unmap(struct wl_listener *listener, void *data) {
     view->placement = (struct seaside_scene_window_placement){0};
     project_view_content(view);
     view->restore_serial = 0;
+    view->size_configure_serial = 0;
     emit_window(view, SEASIDE_WINDOW_UNMAPPED, false, false);
     if (view->owner->focused_view == view) {
         // Unmap resets the XDG configure sequence. The next initial commit
@@ -698,7 +778,7 @@ static void view_commit(struct wl_listener *listener, void *data) {
                                                WLR_XDG_TOPLEVEL_WM_CAPABILITIES_FULLSCREEN
                                          : 0;
         wlr_xdg_toplevel_set_wm_capabilities(view->toplevel, capabilities);
-        wlr_xdg_toplevel_set_size(view->toplevel, 0, 0);
+        view->size_configure_serial = wlr_xdg_toplevel_set_size(view->toplevel, 0, 0);
         wlr_xdg_toplevel_set_activated(view->toplevel, false);
         emit_window(view, SEASIDE_WINDOW_INITIAL_COMMIT, false, false);
         view->owner->snapshot.initial_configures++;
@@ -707,19 +787,17 @@ static void view_commit(struct wl_listener *listener, void *data) {
         view->owner->snapshot.buffer_commits++;
         /* The client's last tiled or special size may arrive after a request
          * to restore its ordinary floating geometry. */
-        uint32_t serial = view->toplevel->base->current.configure_serial;
-        bool ordinary =
-            !view->toplevel->current.maximized && !view->toplevel->current.fullscreen &&
-            !view->toplevel->current.tiled &&
-            (!view->restore_serial ||
-             (serial && (uint32_t)(serial - view->restore_serial) < UINT32_C(0x80000000)));
+        const bool ordinary = ordinary_buffer(view);
         if (ordinary) {
             view->restore_serial = 0;
         }
-        if (view->placement.fullscreen) {
+        if (view->placement.fullscreen || view->placement.fit_resize_buffer) {
             project_view_content(view);
         } else {
             clip_toplevel(view);
+        }
+        if (view->placement.interactive_resize && has_viewport(view->placement.geometry)) {
+            request_placed_size(view, view->placement.tiled, false);
         }
         emit_window(view, SEASIDE_WINDOW_COMMITTED, false, ordinary);
     }
@@ -1314,6 +1392,9 @@ static bool commit_frame(struct scene_output *view) {
 static void output_frame(struct wl_listener *listener, void *data) {
     (void)data;
     struct scene_output *output = wl_container_of(listener, output, frame);
+    if (output->owner->before_frame) {
+        output->owner->before_frame(output->owner->before_frame_data, output->viewport->output);
+    }
     if (!commit_frame(output)) {
         output->owner->snapshot.failed_frames++;
         return;
@@ -1502,6 +1583,22 @@ void seaside_scene_set_frame_observer(struct seaside_scene_bridge *scene,
                                       seaside_scene_frame_fn callback, void *data) {
     scene->frame_observer = callback;
     scene->frame_observer_data = data;
+}
+
+void seaside_scene_set_before_frame(struct seaside_scene_bridge *scene,
+                                    seaside_scene_before_frame_fn callback, void *data) {
+    scene->before_frame = callback;
+    scene->before_frame_data = data;
+}
+
+void seaside_scene_schedule_frame(struct wlr_output *output) {
+    if (output) {
+        wlr_output_schedule_frame(output);
+    }
+}
+
+struct wl_event_loop *seaside_scene_event_loop(const struct seaside_scene_bridge *scene) {
+    return wl_display_get_event_loop(scene->display);
 }
 
 struct seaside_scene_render_status
@@ -1827,7 +1924,8 @@ void seaside_scene_place_window(struct seaside_scene_bridge *scene, uint64_t id,
         previous.geometry.width != box.width || previous.geometry.height != box.height ||
         previous.visible != placement->visible || previous.stacking != placement->stacking ||
         previous.fullscreen != placement->fullscreen ||
-        previous.stretch_fullscreen != placement->stretch_fullscreen) {
+        previous.stretch_fullscreen != placement->stretch_fullscreen ||
+        previous.fit_resize_buffer != placement->fit_resize_buffer) {
         seaside_window_capture_cursor_changed(scene->capture);
     }
     /* Keep the background opaque throughout the fullscreen transition and
@@ -1879,18 +1977,57 @@ void seaside_scene_place_window(struct seaside_scene_bridge *scene, uint64_t id,
     const bool managed = maximized || placement->fullscreen || placement->tiled;
     const bool restoring =
         !managed && (previous.maximized || previous.fullscreen || previous.tiled);
-    if (restoring || (has_viewport(box) && (managed || placement->resize))) {
-        /* A client that mapped straight into a managed state may have no
-         * saved floating size. Zero lets that client choose its new size. */
-        const int width = box.width > 0 ? box.width : 0;
-        const int height = box.height > 0 ? box.height : 0;
-        if (width != toplevel->scheduled.width || height != toplevel->scheduled.height ||
-            restoring) {
-            uint32_t serial = wlr_xdg_toplevel_set_size(toplevel, width, height);
-            if (!managed) {
-                view->restore_serial = serial;
-            }
-        }
+    const struct wlr_box content = toplevel->base->geometry;
+    const bool unchanged_floating_grab = !managed && !previous.interactive_resize &&
+                                         placement->interactive_resize &&
+                                         content.width == box.width && content.height == box.height;
+    if (restoring || (has_viewport(box) && !unchanged_floating_grab &&
+                      (managed || placement->resize || previous.interactive_resize))) {
+        request_placed_size(view, managed, restoring);
+    }
+}
+
+uint32_t seaside_scene_configure_tiled_window(struct seaside_scene_bridge *scene, uint64_t id,
+                                              struct seaside_scene_rect geometry) {
+    struct scene_view *view = find_view(scene, id);
+    if (!view || !view->toplevel->base->initialized || !has_viewport(geometry)) {
+        return 0;
+    }
+    struct wlr_xdg_toplevel *toplevel = view->toplevel;
+    const uint32_t tiled = WLR_EDGE_TOP | WLR_EDGE_BOTTOM | WLR_EDGE_LEFT | WLR_EDGE_RIGHT;
+    if (toplevel->scheduled.tiled != tiled) {
+        view->size_configure_serial = wlr_xdg_toplevel_set_tiled(toplevel, tiled);
+    }
+    if (toplevel->scheduled.width != geometry.width ||
+        toplevel->scheduled.height != geometry.height) {
+        view->size_configure_serial =
+            wlr_xdg_toplevel_set_size(toplevel, geometry.width, geometry.height);
+    }
+    return view->size_configure_serial;
+}
+
+uint32_t seaside_scene_window_commit_serial(const struct seaside_scene_bridge *scene, uint64_t id) {
+    const struct scene_view *view = find_view(scene, id);
+    return view ? view->toplevel->base->current.configure_serial : 0;
+}
+
+struct seaside_scene_rect
+seaside_scene_window_content_geometry(const struct seaside_scene_bridge *scene, uint64_t id) {
+    const struct scene_view *view = find_view(scene, id);
+    if (!view || !view->mapped) {
+        return (struct seaside_scene_rect){0};
+    }
+    const struct wlr_box box = view->toplevel->base->geometry;
+    return (struct seaside_scene_rect){box.x, box.y, box.width, box.height};
+}
+
+void seaside_scene_set_fit_resize_buffer(struct seaside_scene_bridge *scene, uint64_t id,
+                                         bool fit) {
+    struct scene_view *view = find_view(scene, id);
+    if (view && view->placement.fit_resize_buffer != fit) {
+        view->placement.fit_resize_buffer = fit;
+        project_view_content(view);
+        seaside_window_capture_cursor_changed(scene->capture);
     }
 }
 

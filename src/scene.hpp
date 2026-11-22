@@ -33,6 +33,9 @@ class Scene final {
     void set_render_policy(bool direct_scanout, bool allow_tearing, bool night_light,
                            int temperature_kelvin) noexcept;
     void set_frame_observer(seaside_scene_frame_fn callback, void *data) noexcept;
+    void set_before_frame(seaside_scene_before_frame_fn callback, void *data) noexcept;
+    void schedule_frame(wlr_output *output) noexcept;
+    wl_event_loop *event_loop() const noexcept;
     seaside_scene_render_status render_status(wlr_output *output) const noexcept;
     static std::expected<SceneImage, SceneError> prepare_wallpaper(Wallpaper wallpaper) noexcept;
     void set_wallpaper(SceneImage image) noexcept;
@@ -51,6 +54,10 @@ class Scene final {
     bool window_capture_client_ready(pid_t pid, uid_t uid) const noexcept;
     void capture_pointer(double x, double y) noexcept;
     void place_window(std::uint64_t id, const seaside_scene_window_placement &placement) noexcept;
+    std::uint32_t configure_tiled_window(std::uint64_t id, seaside_scene_rect geometry) noexcept;
+    std::uint32_t window_commit_serial(std::uint64_t id) const noexcept;
+    seaside_scene_rect window_content_geometry(std::uint64_t id) const noexcept;
+    void set_fit_resize_buffer(std::uint64_t id, bool fit) noexcept;
     wlr_surface *window_surface(std::uint64_t id) noexcept;
     bool close_window(std::uint64_t id) noexcept;
     seaside_scene_size_limits window_size_limits(std::uint64_t id) noexcept;
