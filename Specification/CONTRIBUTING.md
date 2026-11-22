@@ -79,11 +79,13 @@ packaging/prepare-source "$staging" "$(git rev-parse HEAD)"
 cd "$staging"
 makepkg --verifysource
 makechrootpkg -c -r "$chroot"
-package=$(makepkg --packagelist)
-pacman -Qip "$package"
-pacman -Qlp "$package"
-bsdtar -xOf "$package" .BUILDINFO
-sha256sum "$package"
+for package in ./*.pkg.tar.*; do
+  case "$package" in *.sig) continue ;; esac
+  pacman -Qip "$package"
+  pacman -Qlp "$package"
+  bsdtar -xOf "$package" .BUILDINFO
+  sha256sum "$package"
+done
 ```
 
 Resolve any failing command before continuing. The final commands inspect

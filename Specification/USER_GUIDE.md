@@ -48,13 +48,12 @@ cd seaside
 staging=$(mktemp -d)
 packaging/prepare-source "$staging" "$(git rev-parse HEAD)"
 cd "$staging"
-makepkg --syncdeps
-sudo pacman -U "$(makepkg --packagelist)"
+makepkg --syncdeps --install
 ```
 
 Run these commands in order and resolve any failing command before continuing.
-`makepkg --packagelist` prints the archive path for the configured package
-format. Keep the staging directory for as long as you need the archive or its
+`makepkg --packagelist` prints the archive paths, including the separate
+debug package when enabled by makepkg. Keep the staging directory for as long as you need the archive or its
 build inputs. See the [contributor guide](CONTRIBUTING.md#build-in-a-clean-arch-chroot)
 for the isolated build used to qualify candidates.
 
