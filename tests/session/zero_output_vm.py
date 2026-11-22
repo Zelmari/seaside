@@ -36,12 +36,16 @@ def main():
     parser.add_argument("--console-ready", required=True, action="store_true",
                         help="confirm the guest shows an idle foreground shell on TTY 1")
     parser.add_argument("--connector", required=True, help="guest DRM connector, e.g. card0-Virtual-1")
+    parser.add_argument("--vmwgfx-layout-hotplug", action="store_true",
+                        help="use the disposable guest's fixed vmwgfx layout helper on reconnect")
     parser.add_argument("--pkg-config-path", type=Path)
     parser.add_argument("--state", type=Path, default=Path.home() / ".local/state/seaside-vm")
     parser.add_argument("--renderer", choices=("auto", "pixman"), default="pixman")
     args = parser.parse_args()
     if re.fullmatch(r"card[0-9]+-Virtual-[0-9]+", args.connector) is None:
         parser.error("--connector must name a VirtualBox DRM connector")
+    if args.vmwgfx_layout_hotplug and args.connector != "card0-Virtual-1":
+        parser.error("--vmwgfx-layout-hotplug requires card0-Virtual-1")
     if args.pkg_config_path is not None and not args.pkg_config_path.is_absolute():
         parser.error("the guest pkg-config path must be absolute")
     args.tty_only = True
@@ -49,6 +53,7 @@ def main():
         with revision_bundle() as (revision, bundle):
             settings = (
                 f"zero_output_connector = {args.connector!r}\n"
+                f"zero_output_layout_hotplug = {args.vmwgfx_layout_hotplug!r}\n"
                 f"zero_output_artifacts = {tuple(sorted(ARTIFACTS))!r}\n"
                 + helper(revision, "part8_vm_guest.py", "helpers",
                          "standard=standard, part8_runtime_prefix='', "

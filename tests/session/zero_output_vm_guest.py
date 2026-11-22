@@ -36,6 +36,14 @@ def target_active_since(env):
     return timestamp
 
 
+def authorized_command(command):
+    allowed = subprocess.run(["/usr/bin/sudo", "-n", "-l", "--", *command], capture_output=True,
+                             text=True, timeout=4, check=False)
+    if allowed.returncode:
+        raise Blocked(f"The disposable guest needs noninteractive sudo for {shlex.join(command)}")
+    return ["/usr/bin/sudo", "-n", *command]
+
+
 def connector_command():
     require(re.fullmatch(r"card[0-9]+-Virtual-[0-9]+", zero_output_connector),
             "Refusing to change a non-VirtualBox connector")
@@ -44,12 +52,7 @@ def connector_command():
                  if path.read_text().strip() == "connected"]
     if connected != [connector]:
         raise Blocked(f"The selected connector must be the only connected output: {connected}")
-    command = ["/usr/bin/tee", "--", str(connector)]
-    allowed = subprocess.run(["/usr/bin/sudo", "-n", "-l", "--", *command], capture_output=True,
-                             text=True, timeout=4, check=False)
-    if allowed.returncode:
-        raise Blocked(f"The disposable guest needs noninteractive sudo for {shlex.join(command)}")
-    return connector, ["/usr/bin/sudo", "-n", *command]
+    return connector, authorized_command(["/usr/bin/tee", "--", str(connector)])
 
 
 def write_status(command, value):
@@ -60,6 +63,13 @@ def write_status(command, value):
 
 def check_startup(repo, root, results, env, state):
     connector, command = connector_command()
+    layout = None
+    if zero_output_layout_hotplug:
+        require(zero_output_connector == "card0-Virtual-1", "The layout helper requires card0-Virtual-1")
+        helper = Path("/usr/lib/seaside-vm-test/layout")
+        if not helper.is_file():
+            raise Blocked(f"The disposable guest is missing its layout helper at {helper}")
+        layout = authorized_command([str(helper), "single"])
     state["target_before"] = target_state(env)
     session = helpers["Session"](repo, root, results, env, label="zero-output", config="")
     # A source-built trial may run with the Arch portal packages installed
@@ -113,6 +123,10 @@ def check_startup(repo, root, results, env, state):
                                 f"The graphical target restarted after {name} failed")
                         state[key] = {"pid": pid, "failure": down["seq"], "recovery": up["seq"]}
                 write_status(command, "detect")
+                if layout:
+                    event("zero-output", "request a kernel hotplug event through the vmwgfx layout ioctl")
+                    helpers["checked"](layout, env=env)
+                state["replug_trigger"] = "vmwgfx layout ioctl" if layout else "DRM sysfs detect"
                 plane = f"output {zero_output_connector.split('-', 1)[1]} presented with cursor plane "
                 output = session.wait(lambda: session.focused_output() if plane in
                                       session.log.read_text(errors="replace") else None,
