@@ -504,6 +504,25 @@ def starts_and_failure(repo, results, env, state):
         stop(failure)
 
 
+def missing_audio_device(repo, runtime, results, state):
+    env = test_environment(runtime / "without-audio-device")
+    private_log = results / "part10-device-pipewire.log"
+    with recovery["private_pipewire"](runtime / "pw", env, private_log) as server:
+        env["PIPEWIRE_REMOTE"] = str(server.socket)
+        with InstalledSession(repo, results, env, label="part10-device") as session:
+            probe = subprocess.run(["/usr/bin/wpctl", "get-volume", "@DEFAULT_AUDIO_SINK@"],
+                                   env=session.env, timeout=7, capture_output=True, check=False)
+            require(probe.returncode != 0, "The private PipeWire daemon unexpectedly exposed a playback sink")
+            event("part10-input", "try a package media key without a playback device", key="up")
+            diagnostic = session.wait(
+                lambda: re.search(r"^seaside: command pid=\d+ wait-status=[1-9][0-9]*$",
+                                  session.log.read_text(errors="replace"), re.MULTILINE),
+                "the missing-device external command failure")
+            require(session.ctl("status")["ready"], "Missing playback device disrupted the compositor")
+            session.close()
+            state["missing_audio_device"] = {"status": "pass", "diagnostic": diagnostic[0]}
+
+
 def installed_trial(source, runtime, results, state):
     env = test_environment(runtime)
     archive = source / part10_package["name"]
@@ -532,10 +551,12 @@ def installed_trial(source, runtime, results, state):
             stability(session, generated, state)
             session.close()
         starts_and_failure(repo, results, env, state)
+        missing_audio_device(repo, runtime, results, state)
         if installing:
             event("package", "reinstalling the candidate with the generated config still present")
             pacman(["-U", "--noconfirm", archive], package_log, env)
             verify_installed(archive, version, results, env)
+            state["package_reinstall"] = "candidate matched and user configuration preserved"
         require(config.read_bytes() == generated, "The session or package reinstall changed the user config")
     finally:
         if installing and package_registered(env):

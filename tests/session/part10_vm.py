@@ -18,6 +18,7 @@ ARTIFACTS = {
     "part10-first-use.png", "part10-portal-monitor.log", "part10-portal-window.log",
     "part10-portal-cancel.log", "part10-pattern.log", "part10-events.log",
     "part10-restarts.log", "part10-x11.log", "part10-x11-restart.log", "part10-stability-client.log",
+    "part10-device-session.log", "part10-device-pipewire.log",
 }
 
 
