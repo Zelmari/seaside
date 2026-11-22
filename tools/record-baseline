@@ -37,11 +37,11 @@ PACKAGES = (
 )
 
 
-def command(argv: list[str]) -> dict:
+def command(argv: list[str], *, env: dict[str, str] | None = None) -> dict:
     try:
         process = subprocess.run(
             argv, cwd=ROOT, text=True, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, timeout=10, check=False,
+            stderr=subprocess.PIPE, timeout=10, check=False, env=env,
         )
     except (OSError, subprocess.TimeoutExpired) as error:
         return {'argv': argv, 'returncode': None, 'error': str(error)}
@@ -63,11 +63,34 @@ def digest(path: Path) -> dict:
         return {'path': str(path), 'sha256': None, 'error': str(error)}
 
 
+def pkg_config_environment(build_options) -> dict[str, str]:
+    env = os.environ.copy()
+    if isinstance(build_options, list):
+        for option in build_options:
+            if (isinstance(option, dict) and option.get('name') == 'pkg_config_path'
+                    and option.get('machine', 'host') == 'host'):
+                paths = option.get('value')
+                if isinstance(paths, list) and all(isinstance(path, str) for path in paths):
+                    env['PKG_CONFIG_PATH'] = os.pathsep.join(paths)
+                break
+    return env
+
+
 def collect(build_dir: Path) -> dict:
     errors = []
+    build_metadata = {}
+    for name in ('intro-buildoptions.json', 'intro-compilers.json', 'intro-dependencies.json', 'compile_commands.json'):
+        path = build_dir / name if name == 'compile_commands.json' else build_dir / 'meson-info' / name
+        try:
+            build_metadata[name] = json.loads(path.read_text())
+        except (OSError, ValueError) as error:
+            build_metadata[name] = {'error': str(error)}
+            errors.append(f'Cannot record {name}')
+
+    pkg_env = pkg_config_environment(build_metadata['intro-buildoptions.json'])
     dependency_versions = {}
     for dependency in DEPENDENCIES:
-        observation = command(['pkg-config', '--modversion', dependency])
+        observation = command(['pkg-config', '--modversion', dependency], env=pkg_env)
         dependency_versions[dependency] = observation
         if observation['returncode'] != 0:
             errors.append(f'Cannot observe required dependency {dependency}')
@@ -128,7 +151,7 @@ def collect(build_dir: Path) -> dict:
 
     protocol_xml = []
     for package in ('wayland-protocols', 'wlr-protocols'):
-        observed = command(['pkg-config', '--variable=pkgdatadir', package])
+        observed = command(['pkg-config', '--variable=pkgdatadir', package], env=pkg_env)
         directory = observed.get('stdout', '').strip()
         if observed['returncode'] != 0 or not directory:
             errors.append(f'Cannot find installed {package} XML')
@@ -154,15 +177,6 @@ def collect(build_dir: Path) -> dict:
         item = digest(path)
         item['path'] = str(path.relative_to(ROOT))
         source_hashes.append(item)
-
-    build_metadata = {}
-    for name in ('intro-buildoptions.json', 'intro-compilers.json', 'intro-dependencies.json', 'compile_commands.json'):
-        path = build_dir / name if name == 'compile_commands.json' else build_dir / 'meson-info' / name
-        try:
-            build_metadata[name] = json.loads(path.read_text())
-        except (OSError, ValueError) as error:
-            build_metadata[name] = {'error': str(error)}
-            errors.append(f'Cannot record {name}')
 
     compilers = {}
     compiler_metadata = build_metadata.get('intro-compilers.json', {}).get('host', {})

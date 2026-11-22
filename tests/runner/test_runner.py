@@ -25,6 +25,12 @@ loader = importlib.machinery.SourceFileLoader("seaside_test_runner", str(ROOT / 
 spec = importlib.util.spec_from_loader(loader.name, loader)
 runner = importlib.util.module_from_spec(spec)
 loader.exec_module(runner)
+baseline_loader = importlib.machinery.SourceFileLoader(
+    "seaside_test_baseline", str(ROOT / "tools/record-baseline")
+)
+baseline_spec = importlib.util.spec_from_loader(baseline_loader.name, baseline_loader)
+baseline = importlib.util.module_from_spec(baseline_spec)
+baseline_loader.exec_module(baseline)
 
 
 def process_running(pid):
@@ -58,6 +64,19 @@ class RunnerTests(unittest.TestCase):
             log_path=self.root / "command.log", timeout=kwargs.pop("timeout", 3),
             terminate_grace=0.1, **kwargs,
         )
+
+    def test_baseline_uses_meson_host_pkg_config_path(self):
+        build_options = [
+            {"name": "build.pkg_config_path", "machine": "build", "value": ["/build-tools"]},
+            {"name": "pkg_config_path", "machine": "host", "value": ["/staged/share/pkgconfig", "/other"]},
+        ]
+        with patch.dict(os.environ, {"PKG_CONFIG_PATH": "/old"}):
+            self.assertEqual(
+                baseline.pkg_config_environment(build_options)["PKG_CONFIG_PATH"],
+                os.pathsep.join(("/staged/share/pkgconfig", "/other")),
+            )
+            self.assertEqual(baseline.pkg_config_environment([])["PKG_CONFIG_PATH"], "/old")
+            self.assertEqual(os.environ["PKG_CONFIG_PATH"], "/old")
 
     def assert_processes_gone(self, pids):
         deadline = time.monotonic() + 2
