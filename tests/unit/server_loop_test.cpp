@@ -138,6 +138,41 @@ TEST_F(ServerLoopTest, ShutdownSignalDispatchedDuringStartupPreventsRun) {
     EXPECT_EQ(result.error(), ServerError::shutdown_requested);
 }
 
+TEST_F(ServerLoopTest, HangupRequestsShutdownAndClosedPipeIsAWriteError) {
+    for (int signal : {SIGHUP, SIGPIPE}) {
+        EXPECT_EXIT(
+            {
+                auto created = Server::create();
+                if (!created || !(**created).install_shutdown_signals()) {
+                    _exit(2);
+                }
+                auto &server = **created;
+                if (signal == SIGHUP) {
+                    raise(SIGHUP);
+                    if (wl_event_loop_dispatch(wl_display_get_event_loop(server.display()), 0) <
+                            0 ||
+                        !server.shutdown_requested()) {
+                        _exit(3);
+                    }
+                } else {
+                    int ends[2];
+                    if (pipe(ends) < 0) {
+                        _exit(4);
+                    }
+                    close(ends[0]);
+                    const bool broken = write(ends[1], "x", 1) < 0 && errno == EPIPE;
+                    close(ends[1]);
+                    if (!broken || server.shutdown_requested()) {
+                        _exit(5);
+                    }
+                }
+                server.finish();
+                _exit(0);
+            },
+            ::testing::ExitedWithCode(0), "");
+    }
+}
+
 TEST_F(ServerLoopTest, SignalRegistrationRestoresOriginalMaskAndRejectsDuplicates) {
     ShutdownMaskProbe probe;
     sigset_t unblocked;

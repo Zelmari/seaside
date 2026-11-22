@@ -93,6 +93,8 @@ class Server final {
     const char *socket_name_ = nullptr;
     wl_event_source *terminate_signal_ = nullptr;
     wl_event_source *interrupt_signal_ = nullptr;
+    wl_event_source *hangup_signal_ = nullptr;
+    struct sigaction previous_sigpipe_{};
     sigset_t previous_signal_mask_{};
     bool owns_signal_mask_ = false;
     bool running_ = false;

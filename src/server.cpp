@@ -103,11 +103,18 @@ std::expected<void, ServerError> Server::install_shutdown_signals() noexcept {
     if (pthread_sigmask(SIG_SETMASK, nullptr, &previous_signal_mask_) != 0) {
         return std::unexpected(ServerError::signal_registration);
     }
+    struct sigaction ignore{};
+    ignore.sa_handler = SIG_IGN;
+    sigemptyset(&ignore.sa_mask);
+    if (sigaction(SIGPIPE, &ignore, &previous_sigpipe_) < 0) {
+        return std::unexpected(ServerError::signal_registration);
+    }
     owns_signal_mask_ = true;
     auto *loop = wl_display_get_event_loop(display_.get());
     terminate_signal_ = wl_event_loop_add_signal(loop, SIGTERM, on_shutdown_signal, this);
     interrupt_signal_ = wl_event_loop_add_signal(loop, SIGINT, on_shutdown_signal, this);
-    if (!terminate_signal_ || !interrupt_signal_) {
+    hangup_signal_ = wl_event_loop_add_signal(loop, SIGHUP, on_shutdown_signal, this);
+    if (!terminate_signal_ || !interrupt_signal_ || !hangup_signal_) {
         remove_shutdown_signal_sources();
         restore_shutdown_signal_mask();
         return std::unexpected(ServerError::signal_registration);
@@ -116,6 +123,10 @@ std::expected<void, ServerError> Server::install_shutdown_signals() noexcept {
 }
 
 void Server::remove_shutdown_signal_sources() noexcept {
+    if (hangup_signal_) {
+        wl_event_source_remove(hangup_signal_);
+        hangup_signal_ = nullptr;
+    }
     if (terminate_signal_) {
         wl_event_source_remove(terminate_signal_);
         terminate_signal_ = nullptr;
@@ -130,13 +141,14 @@ void Server::restore_shutdown_signal_mask() noexcept {
     if (owns_signal_mask_) {
         // Preserve the caller's mask across explicit signal-source ownership;
         // changing unrelated signal bits could interfere with another subsystem.
-        for (const int signal : {SIGTERM, SIGINT}) {
+        for (const int signal : {SIGTERM, SIGINT, SIGHUP}) {
             sigset_t set;
             sigemptyset(&set);
             sigaddset(&set, signal);
             pthread_sigmask(sigismember(&previous_signal_mask_, signal) ? SIG_BLOCK : SIG_UNBLOCK,
                             &set, nullptr);
         }
+        sigaction(SIGPIPE, &previous_sigpipe_, nullptr);
         owns_signal_mask_ = false;
     }
 }
