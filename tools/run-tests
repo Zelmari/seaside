@@ -846,6 +846,8 @@ def positive_float(value: str) -> float:
 def main(argv: list[str] | None = None, *, repository_root: Path | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--build-dir", default="build", help="build directory, relative to the repository root")
+    parser.add_argument("--buildtype", choices=("debug", "debugoptimized", "release"),
+                        help="Meson build type (defaults to debug for a new build)")
     parser.add_argument("--results-dir", default="test-results", help="parent for run-specific evidence directories")
     parser.add_argument("--timeout", type=positive_float, default=540.0, help="deadline in seconds per setup/build/test command")
     parser.add_argument("--log-limit", type=int, default=1024 * 1024, help="maximum retained bytes per command/test log")
@@ -907,8 +909,8 @@ def main(argv: list[str] | None = None, *, repository_root: Path | None = None) 
                 setup.append("--reconfigure")
             setup.extend([str(build_dir), str(root)])
             setup.extend(["-Dcpp_std=c++23", "-Dwrap_mode=nodownload"])
-            if "--reconfigure" not in setup:
-                setup.append("--buildtype=debug")
+            if args.buildtype or "--reconfigure" not in setup:
+                setup.append("--buildtype=" + (args.buildtype or "debug"))
             configured = execute("configure", setup)
             compiled = None
             if configured["status"] == "pass" and not interrupted:

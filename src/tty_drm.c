@@ -1061,7 +1061,7 @@ static struct tty_output *nearest_output(const struct seaside_tty_drm *drm, doub
 }
 
 static bool move_cursor(struct seaside_tty_drm *drm, double x, double y, bool count_move) {
-    double next_x, next_y;
+    double next_x = x, next_y = y;
     struct tty_output *target = nearest_output(drm, x, y, &next_x, &next_y);
     if (!target) {
         return false;

@@ -260,12 +260,25 @@ test('part7-selected-capture', capture_test, args: ['part7'], suite: ['integrati
   timeout: 25, env: {'SEASIDE_TEST_PART': '7', 'SEASIDE_REQUIREMENTS': '7.2,11,12.2b'},
 )
 
+tty_dependencies = [wlroots, wayland_server, pixman, libdrm, libinput, xkbcommon,
+                    meson.get_compiler('c').find_library('m')]
 tty_foundation = static_library(
   'seaside-tty-foundation', ['src/tty_drm.c', 'src/tty_input.c', 'src/cursor_layout.c'],
   include_directories: include_directories('src'),
-  dependencies: [wlroots, wayland_server, pixman, libdrm, libinput, xkbcommon,
-                 meson.get_compiler('c').find_library('m')], install: false,
+  dependencies: tty_dependencies, install: false,
 )
+
+# GCC's data-flow warnings differ between debug, -O2 and -O3. Exercise the DRM
+# cursor path at both shipped optimization levels during ordinary test builds.
+foreach level : ['2', '3']
+  if get_option('optimization') != level
+    static_library(
+      'seaside-tty-compile-o' + level, 'src/tty_drm.c',
+      dependencies: tty_dependencies, override_options: ['optimization=' + level],
+      install: false,
+    )
+  endif
+endforeach
 
 cursor_layout_tests = executable(
   'seaside-cursor-layout-tests', 'tests/unit/cursor_layout_test.cpp',

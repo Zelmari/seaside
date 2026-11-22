@@ -860,9 +860,11 @@ class ResultEvidenceTests(unittest.TestCase):
                                      "TEST_SHARD_INDEX": "2", "TEST_SHARD_STATUS_FILE": str(self.root / "outside-shard-status"),
                                      "XML_OUTPUT_FILE": str(self.root / "outside.xml"),
                                      "TEST_PREMATURE_EXIT_FILE": str(self.root / "outside-premature")}), redirect_stdout(io.StringIO()):
-            self.assertEqual(runner.main(["--suite", "unit"], repository_root=self.root), 0)
+            self.assertEqual(runner.main(["--suite", "unit", "--buildtype", "release"],
+                                         repository_root=self.root), 0)
         path = next((self.root / "test-results").glob("*/summary.json"))
         report = json.loads(path.read_text())
+        self.assertIn("--buildtype=release", report["commands"][0]["command"])
         self.assertEqual(report["parts"], [2])
         self.assertEqual(report["part"], 2)
         self.assertEqual(report["case_counts"]["pass"], 2)
