@@ -451,6 +451,68 @@ def volume(session):
     return float(match[1]), bool(match[2])
 
 
+def record_playback_monitor(session, pulse, sink, monitor_name, monitor, state):
+    sample_format = ["--raw", "--format=s16le", "--channels=1", "--rate=48000", "--latency-msec=25"]
+    evidence = {"source": monitor_name, "source_index": monitor, "sample_count": 0,
+                "range": [0, 0], "pcm_observed": False}
+    state["playback_monitor_evidence"] = evidence
+    with (tempfile.TemporaryFile(dir=session.root) as pcm,
+          tempfile.TemporaryFile(dir=session.root) as tone,
+          tempfile.TemporaryFile(dir=session.root) as receiver_log,
+          tempfile.TemporaryFile(dir=session.root) as producer_log):
+        tone.write(struct.pack("<480h", *([9216] * 120 + [-9216] * 120) * 2) * 100)
+        tone.seek(0)
+        record = subprocess.Popen(["parec", *sample_format, "--device=" + monitor_name],
+                                  env=session.env, stdout=pcm, stderr=receiver_log)
+        producer = None
+
+        def receiver_ready():
+            streams = json.loads(pulse("-f", "json", "list", "source-outputs"))
+            return next((row for row in streams if row["source"] == monitor and
+                         row["properties"].get("application.process.id") == str(record.pid) and
+                         not row["corked"]), None)
+
+        def recorded_pattern():
+            samples = os.pread(pcm.fileno(), 2 * 1024 * 1024, 0)
+            values = struct.unpack(f"<{len(samples) // 2}h", samples[:len(samples) // 2 * 2])
+            peak = [min(values), max(values)] if values else [0, 0]
+            evidence.update(sample_count=len(values), range=peak)
+            return peak[0] < -1000 and peak[1] > 1000
+
+        try:
+            stream = wait_for(receiver_ready, 6, "uncorked receiver on " + monitor_name, record)
+            evidence["source_output_index"] = stream["index"]
+            producer = subprocess.Popen(["pacat", "--playback", *sample_format, "--device=" + sink],
+                                        env=session.env, stdin=tone, stdout=subprocess.DEVNULL,
+                                        stderr=producer_log)
+            # Observe the monitor while playback is running so PCM has its own
+            # deadline even when PulseAudio's drain stalls.
+            try:
+                wait_for(recorded_pattern, 8, "non-silent playback PCM on " + monitor_name, record)
+            except RuntimeError as error:
+                raise RuntimeError(f"Expected playback PCM was not observed on {monitor_name}; "
+                                   f"samples={evidence['sample_count']}, range={evidence['range']}: {error}") from error
+            evidence["pcm_observed"] = True
+        finally:
+            try:
+                if producer is not None:
+                    evidence["producer_exit_before_cleanup"] = producer.poll()
+                    try:
+                        standard["stop"](producer)
+                    finally:
+                        evidence["producer_exit_after_cleanup"] = producer.returncode
+            finally:
+                try:
+                    standard["stop"](record)
+                finally:
+                    evidence["receiver_exit_after_cleanup"] = record.returncode
+                    for name, log in (("producer_diagnostic", producer_log),
+                                      ("receiver_diagnostic", receiver_log)):
+                        log.seek(0)
+                        evidence[name] = log.read(4096).decode(errors="replace")
+    state["external_playback_monitor"] = evidence
+
+
 def run_audio(session, state):
     def pulse(*args):
         return output(["pactl", *args], env=session.env)
@@ -520,41 +582,7 @@ def run_audio(session, state):
         sources = json.loads(pulse("-f", "json", "list", "sources"))
         monitor = next((row["index"] for row in sources if row["name"] == monitor_name), None)
         require(monitor is not None, f"PulseAudio did not expose {monitor_name}")
-        sample_format = ["--raw", "--format=s16le", "--channels=1", "--rate=48000", "--latency-msec=25"]
-        evidence = {"source": monitor_name, "source_index": monitor}
-        with (tempfile.TemporaryFile(dir=session.root) as pcm,
-              tempfile.TemporaryFile(dir=session.root) as log):
-            record = subprocess.Popen(["parec", *sample_format, "--device=" + monitor_name],
-                                      env=session.env, stdout=pcm, stderr=log)
-
-            def receiver_ready():
-                streams = json.loads(pulse("-f", "json", "list", "source-outputs"))
-                return next((row for row in streams if row["source"] == monitor and
-                             row["properties"].get("application.process.id") == str(record.pid) and
-                             not row["corked"]), None)
-
-            def recorded_pattern():
-                samples = os.pread(pcm.fileno(), 2 * 1024 * 1024, 0)
-                values = struct.unpack(f"<{len(samples) // 2}h", samples[:len(samples) // 2 * 2])
-                peak = [min(values), max(values)] if values else [0, 0]
-                evidence.update(sample_count=len(values), range=peak)
-                return peak[0] < -1000 and peak[1] > 1000
-
-            tone = struct.pack("<480h", *([9216] * 120 + [-9216] * 120) * 2) * 100
-            try:
-                stream = wait_for(receiver_ready, 6, "uncorked receiver on " + monitor_name, record)
-                evidence["source_output_index"] = stream["index"]
-                subprocess.run(["pacat", "--playback", *sample_format, "--device=" + second],
-                               input=tone, env=session.env, timeout=8, check=True)
-                # Playback can drain before the recorder receives its last
-                # fragments. Read without changing the recorder's file offset.
-                wait_for(recorded_pattern, 6, "playback pattern on " + monitor_name, record)
-            finally:
-                standard["stop"](record)
-                log.seek(0)
-                evidence["receiver_diagnostic"] = log.read(4096).decode(errors="replace")
-                state["playback_monitor_evidence"] = evidence
-        state["external_playback_monitor"] = evidence
+        record_playback_monitor(session, pulse, second, monitor_name, monitor, state)
     finally:
         try:
             if previous is None:
