@@ -24,6 +24,7 @@ still needs verification.
 | 6 | Live configuration, IPC, and bindings | [Plan](Parts/Part-06/PLAN.md) | [Handoff](Parts/Part-06/HANDOFF.md) |
 | 7 | X11 compatibility, clipboard, audio, and sharing | [Plan](Parts/Part-07/PLAN.md) | [Handoff](Parts/Part-07/HANDOFF.md) |
 | 8 | Display and GPU behavior | [Plan](Parts/Part-08/PLAN.md) | [Handoff](Parts/Part-08/HANDOFF.md) |
+| 9 | Idle, layer-shell, diagnostics, and recovery | [Plan](Parts/Part-09/PLAN.md) | |
 
 ## Native testing and performance
 
