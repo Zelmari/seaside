@@ -12,7 +12,8 @@ import tempfile
 import time
 
 
-def run(fixture, routing, package_root, receiver=None, native_client=None, no_outputs=False):
+def run(fixture, routing, package_root, receiver=None, native_client=None, no_outputs=False,
+        require_tools=False):
     lib = package_root / "lib"
     data = package_root / "share"
     definitions = [
@@ -31,7 +32,7 @@ def run(fixture, routing, package_root, receiver=None, native_client=None, no_ou
     missing = [str(binary) for binary in required if not binary.is_file()]
     if missing:
         print(f"Real portal checks need the installed Arch tools {', '.join(missing)}")
-        return 77
+        return 1 if require_tools else 77
     with tempfile.TemporaryDirectory(prefix="seaside-portals-") as name:
         root = Path(name)
         address = f"unix:path={root / 'bus'}"
@@ -241,7 +242,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("fixture", type=Path)
     parser.add_argument("routing", type=Path)
-    parser.add_argument("package_root", type=Path, nargs="?", default=Path("/usr"))
+    parser.add_argument("package_root", type=Path, nargs="?",
+                        default=os.environ.get("SEASIDE_TEST_PORTAL_PREFIX"))
     parser.add_argument("--stream-receiver", type=Path)
     parser.add_argument("--native-client", type=Path)
     parser.add_argument("--no-outputs", action="store_true")
@@ -252,5 +254,6 @@ if __name__ == "__main__":
         parser.error("--no-outputs requires the readiness-only check")
     receiver = args.stream_receiver.resolve() if args.stream_receiver is not None else None
     native = args.native_client.resolve() if args.native_client is not None else None
-    sys.exit(run(args.fixture.resolve(), args.routing.resolve(), args.package_root.resolve(),
-                 receiver, native, args.no_outputs))
+    prefix = args.package_root or Path("/usr")
+    sys.exit(run(args.fixture.resolve(), args.routing.resolve(), prefix.resolve(),
+                 receiver, native, args.no_outputs, require_tools=args.package_root is not None))

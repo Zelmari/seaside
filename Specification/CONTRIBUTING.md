@@ -34,6 +34,12 @@ tools/run-tests --jobs 2
 tools/run-tests --jobs 2 --suite part10
 ```
 
+Use `--buildtype release` or `--buildtype debugoptimized` with a separate
+`--build-dir` to test an optimized build. On a development host with the Arch
+portal packages staged in a separate root, set `SEASIDE_TEST_PORTAL_PREFIX`
+to that root's `usr` directory. The three real portal checks then use the
+staged binaries and report a failure if a required tool is missing.
+
 Read the run's `summary.txt` first. `summary.json` records the same outcomes
 in machine-readable form and links to more detailed logs. Use
 `tools/check-code --build-dir build` to rerun formatting and static analysis
