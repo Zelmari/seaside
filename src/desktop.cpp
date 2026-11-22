@@ -849,7 +849,14 @@ void Desktop::motion(double x, double y) noexcept try {
     }
     if (frame_paced_resize_ && drag_->resize) {
         if (auto *output = window_output_handle(drag_->window)) {
-            drag_->pending = PointerPosition{x, y};
+            const auto last =
+                drag_->last_scheduled_resize.value_or(PointerPosition{drag_->x, drag_->y});
+            if (x == last.x && y == last.y) {
+                return;
+            }
+            const PointerPosition target{x, y};
+            drag_->last_scheduled_resize = target;
+            drag_->pending = target;
             scene_.schedule_frame(output);
             return;
         }

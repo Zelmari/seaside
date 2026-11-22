@@ -901,9 +901,46 @@ bool run_opening_transaction(const Fixture &fixture) {
     desktop.enable_frame_paced_resize();
     REQUIRE(begin_drag(fixture, *right, BTN_RIGHT, 110, 45));
     REQUIRE(connection.wait(second, [&] { return second.configured.activated; }));
+    const auto pump_frames = [&] {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(35);
+        while (std::chrono::steady_clock::now() < deadline) {
+            if (!connection.pump(first)) {
+                return false;
+            }
+        }
+        return true;
+    };
+    REQUIRE(pump_frames());
+    unsigned commits = 0;
+    fixture.scene.set_frame_observer(
+        [](void *data, wlr_output *, const seaside_scene_frame_observation *frame) {
+            if (std::strcmp(frame->event, "commit") == 0 && frame->succeeded) {
+                ++*static_cast<unsigned *>(data);
+            }
+        },
+        &commits);
+    desktop.motion(110, 45);
+    const bool stationary_pumped = pump_frames();
+    const auto stationary_commits = commits;
+    desktop.motion(110.2, 45);
+    const bool fractional_pumped = pump_frames();
+    const auto fractional_commits = commits;
+    desktop.motion(110.2, 45);
+    const bool repeated_pumped = pump_frames();
+    fixture.scene.set_frame_observer(nullptr, nullptr);
+    REQUIRE(stationary_pumped && fractional_pumped && repeated_pumped);
+    REQUIRE(stationary_commits == 0 && commits == fractional_commits);
+
+    // The fractional part remains available to the next sampled position.
+    REQUIRE(desktop.windows().view(left).geometry.width == 80);
+    desktop.motion(111.1, 45);
+    REQUIRE(
+        connection.wait(first, [&] { return desktop.windows().view(left).geometry.width == 81; }));
+    REQUIRE(connection.wait(
+        second, [&] { return second.configured.resizing && second.configured.width == 79; }));
     desktop.motion(115, 45);
     desktop.motion(130, 45);
-    REQUIRE(desktop.windows().view(left).geometry.width == 80);
+    REQUIRE(desktop.windows().view(left).geometry.width == 81);
     REQUIRE(
         connection.wait(first, [&] { return desktop.windows().view(left).geometry.width == 100; }));
     REQUIRE(wait_pixel(connection, first, output.get(), 98, 45, red));
@@ -912,6 +949,8 @@ bool run_opening_transaction(const Fixture &fixture) {
     desktop.motion(135, 45);
     desktop.button(0, BTN_RIGHT, false, super, 135, 45);
     REQUIRE(desktop.windows().view(left).geometry.width == 105);
+    REQUIRE(connection.wait(
+        second, [&] { return !second.configured.resizing && second.configured.width == 55; }));
     REQUIRE(wait_pixel(connection, first, output.get(), 103, 45, red));
     REQUIRE(wait_pixel(connection, first, output.get(), 107, 45, green));
 

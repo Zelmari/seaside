@@ -71,6 +71,7 @@ class Desktop final {
         std::uint32_t resize_edges = 0;
         WindowRect initial_geometry{};
         std::optional<PointerPosition> pending{};
+        std::optional<PointerPosition> last_scheduled_resize{};
     };
     struct OpeningWindow {
         WindowRect geometry;
