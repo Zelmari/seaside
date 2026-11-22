@@ -110,7 +110,7 @@ struct Client {
         if (registry) {
             wl_registry_destroy(registry);
         }
-        if (display) {
+        if (display && owns_display) {
             wl_display_disconnect(display);
         }
     }
@@ -131,6 +131,7 @@ struct Client {
     }
 
     wl_display *display = nullptr;
+    bool owns_display = true;
     wl_registry *registry = nullptr;
     wl_compositor *compositor = nullptr;
     wl_subcompositor *subcompositor = nullptr;
@@ -449,9 +450,13 @@ class Connection {
             std::perror("desktop wl_display_connect_to_fd");
             return false;
         }
-        client.registry = wl_display_get_registry(client.display);
-        wl_registry_add_listener(client.registry, &registry_listener, &client);
-        return roundtrip(client) && client.compositor && client.shm && client.shell;
+        return bind_globals(client);
+    }
+
+    bool connect_sibling(Client &client, const Client &owner) {
+        client.display = owner.display;
+        client.owns_display = false;
+        return bind_globals(client);
     }
 
     // Drive both ends of real Wayland connections from one thread. The test
@@ -552,6 +557,12 @@ class Connection {
     }
 
   private:
+    bool bind_globals(Client &client) {
+        client.registry = wl_display_get_registry(client.display);
+        wl_registry_add_listener(client.registry, &registry_listener, &client);
+        return roundtrip(client) && client.compositor && client.shm && client.shell;
+    }
+
     bool attach(Client &client, wl_surface *surface, xdg_surface *xdg, std::uint32_t serial,
                 int width, int height, std::uint32_t rgb = 0) {
         if (width <= 0 || height <= 0 || width > 4096 || height > 4096) {
@@ -1129,6 +1140,50 @@ bool run_floating_resize_limits(const Fixture &fixture) {
     REQUIRE(!invalid && invalid.error() == seaside::DesktopActionError::invalid_state);
     desktop.on_projection({});
     desktop.remove_output(part3_output_handle(output.get()));
+    return true;
+}
+
+bool run_floating_resize_dialogs(const Fixture &fixture) {
+    auto output = fixture.output();
+    auto &desktop = fixture.desktop;
+    REQUIRE(output && desktop.add_output(part3_output_handle(output.get()), "headless", "headless",
+                                         output_bounds));
+    Connection connection(fixture.display);
+    Client parent, child, nested;
+    REQUIRE(connection.connect(parent) && connection.open(parent));
+    REQUIRE(connection.attach(parent, 40, 32, true, red));
+    const auto parent_id = desktop.windows().focused_window();
+    REQUIRE(parent_id);
+    // Fix the leading edge so the center of the resized parent moves.
+    REQUIRE(
+        desktop.dispatch(directional_action(ActionKind::move_window, Direction::left), 0, parent_id)
+            .value_or(false));
+    REQUIRE(connection.connect_sibling(child, parent) && connection.open(child));
+    xdg_toplevel_set_parent(child.toplevel, parent.toplevel);
+    REQUIRE(connection.attach(child, 22, 18, true, green));
+    const auto child_id = desktop.windows().focused_window();
+    REQUIRE(child_id && child_id != parent_id);
+    REQUIRE(connection.connect_sibling(nested, parent) && connection.open(nested));
+    xdg_toplevel_set_parent(nested.toplevel, child.toplevel);
+    REQUIRE(connection.attach(nested, 8, 6, true, blue));
+    const auto nested_id = desktop.windows().focused_window();
+    REQUIRE(nested_id && nested_id != child_id);
+    const auto before = desktop.windows().view(*nested_id).geometry;
+    REQUIRE(wait_pixel(connection, nested, output.get(), before.x + 2, before.y + 2, blue));
+
+    REQUIRE(desktop
+                .dispatch(directional_action(ActionKind::resize_window, Direction::right, 24), 0,
+                          parent_id)
+                .value_or(false));
+    const auto after = desktop.windows().view(*nested_id).geometry;
+    const auto middle = desktop.windows().view(*child_id).geometry;
+    REQUIRE(after.x == before.x + 12 && hit(fixture.scene, after, *nested_id));
+    REQUIRE(desktop.keyboard_window() == nested_id);
+    REQUIRE(wait_pixel(connection, nested, output.get(), middle.x + 1, middle.y + 1, green));
+    REQUIRE(wait_pixel(connection, nested, output.get(), after.x + 2, after.y + 2, blue));
+    REQUIRE(connection.wait(parent, [&] { return parent.configured.width == 64; }));
+    REQUIRE(connection.attach_configured(parent, red));
+    REQUIRE(hit(fixture.scene, after, *nested_id));
     return true;
 }
 
@@ -2067,6 +2122,7 @@ int main(int argc, char **argv) {
         return run_fixture(config, run_part4) && run_fixture(config, run_sparse_view_ids) &&
                        run_fixture(config, run_workspace_reassignment) &&
                        run_fixture(config, run_floating_borders) &&
+                       run_fixture(config, run_floating_resize_dialogs) &&
                        run_fixture(config, run_floating_resize_limits) &&
                        run_fixture(config, run_client_gestures)
                    ? EXIT_SUCCESS

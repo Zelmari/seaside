@@ -55,6 +55,7 @@ class WindowManager final {
     bool commit_geometry(WindowId id, WindowRect committed);
     bool set_size_limits(WindowId id, int min_width, int min_height, int max_width, int max_height);
     WindowView view(WindowId id) const;
+    bool is_descendant(WindowId id, WindowId ancestor) const;
 
     std::optional<WindowId> focused_window() const noexcept { return focused_window_; }
     bool click(WindowId id);
@@ -152,7 +153,6 @@ class WindowManager final {
     bool is_visible(WindowId id) const;
     bool is_tiled(WindowId id, const Window &window) const;
     bool has_tile_ancestor(WindowId id) const;
-    bool is_descendant(WindowId id, WindowId ancestor) const;
     std::optional<WindowId> local_focus(std::string_view output, WorkspaceId workspace) const;
     std::optional<WindowId> fullscreen_on(std::string_view output) const;
     WindowRect geometry(WindowId id, const Window &window) const;

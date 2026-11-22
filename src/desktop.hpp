@@ -85,7 +85,7 @@ class Desktop final {
     static int on_opening_deadline(void *self) noexcept;
     static void before_output_frame(void *self, wlr_output *output) noexcept;
     std::uint64_t window_event(const seaside_scene_window_event &event);
-    void project(WindowId resize = 0);
+    void project(WindowId resize = 0, bool geometry_only = false);
     void update_keyboard_focus(wlr_surface *layer_focus, WindowId focused) noexcept;
     bool stage_opening(WorkspaceId workspace);
     bool opening_ready() const;

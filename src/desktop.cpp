@@ -190,14 +190,16 @@ void Desktop::on_layer_changed(void *self) noexcept {
     }
 }
 
-void Desktop::project(WindowId resize) {
+void Desktop::project(WindowId resize, bool geometry_only) {
     if (!opening_.empty()) {
+        geometry_only = false;
         opening_.clear();
         wl_event_source_timer_update(opening_deadline_, 0);
     }
     if (drag_) {
         const auto view = windows_.view(drag_->window);
         if (!view.visible || (drag_->client && view.tiled)) {
+            geometry_only = false;
             discard_drag();
         }
     }
@@ -209,6 +211,7 @@ void Desktop::project(WindowId resize) {
         const auto work = from_scene(
             scene_.layer_work_area(handle, to_scene(*bounds), windows_.has_fullscreen(record.id)));
         if (record.work != work) {
+            geometry_only = false;
             discard_drag();
             if (!windows_.update_output(record.id, *bounds, work)) {
                 failed_ = true;
@@ -222,7 +225,13 @@ void Desktop::project(WindowId resize) {
     const auto *dragged =
         drag_ && drag_->started && drag_->resize ? windows_.state().window(drag_->window) : nullptr;
     auto *layer_focus = scene_.layer_keyboard_focus(focused_output_handle());
+    // Resizing an ordinary floating window can also move dialogs anchored
+    // to it (including nested dialogs). Tiled resizes redistribute a layout.
+    const bool floating_resize = geometry_only && resized && !windows_.view(resize).tiled;
     for (const auto &[id, state] : windows_.state().windows()) {
+        if (floating_resize && id != resize && !windows_.is_descendant(id, resize)) {
+            continue;
+        }
         const auto view = windows_.view(id);
         const auto output = windows_.window_output(id);
         auto geometry = view.geometry;
@@ -759,10 +768,12 @@ Desktop::dispatch(const Action &action, std::uint8_t modifiers, std::optional<Wi
         }
         break;
     }
-    if (focused != windows_.focused_window() || current_workspace != windows_.focused_workspace()) {
+    const bool focus_changed =
+        focused != windows_.focused_window() || current_workspace != windows_.focused_workspace();
+    if (focus_changed) {
         scene_.select_layer(nullptr);
     }
-    project(resized);
+    project(resized, !had_drag && !focus_changed);
     return changed;
 } catch (...) {
     failed_ = true;
@@ -912,7 +923,7 @@ void Desktop::apply_drag_motion(double x, double y) {
                 edges & (SEASIDE_RESIZE_TOP | SEASIDE_RESIZE_BOTTOM) ? std::optional{dy}
                                                                      : std::nullopt,
                 (edges & SEASIDE_RESIZE_LEFT) != 0, (edges & SEASIDE_RESIZE_TOP) != 0)) {
-            project(id);
+            project(id, true);
         }
         return;
     }
@@ -924,7 +935,7 @@ void Desktop::apply_drag_motion(double x, double y) {
     if (drag_->resize) {
         if (windows_.resize_window_by(id, dx, dy) == ResizeResult::changed) {
             drag_->started = true;
-            project(id);
+            project(id, true);
         }
     } else {
         if (!drag_->started) {
