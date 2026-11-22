@@ -115,6 +115,11 @@ def run(args, revision, bundle, *, scenario="part5", captures=None, send_input=r
         scenario_source = Path(__file__).with_name(f"{scenario}_vm_guest.py").read_text()
     worker = ("standard = {'__name__': 'seaside_vm_guest'}\n"
               f"exec(compile({standard_worker!r}, 'guest_trial.py', 'exec'), standard)\n"
+              "def revision_tty_trial(repo, temporary, results, state):\n"
+              "    import runpy\n"
+              "    trial = runpy.run_path(str(repo / 'tests/session/tty_smoke.py'))['tty_trial']\n"
+              "    trial(standard, repo, temporary, results, state)\n"
+              "standard['tty_trial'] = revision_tty_trial\n"
               + settings + scenario_source).encode()
     parent = runner.RunBridge
     files = {"worker": worker, "bundle": bundle, **(downloads or {})}
