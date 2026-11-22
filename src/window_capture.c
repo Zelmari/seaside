@@ -372,11 +372,34 @@ static void publish_frame(struct seaside_window_source *target, struct wlr_buffe
     pixman_region32_fini(&damage);
 }
 
+static void invalidate_source(struct seaside_window_source *target);
+
+static bool deliver_rendered_buffer(struct seaside_window_source *target) {
+    bool ready = false;
+    if (!wlr_drm_syncobj_timeline_check(target->timeline, target->render_point,
+                                        DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT, &ready)) {
+        invalidate_source(target);
+        return false;
+    }
+    if (!ready) {
+        // Poll only if the waiter could not be armed or woke without a signal.
+        schedule(target);
+        return false;
+    }
+    struct wlr_buffer *buffer = target->rendered_buffer;
+    target->rendered_buffer = NULL;
+    publish_frame(target, buffer, target->rendered_at);
+    wlr_buffer_unlock(buffer);
+    return true;
+}
+
 static void capture_render_ready(struct wlr_drm_syncobj_timeline_waiter *waiter) {
     struct seaside_window_source *target = wl_container_of(waiter, target, waiter);
     wlr_drm_syncobj_timeline_waiter_finish(waiter);
     target->waiting_for_render = false;
-    schedule(target);
+    if (deliver_rendered_buffer(target) && target->pending) {
+        schedule(target);
+    }
 }
 
 static bool emit_frame(struct seaside_window_source *target, struct timespec when,
@@ -443,25 +466,9 @@ static void invalidate_source(struct seaside_window_source *target) {
 static int capture_tick(void *data) {
     struct seaside_window_source *target = data;
     target->scheduled = false;
-    if (target->rendered_buffer) {
-        if (target->waiting_for_render) {
-            return 0;
-        }
-        bool ready = false;
-        if (!wlr_drm_syncobj_timeline_check(target->timeline, target->render_point,
-                                            DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT, &ready)) {
-            invalidate_source(target);
-            return 0;
-        }
-        if (!ready) {
-            schedule(target);
-            return 0;
-        }
-        // Export/copy only after the GPU finishes writing the capture buffer.
-        struct wlr_buffer *buffer = target->rendered_buffer;
-        target->rendered_buffer = NULL;
-        publish_frame(target, buffer, target->rendered_at);
-        wlr_buffer_unlock(buffer);
+    if (target->rendered_buffer &&
+        (target->waiting_for_render || !deliver_rendered_buffer(target))) {
+        return 0;
     }
     struct timespec now;
     const bool requested = target->pending;

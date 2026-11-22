@@ -246,11 +246,17 @@ core = static_library(
 
 capture_test = executable(
   'seaside-output-capture-test',
-  ['tests/integration/output_capture.c', capture_source_client, capture_copy_client, capture_copy_code,
+  ['tests/integration/output_capture.c', 'tests/integration/capture_fence_fixture.c', capture_source_client, capture_copy_client, capture_copy_code,
    xdg_output_client, xdg_output_code, xdg_shell_client_header, xdg_shell_private_code,
    foreign_toplevel_client, legacy_capture_client],
   include_directories: include_directories('src'),
   dependencies: [wlroots, wayland_server, wayland_client, pixman, libdrm, threads],
+  link_args: ['-Wl,--wrap=wlr_linux_drm_syncobj_v1_get_surface_state',
+              '-Wl,--wrap=wlr_linux_drm_syncobj_v1_state_add_release_point',
+              '-Wl,--wrap=wlr_drm_syncobj_timeline_create', '-Wl,--wrap=wlr_drm_syncobj_timeline_unref',
+              '-Wl,--wrap=wlr_drm_syncobj_timeline_waiter_init', '-Wl,--wrap=wlr_drm_syncobj_timeline_waiter_finish',
+              '-Wl,--wrap=wlr_drm_syncobj_timeline_check', '-Wl,--wrap=wlr_renderer_begin_buffer_pass',
+              '-Wl,--wrap=wlr_render_pass_add_texture'],
   link_with: [capture_foundation, core], install: false,
 )
 test('part3-output-capture', capture_test, suite: ['integration', 'part3'], timeout: 25,

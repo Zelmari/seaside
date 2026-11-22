@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 
 #include "output_capture.h"
+#include "capture_fence_fixture.h"
 #include "scene_bridge.h"
 
 #include "ext-foreign-toplevel-list-v1-client-protocol.h"
@@ -1106,6 +1107,14 @@ static bool check_selected_window(struct fixture *fixture) {
     CHECK(pump_until(fixture, &hidden_frame));
     CHECK(paint(fixture, selected.surface, 20, 14, SECOND_RGB));
     CHECK(pump_until(fixture, &window.ready) && plain_frame(&window, SECOND_RGB));
+
+    // Deliver a controlled GPU completion on a hidden, actively captured client.
+    capture_test_enable_fences(fixture->renderer);
+    CHECK(request_capture(&window) && paint(fixture, selected.surface, 20, 14, CURSOR_RGB));
+    CHECK(pump_for(fixture, 40) && !window.ready && capture_test_fence_pending());
+    capture_test_complete_fence();
+    CHECK(sync_client(fixture) && window.ready && plain_frame(&window, CURSOR_RGB));
+    capture_test_disable_fences(fixture->renderer);
 
     window.constrained = false;
     CHECK(paint(fixture, selected.surface, 27, 15, BACKGROUND_RGB));
