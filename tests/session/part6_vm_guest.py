@@ -279,7 +279,15 @@ def run_live(repo, directory, result_dir, state):
     unsupported_config = repair + "\n[monitors]\nresolution = '313x271'\n"
     moved_config = repair + "\n[monitors]\nposition = [64, 32]\n"
     config.parent.mkdir(parents=True)
-    replace(config, initial)
+    profiles = directory / "profiles"
+    files = directory / "files"
+    profiles.mkdir()
+    files.mkdir()
+    selected = initial + "\n[workspaces]\nmode = 'per-monitor'\n"
+    (files / "work").write_text(initial)
+    (files / "home").write_text(selected)
+    (profiles / "active").symlink_to("../files/work")
+    config.symlink_to("../../profiles/active")
     with Session(repo, directory, result_dir, "live") as session:
         session.wait(lambda: session.config()["recovery_persisted"], "first recovery snapshot")
         require(snapshot.read_text() == initial, "Startup snapshot changed the supplied TOML")
@@ -287,6 +295,22 @@ def run_live(repo, directory, result_dir, state):
         require(first_autostart.read_text().splitlines() == [str(session.path)],
                 "The launch command did not inherit the precise session socket")
         with Events(session) as events:
+            (profiles / "next").symlink_to("../files/home")
+            (profiles / "next").replace(profiles / "active")
+            events.expect("config.recovered")
+            session.wait(lambda: session.config()["recovery_persisted"], "switched profile snapshot")
+            require(session.config()["pending_restart"] and snapshot.read_text() == selected,
+                    "Retargeting the intermediate link did not apply the selected profile")
+            (files / "home").write_text(bad_config)
+            events.expect("config.error")
+            require(session.config()["error"]["field"] == "window.gaps_outer" and
+                    snapshot.read_text() == selected, "Invalid profile edit replaced last-good TOML")
+            (files / "home").write_text(initial)
+            events.expect("config.recovered")
+            session.wait(lambda: session.config()["recovery_persisted"], "repaired profile snapshot")
+            require(not session.config()["pending_restart"] and snapshot.read_text() == initial,
+                    "A subsequent edit of the new target did not repair the profile")
+            state["profile_switch"] = {"retargeted": True, "invalid_retained": True, "repaired": True}
             session.key("open")
             session.wait(session.windows, "the default Super+Return terminal")
             mapped = events.expect("window.mapped")

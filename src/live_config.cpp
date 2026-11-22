@@ -5,6 +5,7 @@
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
+#include <map>
 #include <sys/inotify.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -34,15 +35,15 @@ std::error_code work_error(WorkError error) {
 } // namespace
 
 struct LiveConfig::Impl {
-    enum class WriteState { complete, created, target_created, modified };
-    enum class Entry { config, target, ancestor };
-
-    struct DirectoryWatch {
-        int descriptor = -1;
-        std::string entry;
-        Entry kind = Entry::ancestor;
-        bool follows_link = false;
+    enum class WriteState { complete, created, modified };
+    struct Entry {
+        std::string name;
+        std::filesystem::path path;
+        unsigned hop;
+        bool ancestor;
     };
+    // inotify shares a descriptor when several paths name the same directory.
+    using Directories = std::map<int, std::vector<Entry>>;
 
     Impl(std::unique_ptr<WorkQueue> queue, ConfigStore store, ConfigPaths paths,
          LoadedConfig startup, Prepare prepare, Apply apply, Changed changed)
@@ -70,60 +71,47 @@ struct LiveConfig::Impl {
         return watch_source_ && timer_ && arm_reload();
     }
 
-    void watch_directories(const std::filesystem::path &path, DirectoryWatch &parent_watch,
-                           DirectoryWatch &ancestor_watch, Entry kind) const {
-        const auto directory = path.parent_path();
-        const bool follows_link = kind == Entry::target;
-        parent_watch = {inotify_add_watch(watch_fd_, directory.c_str(), directory_events),
-                        path.filename().string(), kind, follows_link};
-
-        // Keep a watch above the config directory so remove/rename and later
-        // recreation can be tracked even while the immediate path is absent.
-        for (auto child = directory; child.has_parent_path() && child != child.parent_path();) {
-            auto ancestor = child.parent_path();
-            const int descriptor = inotify_add_watch(watch_fd_, ancestor.c_str(), directory_events);
-            if (descriptor >= 0) {
-                ancestor_watch = {descriptor, child.filename().string(), Entry::ancestor,
-                                  follows_link};
+    void watch_directories(Directories &watches, const std::filesystem::path &path,
+                           unsigned hop) const {
+        auto add = [&](const std::filesystem::path &entry, bool ancestor) {
+            const int wd =
+                inotify_add_watch(watch_fd_, entry.parent_path().c_str(), directory_events);
+            if (wd >= 0)
+                watches[wd].push_back({entry.filename().string(), entry, hop, ancestor});
+            return wd >= 0;
+        };
+        add(path, false);
+        // Watch above a missing or replaceable directory so its return is observed.
+        for (auto child = path.parent_path();
+             child.has_parent_path() && child != child.parent_path(); child = child.parent_path()) {
+            if (add(child, true))
                 break;
-            }
-            child = std::move(ancestor);
         }
-    }
-
-    std::filesystem::path symlink_target() const {
-        auto target = paths_.user;
-        // Follow the same bounded number of final-component links as Linux.
-        for (int links = 0; links <= 40; ++links) {
-            std::error_code error;
-            auto next = std::filesystem::read_symlink(target, error);
-            if (error)
-                return target == paths_.user ? std::filesystem::path{} : target;
-            target = next.is_absolute() ? std::move(next) : target.parent_path() / next;
-        }
-        return {};
     }
 
     bool refresh_watches() {
-        decltype(directories_) next;
-        watch_directories(paths_.user, next[0], next[1], Entry::config);
-        // The inode watch disappears when a dotfile target is unlinked.
-        // Its containing directory observes the next create and write-close.
-        target_path_ = symlink_target();
-        if (!target_path_.empty())
-            watch_directories(target_path_, next[2], next[3], Entry::target);
-        const int file = inotify_add_watch(watch_fd_, paths_.user.c_str(), file_events);
-        for (const auto &old : directories_) {
-            if (old.descriptor >= 0 && std::ranges::none_of(next, [&](const auto &watch) {
-                    return watch.descriptor == old.descriptor;
-                }))
-                inotify_rm_watch(watch_fd_, old.descriptor);
+        Directories next;
+        auto path = paths_.user;
+        // Watch each final-component link *before* resolving its contents. A
+        // profile switch in a different directory need never touch either endpoint.
+        for (unsigned hop = 0; hop <= 40; ++hop) {
+            watch_directories(next, path, hop);
+            std::error_code error;
+            auto target = std::filesystem::read_symlink(path, error);
+            if (error)
+                break;
+            path = target.is_absolute() ? std::move(target) : path.parent_path() / target;
         }
-        if (file_watch_ >= 0 && file_watch_ != file)
+        const int file = inotify_add_watch(watch_fd_, paths_.user.c_str(), file_events);
+        for (const auto &[wd, entries] : directories_) {
+            if (!next.contains(wd) && wd != file)
+                inotify_rm_watch(watch_fd_, wd);
+        }
+        if (file_watch_ >= 0 && file_watch_ != file && !next.contains(file_watch_))
             inotify_rm_watch(watch_fd_, file_watch_);
         directories_ = std::move(next);
         file_watch_ = file;
-        return directories_[0].descriptor >= 0 || directories_[1].descriptor >= 0;
+        return !directories_.empty();
     }
 
     static int on_watch(int, std::uint32_t mask, void *data) noexcept {
@@ -153,8 +141,7 @@ struct LiveConfig::Impl {
     void drain_watch() {
         bool changed = false;
         bool rewatch = false;
-        bool replaced = false;
-        bool config_replaced = false;
+        std::optional<unsigned> replaced_hop;
         std::array<char, 16 * 1024> buffer{};
         // Bound the amount of input processed in one dispatch, including when
         // other applications are busy writing to the watched ancestor.
@@ -178,28 +165,25 @@ struct LiveConfig::Impl {
                     rewatch = true;
                 } else if (event.wd == file_watch_) {
                     // The file watch can still deliver events from an unlinked inode.
-                    if (replaced)
+                    if (replaced_hop)
                         continue;
                     changed = true;
                     rewatch |= (event.mask & (lost_watch | IN_ATTRIB)) != 0;
-                    record_write(event.mask, WriteState::created);
-                } else {
-                    for (const auto &directory : directories_) {
-                        if (event.wd != directory.descriptor ||
-                            (config_replaced && directory.follows_link))
+                    record_write(event.mask, {});
+                } else if (auto it = directories_.find(event.wd); it != directories_.end()) {
+                    for (const auto &entry : it->second) {
+                        if (replaced_hop && entry.hop > *replaced_hop)
                             continue;
                         if ((event.mask & lost_watch) ||
-                            (event.len && std::string_view(name) == directory.entry)) {
+                            (event.len && std::string_view(name) == entry.name)) {
                             changed = true;
                             const bool replacement =
                                 (event.mask & (lost_watch | replaced_entry)) != 0;
                             rewatch |= replacement || (event.mask & IN_ATTRIB);
-                            replaced |= replacement;
-                            config_replaced |= replacement && !directory.follows_link;
-                            if (directory.kind != Entry::ancestor)
-                                record_write(event.mask, directory.kind == Entry::target
-                                                             ? WriteState::target_created
-                                                             : WriteState::created);
+                            if (replacement)
+                                replaced_hop = entry.hop;
+                            if (!entry.ancestor)
+                                record_write(event.mask, entry.path);
                             else if (replacement)
                                 write_state_ = WriteState::complete;
                         }
@@ -215,20 +199,17 @@ struct LiveConfig::Impl {
         }
         if (rewatch)
             refresh_watches();
-        if ((write_state_ == WriteState::created && !created_regular_file(paths_.user)) ||
-            (write_state_ == WriteState::target_created && !created_regular_file(target_path_)))
-            write_state_ = WriteState::complete;
         if (changed && !arm_reload())
             watch_failed();
     }
 
-    void record_write(std::uint32_t mask, WriteState creation) noexcept {
+    void record_write(std::uint32_t mask, const std::filesystem::path &path) noexcept {
         if (mask & (IN_CLOSE_WRITE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO | lost_watch)) {
             write_state_ = WriteState::complete;
         } else if (mask & IN_MODIFY) {
             write_state_ = WriteState::modified;
         } else if (mask & IN_CREATE) {
-            write_state_ = creation;
+            write_state_ = created_regular_file(path) ? WriteState::created : WriteState::complete;
         }
     }
 
@@ -390,8 +371,7 @@ struct LiveConfig::Impl {
     std::string accepted_text_;
     ConfigTransaction transaction_;
     std::uint64_t accepted_generation_ = 0;
-    std::array<DirectoryWatch, 4> directories_;
-    std::filesystem::path target_path_;
+    Directories directories_;
     Source watch_source_{nullptr, wl_event_source_remove};
     Source timer_{nullptr, wl_event_source_remove};
     int watch_fd_ = -1;

@@ -308,6 +308,43 @@ TEST_F(LiveConfigTest, ConfigSymlinkFollowsInPlaceWritesAndTargetReplacement) {
     EXPECT_FALSE(transaction().diagnostic());
 }
 
+TEST_F(LiveConfigTest, IntermediateProfileSwitchTracksTheNewTargetAndItsRepairs) {
+    const auto profiles = directory.path() / "profiles";
+    const auto files = directory.path() / "files";
+    std::filesystem::create_directories(paths.user.parent_path());
+    std::filesystem::create_directory(profiles);
+    std::filesystem::create_directory(files);
+    const std::string work = "[window]\ngaps_outer=21\n";
+    const std::string home = "[window]\ngaps_outer=34\n";
+    ASSERT_TRUE(std::ofstream(files / "work") << work);
+    ASSERT_TRUE(std::ofstream(files / "home") << home);
+    std::filesystem::create_symlink("../../profiles/active", paths.user);
+    std::filesystem::create_symlink("../files/work", profiles / "active");
+    ASSERT_NO_FATAL_FAILURE(start());
+    ASSERT_TRUE(pump_until([&] { return transaction().recovery_persisted(); }));
+    // Let the post-startup rescan settle before switching the intermediate link.
+    EXPECT_FALSE(pump_until([&] { return transaction().diagnostic().has_value(); }, 250ms));
+    ASSERT_EQ(snapshot(), work);
+
+    std::filesystem::create_symlink("../files/home", profiles / "next");
+    std::filesystem::rename(profiles / "next", profiles / "active");
+    ASSERT_TRUE(pump_until([&] {
+        return transaction().active().window.gaps_outer == 34 && transaction().recovery_persisted();
+    }));
+    EXPECT_EQ(snapshot(), home);
+    ASSERT_TRUE(std::ofstream(files / "home") << "[window]\ngaps_outer=false\n");
+    ASSERT_TRUE(pump_until([&] { return transaction().diagnostic().has_value(); }));
+    EXPECT_EQ(transaction().active().window.gaps_outer, 34);
+    EXPECT_EQ(snapshot(), home);
+    const std::string repaired = "[window]\ngaps_outer=35\n";
+    ASSERT_TRUE(std::ofstream(files / "home") << repaired);
+    ASSERT_TRUE(pump_until([&] {
+        return transaction().active().window.gaps_outer == 35 && transaction().recovery_persisted();
+    }));
+    EXPECT_FALSE(transaction().diagnostic());
+    EXPECT_EQ(snapshot(), repaired);
+}
+
 TEST_F(LiveConfigTest, RescansCurrentPathAfterAnInotifyOverflow) {
     int queue_limit = 0;
     if (!(std::ifstream("/proc/sys/fs/inotify/max_queued_events") >> queue_limit) ||
