@@ -79,7 +79,7 @@ class PortalActivationTest : public testing::Test {
         bool stopping = false;
         unsigned stop_polls = 0;
     };
-    enum class StopBehavior { normal, reply_error, unknown_state, stays_active };
+    enum class StopBehavior { normal, reply_error, no_reply, unknown_state, stays_active };
 
     seaside::test::Directory directory;
     const std::string address = "unix:path=" + (directory.path() / "bus").string();
@@ -327,6 +327,9 @@ class PortalActivationTest : public testing::Test {
         if (found->portal == &portals.back() && stop_behavior == StopBehavior::reply_error) {
             return sd_bus_reply_method_errorf(message, SD_BUS_ERROR_FAILED, "test stop reply lost");
         }
+        if (found->portal == &portals.back() && stop_behavior == StopBehavior::no_reply) {
+            return 1;
+        }
         return sd_bus_reply_method_return(message, "o", "/org/freedesktop/systemd1/job/2");
     }
 
@@ -347,14 +350,12 @@ class PortalActivationTest : public testing::Test {
         }
         EXPECT_TRUE(found->stopping);
         const auto *state = found->stop_polls++ == 0 ? "deactivating" : "inactive";
-        if (found->portal == &portals.back()) {
-            if (stop_behavior == StopBehavior::unknown_state) {
-                return sd_bus_reply_method_errorf(message, SD_BUS_ERROR_FAILED,
-                                                  "test unit state unavailable");
-            }
-            if (stop_behavior == StopBehavior::stays_active) {
-                state = "active";
-            }
+        if (found->portal == &portals.back() && stop_behavior == StopBehavior::unknown_state) {
+            return sd_bus_reply_method_errorf(message, SD_BUS_ERROR_FAILED,
+                                              "test unit state unavailable");
+        }
+        if (found->portal == &portals.front() && stop_behavior == StopBehavior::stays_active) {
+            state = "active";
         }
         return sd_bus_reply_method_return(message, "v", "s", state);
     }
@@ -426,6 +427,21 @@ TEST_F(PortalActivationTest, ConfirmsEveryUnitStoppedDespiteAFailedStopReply) {
     }
 }
 
+TEST_F(PortalActivationTest, ConfirmsEveryUnitStoppedWithoutWaitingForAMissingReply) {
+    start();
+    ASSERT_TRUE(outcome);
+    ASSERT_EQ(outcome->second.failure, ServiceFailure::none);
+    stop_behavior = StopBehavior::no_reply;
+
+    const auto started = std::chrono::steady_clock::now();
+    EXPECT_TRUE(activation->stop());
+    EXPECT_LT(std::chrono::steady_clock::now() - started, 1250ms);
+    ASSERT_EQ(stopped.size(), portals.size());
+    for (const auto &unit : units) {
+        EXPECT_GE(unit.stop_polls, 2U);
+    }
+}
+
 TEST_F(PortalActivationTest, ReportsAnUnverifiableUnitDespiteASuccessfulStopReply) {
     start();
     ASSERT_TRUE(outcome);
@@ -445,7 +461,9 @@ TEST_F(PortalActivationTest, ReportsAUnitStillActiveAtTheShutdownDeadline) {
 
     EXPECT_FALSE(activation->stop());
     ASSERT_EQ(stopped.size(), portals.size());
-    EXPECT_GE(units.back().stop_polls, 2U);
+    for (const auto &unit : units) {
+        EXPECT_GE(unit.stop_polls, 2U);
+    }
 }
 
 TEST_F(PortalActivationTest, RollsBackOnlyItsOwnUnitWhenTheNextPortalAlreadyExists) {

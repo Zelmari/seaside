@@ -2,6 +2,7 @@
 
 #include "session_bus.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <cstdio>
@@ -367,91 +368,132 @@ struct PortalActivation::Impl final : std::enable_shared_from_this<Impl> {
         }
     }
 
-    bool drain(Clock::time_point limit, const unsigned &remaining) noexcept {
-        while (remaining && Clock::now() < limit) {
-            if (wl_event_loop_dispatch(bus->event_loop(), 25) < 0 && errno != EINTR) {
-                return false;
-            }
-        }
-        return remaining == 0;
+    bool dispatch_until(Clock::time_point limit) noexcept {
+        const auto delay = std::chrono::ceil<std::chrono::milliseconds>(limit - Clock::now());
+        return delay > 0ms &&
+               (wl_event_loop_dispatch(bus->event_loop(), std::min(delay, 25ms).count()) >= 0 ||
+                errno == EINTR);
     }
 
-    bool confirm_stop(const Unit &unit, Clock::time_point limit) {
+    void drain(Clock::time_point limit, const unsigned &remaining) noexcept {
+        while (remaining && dispatch_until(limit)) {
+        }
+    }
+
+    struct StopCheck {
+        SessionBus::CallId call = 0;
+        bool finished = false;
+        bool quiet = false;
         std::array<char, 32> last_state{};
+    };
+
+    void request_active_state(const Unit &unit, StopCheck &check, unsigned &remaining,
+                              Clock::time_point limit) {
+        sd_bus_message *raw = nullptr;
+        int error = sd_bus_message_new_method_call(bus->native_handle(), &raw, manager_name,
+                                                   unit.path.c_str(),
+                                                   "org.freedesktop.DBus.Properties", "Get");
+        const Message message(raw, sd_bus_message_unref);
+        if (error >= 0) {
+            error = sd_bus_message_set_auto_start(raw, 0);
+        }
+        if (error >= 0) {
+            error =
+                sd_bus_message_append(raw, "ss", "org.freedesktop.systemd1.Unit", "ActiveState");
+        }
+        if (error < 0) {
+            std::fprintf(stderr, "seaside: portal %s could not build ActiveState query (%d)\n",
+                         unit.name.c_str(), error);
+            check.finished = true;
+            return;
+        }
+        const auto duration =
+            std::chrono::duration_cast<std::chrono::microseconds>(limit - Clock::now());
+        if (duration.count() <= 0) {
+            return;
+        }
+        auto call = bus->call(raw, duration, [&unit, &check, &remaining](const BusReply &reply) {
+            check.call = 0;
+            --remaining;
+            // systemd may collect the unit as soon as its stop job completes.
+            if (unit_is_gone(reply)) {
+                check.finished = check.quiet = true;
+                return;
+            }
+            const char *state = nullptr;
+            if (reply.error == BusError::timeout) {
+                return;
+            }
+            if (reply.error != BusError::none) {
+                const auto *remote =
+                    reply.message ? sd_bus_message_get_error(reply.message) : nullptr;
+                std::fprintf(stderr, "seaside: portal %s ActiveState query failed (%s, %d)\n",
+                             unit.name.c_str(), remote && remote->name ? remote->name : "D-Bus",
+                             reply.native_error);
+                check.finished = true;
+            } else if (reply.message && sd_bus_message_read(reply.message, "v", "s", &state) > 0) {
+                const std::string_view value(state);
+                std::snprintf(check.last_state.data(), check.last_state.size(), "%s", state);
+                check.finished = check.quiet = value == "inactive" || value == "failed";
+            } else {
+                std::fprintf(stderr, "seaside: portal %s returned malformed ActiveState\n",
+                             unit.name.c_str());
+                check.finished = true;
+            }
+        });
+        if (!call) {
+            std::fprintf(stderr, "seaside: portal %s could not queue ActiveState query (%d)\n",
+                         unit.name.c_str(), static_cast<int>(call.error()));
+            check.finished = true;
+            return;
+        }
+        check.call = *call;
+        ++remaining;
+    }
+
+    bool confirm_stopped(Clock::time_point limit) noexcept {
+        std::array<StopCheck, services.size()> checks{};
+        for (std::size_t index = 0; index < units.size(); ++index) {
+            checks[index].finished = !units[index].requested;
+        }
         while (Clock::now() < limit) {
-            sd_bus_message *raw = nullptr;
-            int error = sd_bus_message_new_method_call(bus->native_handle(), &raw, manager_name,
-                                                       unit.path.c_str(),
-                                                       "org.freedesktop.DBus.Properties", "Get");
-            const Message message(raw, sd_bus_message_unref);
-            if (error >= 0) {
-                error = sd_bus_message_set_auto_start(raw, 0);
-            }
-            if (error >= 0) {
-                error = sd_bus_message_append(raw, "ss", "org.freedesktop.systemd1.Unit",
-                                              "ActiveState");
-            }
-            if (error < 0) {
-                std::fprintf(stderr, "seaside: portal %s could not build ActiveState query (%d)\n",
-                             unit.name.c_str(), error);
-                return false;
-            }
-            unsigned remaining = 1;
-            bool inactive = false;
-            bool pending_stop = false;
-            const auto duration =
-                std::chrono::duration_cast<std::chrono::microseconds>(limit - Clock::now());
-            if (duration.count() <= 0) {
-                break;
-            }
-            auto call = bus->call(raw, duration, [&](const BusReply &reply) {
-                remaining = 0;
-                // systemd may collect the unit as soon as its stop job completes.
-                inactive = unit_is_gone(reply);
-                if (inactive) {
-                    return;
+            unsigned remaining = 0;
+            const auto round = std::min(limit, Clock::now() + 250ms);
+            for (std::size_t index = 0; index < units.size(); ++index) {
+                auto &check = checks[index];
+                if (check.finished) {
+                    continue;
                 }
-                const char *state = nullptr;
-                if (reply.error != BusError::none) {
-                    const auto *remote =
-                        reply.message ? sd_bus_message_get_error(reply.message) : nullptr;
-                    std::fprintf(stderr, "seaside: portal %s ActiveState query failed (%s, %d)\n",
-                                 unit.name.c_str(), remote && remote->name ? remote->name : "D-Bus",
-                                 reply.native_error);
-                } else if (reply.message &&
-                           sd_bus_message_read(reply.message, "v", "s", &state) > 0) {
-                    const std::string_view value(state);
-                    std::snprintf(last_state.data(), last_state.size(), "%s", state);
-                    inactive = value == "inactive" || value == "failed";
-                    pending_stop = !inactive;
-                } else {
-                    std::fprintf(stderr, "seaside: portal %s returned malformed ActiveState\n",
-                                 unit.name.c_str());
+                try {
+                    request_active_state(units[index], check, remaining, round);
+                } catch (...) {
+                    check.finished = true;
                 }
-            });
-            if (!call) {
-                std::fprintf(stderr, "seaside: portal %s could not queue ActiveState query (%d)\n",
-                             unit.name.c_str(), static_cast<int>(call.error()));
-                return false;
             }
-            if (!drain(limit, remaining)) {
-                (void)bus->cancel(*call);
+            drain(round, remaining);
+            for (auto &check : checks) {
+                if (auto id = std::exchange(check.call, 0)) {
+                    (void)bus->cancel(id);
+                }
+            }
+            if (std::ranges::all_of(checks,
+                                    [](const StopCheck &check) { return check.finished; }) ||
+                !dispatch_until(limit)) {
                 break;
-            }
-            if (inactive || !pending_stop) {
-                return inactive;
-            }
-            // A StopUnit reply admits the job. Inspect the unit itself before
-            // releasing the display and returning to the TTY.
-            if (wl_event_loop_dispatch(bus->event_loop(), 25) < 0 && errno != EINTR) {
-                std::fprintf(stderr, "seaside: portal %s could not poll ActiveState (%d)\n",
-                             unit.name.c_str(), errno);
-                return false;
             }
         }
-        std::fprintf(stderr, "seaside: portal %s could not confirm stop (last ActiveState=%s)\n",
-                     unit.name.c_str(), last_state[0] == '\0' ? "unknown" : last_state.data());
-        return false;
+        bool ok = true;
+        for (std::size_t index = 0; index < units.size(); ++index) {
+            const auto &check = checks[index];
+            if (units[index].requested && !check.quiet) {
+                std::fprintf(stderr,
+                             "seaside: portal %s could not confirm stop (last ActiveState=%s)\n",
+                             units[index].name.c_str(),
+                             check.last_state[0] == '\0' ? "unknown" : check.last_state.data());
+                ok = false;
+            }
+        }
+        return ok;
     }
 
     bool stop() noexcept {
@@ -465,7 +507,9 @@ struct PortalActivation::Impl final : std::enable_shared_from_this<Impl> {
         }
         std::array<SessionBus::CallId, services.size()> calls{};
         unsigned remaining = 0;
-        const auto limit = Clock::now() + 2s;
+        const auto started = Clock::now();
+        const auto stop_reply_limit = started + 250ms;
+        const auto limit = started + 2s;
         for (std::size_t index = units.size(); index-- > 0;) {
             if (!units[index].requested) {
                 continue;
@@ -480,7 +524,12 @@ struct PortalActivation::Impl final : std::enable_shared_from_this<Impl> {
                 if (error < 0) {
                     continue;
                 }
-                auto call = bus->call(message.get(), 1500ms,
+                const auto duration = std::chrono::duration_cast<std::chrono::microseconds>(
+                    stop_reply_limit - Clock::now());
+                if (duration.count() <= 0) {
+                    continue;
+                }
+                auto call = bus->call(message.get(), duration,
                                       [&remaining](const BusReply &) { --remaining; });
                 if (!call) {
                     continue;
@@ -491,25 +540,28 @@ struct PortalActivation::Impl final : std::enable_shared_from_this<Impl> {
                 // Still verify every unit after sending all possible stop requests.
             }
         }
-        (void)drain(limit, remaining);
+        drain(stop_reply_limit, remaining);
+        const auto checking = Clock::now();
         for (const auto id : calls) {
             if (id) {
                 (void)bus->cancel(id);
             }
         }
-        // StopUnit can race with unit collection or lose its reply. Only the
-        // resulting state of each unit proves whether it is still running.
-        bool ok = true;
-        for (const auto &unit : units) {
-            if (unit.requested) {
-                try {
-                    ok &= confirm_stop(unit, limit);
-                } catch (...) {
-                    std::fprintf(stderr, "seaside: portal %s could not verify shutdown\n",
-                                 unit.name.c_str());
-                    ok = false;
-                }
-            }
+        // Reserve most of the budget for proving the state of all units, even
+        // if a stop reply is delayed. On this connection, requests and checks
+        // are sent in order to the same manager.
+        const bool ok = confirm_stopped(limit);
+        if (!ok) {
+            const auto stop_ms =
+                std::chrono::duration_cast<std::chrono::milliseconds>(checking - started);
+            const auto check_ms =
+                std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - checking);
+            std::fprintf(
+                stderr,
+                "seaside: portal shutdown spent %lld ms sending stops (%u pending replies), "
+                "%lld ms checking units\n",
+                static_cast<long long>(stop_ms.count()), remaining,
+                static_cast<long long>(check_ms.count()));
         }
         return ok;
     }
