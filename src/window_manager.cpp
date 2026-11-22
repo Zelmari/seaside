@@ -1454,15 +1454,15 @@ bool WindowManager::resize_window(WindowId id, Direction direction, int distance
     return resized;
 }
 
-bool WindowManager::resize_window_by(WindowId id, int dw, int dh) {
+ResizeResult WindowManager::resize_window_by(WindowId id, int dw, int dh) {
     auto found = windows_.find(id);
     const auto output = window_output(id);
     if (found == windows_.end() || !output || !state_.window(id)->mapped) {
-        return false;
+        return ResizeResult::invalid;
     }
     auto &window = found->second;
     if (window.maximized || window.fullscreen || (tile_move_ && tile_move_->tile.id == id)) {
-        return false;
+        return ResizeResult::invalid;
     }
     finish_focus_cycle();
     if (is_tiled(id, window)) {
@@ -1470,18 +1470,27 @@ bool WindowManager::resize_window_by(WindowId id, int dw, int dh) {
         if (resized && focused_window_ == id) {
             reveal(id);
         }
-        return resized;
+        return resized ? ResizeResult::changed : ResizeResult::invalid;
     }
+    const auto extent = [](int size, int delta, int minimum, int maximum, int available) {
+        if (!delta) {
+            return size;
+        }
+        const int lower = std::clamp(minimum, 1, available);
+        const int upper = maximum > 0 ? std::clamp(maximum, lower, available) : available;
+        return static_cast<int>(std::clamp<std::int64_t>(std::int64_t{size} + delta, lower, upper));
+    };
     const auto &area = outputs_.find(*output)->second.usable;
-    if (dw) {
-        window.ordinary.width = static_cast<int>(
-            std::clamp<std::int64_t>(std::int64_t{window.ordinary.width} + dw, 1, area.width));
+    const auto &limits = window.limits;
+    auto &rect = window.ordinary;
+    const int width = extent(rect.width, dw, limits.min_width, limits.max_width, area.width);
+    const int height = extent(rect.height, dh, limits.min_height, limits.max_height, area.height);
+    if (width == rect.width && height == rect.height) {
+        return ResizeResult::unchanged;
     }
-    if (dh) {
-        window.ordinary.height = static_cast<int>(
-            std::clamp<std::int64_t>(std::int64_t{window.ordinary.height} + dh, 1, area.height));
-    }
-    return true;
+    rect.width = width;
+    rect.height = height;
+    return ResizeResult::changed;
 }
 
 bool WindowManager::resize_floating(WindowId id, WindowRect start, std::optional<int> dx,

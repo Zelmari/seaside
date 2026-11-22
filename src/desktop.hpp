@@ -95,8 +95,7 @@ class Desktop final {
     bool update_size_limits(WindowId id);
     void discard_drag();
     bool begin_client_drag(const seaside_scene_window_event &event);
-    bool resize(WindowId id, Direction direction, int distance);
-    bool resize_by(WindowId id, int dx, int dy);
+    ResizeResult resize(WindowId id, Direction direction, int distance);
 
     Scene &scene_;
     WindowManager windows_;

@@ -25,16 +25,6 @@ int motion_delta(double delta) noexcept {
                                        double{std::numeric_limits<int>::max()}));
 }
 
-int resize_delta(int size, int delta, int minimum, int maximum) noexcept {
-    if (delta == 0) {
-        return 0;
-    }
-    const auto lower = std::max(1, minimum);
-    const auto upper = maximum ? std::max(lower, maximum) : std::numeric_limits<int>::max();
-    const auto desired = std::clamp<std::int64_t>(std::int64_t{size} + delta, lower, upper);
-    return static_cast<int>(desired - size);
-}
-
 bool same_size(WindowRect first, WindowRect second) noexcept {
     return first.width == second.width && first.height == second.height;
 }
@@ -586,38 +576,27 @@ bool Desktop::begin_client_drag(const seaside_scene_window_event &event) {
     return true;
 }
 
-bool Desktop::resize(WindowId id, Direction direction, int distance) {
+ResizeResult Desktop::resize(WindowId id, Direction direction, int distance) {
     if (distance <= 0) {
-        return false;
+        return ResizeResult::invalid;
     }
     if (windows_.view(id).tile_layout) {
-        return windows_.resize_window(id, direction, distance);
+        return windows_.resize_window(id, direction, distance) ? ResizeResult::changed
+                                                               : ResizeResult::invalid;
     }
     switch (direction) {
     case Direction::left:
-        return resize_by(id, -distance, 0);
+        return windows_.resize_window_by(id, -distance, 0);
     case Direction::right:
-        return resize_by(id, distance, 0);
+        return windows_.resize_window_by(id, distance, 0);
     case Direction::up:
-        return resize_by(id, 0, -distance);
+        return windows_.resize_window_by(id, 0, -distance);
     case Direction::down:
-        return resize_by(id, 0, distance);
+        return windows_.resize_window_by(id, 0, distance);
     case Direction::none:
-        return false;
+        return ResizeResult::invalid;
     }
-    return false;
-}
-
-bool Desktop::resize_by(WindowId id, int dx, int dy) {
-    const auto view = windows_.view(id);
-    if (view.tile_layout) {
-        return windows_.resize_window_by(id, dx, dy);
-    }
-    const auto size = view.geometry;
-    const auto limits = scene_.window_size_limits(id);
-    return windows_.resize_window_by(
-        id, resize_delta(size.width, dx, limits.min_width, limits.max_width),
-        resize_delta(size.height, dy, limits.min_height, limits.max_height));
+    return ResizeResult::invalid;
 }
 
 bool Desktop::action(const Action &action, std::uint8_t modifiers) noexcept {
@@ -647,6 +626,7 @@ Desktop::dispatch(const Action &action, std::uint8_t modifiers, std::optional<Wi
         }
         return {};
     };
+    const bool had_drag = drag_.has_value();
     WindowId resized = 0;
     bool changed = false;
     if (action.kind != ActionKind::cycle_focus_mru) {
@@ -751,15 +731,21 @@ Desktop::dispatch(const Action &action, std::uint8_t modifiers, std::optional<Wi
             }
             changed = before.tile_layout || windows_.view(id).geometry != before.geometry;
             break;
-        case ActionKind::resize_window:
-            if (!resize(id, action.direction, static_cast<int>(action.argument))) {
+        case ActionKind::resize_window: {
+            const auto result = resize(id, action.direction, static_cast<int>(action.argument));
+            if (result == ResizeResult::invalid) {
+                if (had_drag) {
+                    project();
+                }
                 return std::unexpected(Error::invalid_state);
             }
-            changed = before.tile_layout || windows_.view(id).geometry != before.geometry;
-            if (changed) {
-                resized = id;
+            changed = result == ResizeResult::changed;
+            if (!changed && !had_drag) {
+                return false;
             }
+            resized = changed ? id : 0;
             break;
+        }
         case ActionKind::swap_window:
             changed = windows_.swap_window(id, action.direction);
             break;
@@ -936,7 +922,7 @@ void Desktop::apply_drag_motion(double x, double y) {
     drag_->x += dx;
     drag_->y += dy;
     if (drag_->resize) {
-        if (resize_by(id, dx, dy)) {
+        if (windows_.resize_window_by(id, dx, dy) == ResizeResult::changed) {
             drag_->started = true;
             project(id);
         }

@@ -5,6 +5,8 @@
 
 namespace seaside {
 
+enum class ResizeResult { invalid, unchanged, changed };
+
 struct WindowView {
     WindowRect geometry;
     bool visible = false;
@@ -74,7 +76,7 @@ class WindowManager final {
     bool move_window_by(WindowId id, int dx, int dy);
     bool swap_window(WindowId id, Direction direction);
     bool resize_window(WindowId id, Direction direction, int distance);
-    bool resize_window_by(WindowId id, int dw, int dh);
+    ResizeResult resize_window_by(WindowId id, int dw, int dh);
     bool resize_floating(WindowId id, WindowRect start, std::optional<int> dx,
                          std::optional<int> dy, bool from_left, bool from_top);
     bool begin_move(WindowId id);

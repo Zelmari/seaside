@@ -1023,6 +1023,73 @@ bool run_workspace_during_opening(const Fixture &fixture) {
     return true;
 }
 
+bool run_floating_resize_limits(const Fixture &fixture) {
+    auto &desktop = fixture.desktop;
+    auto output = fixture.output();
+    REQUIRE(output &&
+            desktop.add_output(part3_output_handle(output.get()), "main", "", output_bounds));
+    Connection connection(fixture.display);
+    Client client;
+    REQUIRE(connection.connect(client) && connection.open(client));
+    xdg_toplevel_set_min_size(client.toplevel, 40, 26);
+    xdg_toplevel_set_max_size(client.toplevel, ordinary_width, ordinary_height);
+    REQUIRE(connection.attach(client, ordinary_width, ordinary_height, true, red));
+    const auto id = desktop.keyboard_window();
+    REQUIRE(id);
+    const auto rect = desktop.windows().view(*id).geometry;
+    const double x = rect.x + 4, y = rect.y + 4;
+    REQUIRE(begin_drag(fixture, *id, BTN_RIGHT, x, y));
+    const auto projections = std::make_shared<unsigned>(0);
+    desktop.on_projection([projections] { ++*projections; });
+    for (int step = 1; step <= 5; ++step) {
+        desktop.motion(x + step, y + step);
+    }
+    REQUIRE(*projections == 0 && desktop.windows().view(*id).geometry == rect);
+    desktop.motion(x - 15, y - 15);
+    REQUIRE(connection.wait(client, [&] {
+        return client.configured.resizing && client.configured.width == 40 &&
+               client.configured.height == 26;
+    }));
+    REQUIRE(connection.attach_configured(client, red));
+    *projections = 0;
+    desktop.motion(x - 20, y - 20);
+    REQUIRE(*projections == 0);
+    const auto shrink = directional_action(ActionKind::resize_window, Direction::left, 1);
+    const auto finish_drag = desktop.dispatch(shrink);
+    REQUIRE(finish_drag && !*finish_drag);
+    REQUIRE(connection.wait(client, [&] { return !client.configured.resizing; }));
+    *projections = 0;
+    const auto minimum = desktop.dispatch(shrink);
+    REQUIRE(minimum && !*minimum && *projections == 0);
+    desktop.button(0, BTN_RIGHT, false, super, x - 20, y - 20);
+
+    xdg_toplevel_set_max_size(client.toplevel, 0, 0);
+    wl_surface_commit(client.surface);
+    REQUIRE(connection.roundtrip(client));
+    const auto grow = directional_action(ActionKind::resize_window, Direction::right, 200);
+    REQUIRE(desktop.dispatch(grow).value_or(false));
+    REQUIRE(desktop.dispatch(directional_action(ActionKind::resize_window, Direction::down, 200))
+                .value_or(false));
+    REQUIRE(desktop.windows().view(*id).geometry == output_bounds);
+    REQUIRE(connection.wait(
+        client, [&] { return client.configured.width == 160 && client.configured.height == 90; }));
+    REQUIRE(connection.attach_configured(client, red));
+    *projections = 0;
+    const auto maximum = desktop.dispatch(grow, 0, id);
+    REQUIRE(maximum && !*maximum && *projections == 0);
+    REQUIRE(begin_drag(fixture, *id, BTN_RIGHT, 20, 20));
+    *projections = 0;
+    desktop.motion(40, 40);
+    REQUIRE(*projections == 0 && desktop.windows().view(*id).geometry == output_bounds);
+    desktop.button(0, BTN_RIGHT, false, super, 40, 40);
+    REQUIRE(desktop.dispatch(action(ActionKind::toggle_window_maximize)).value_or(false));
+    const auto invalid = desktop.dispatch(grow);
+    REQUIRE(!invalid && invalid.error() == seaside::DesktopActionError::invalid_state);
+    desktop.on_projection({});
+    desktop.remove_output(part3_output_handle(output.get()));
+    return true;
+}
+
 bool run_floating_borders(const Fixture &fixture) {
     auto &desktop = fixture.desktop;
     auto output = fixture.output();
@@ -1957,6 +2024,7 @@ int main(int argc, char **argv) {
         config.window.tiling = false;
         return run_fixture(config, run_part4) && run_fixture(config, run_workspace_reassignment) &&
                        run_fixture(config, run_floating_borders) &&
+                       run_fixture(config, run_floating_resize_limits) &&
                        run_fixture(config, run_client_gestures)
                    ? EXIT_SUCCESS
                    : EXIT_FAILURE;
