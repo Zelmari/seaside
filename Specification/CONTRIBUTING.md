@@ -76,6 +76,7 @@ makechrootpkg -c -r "$chroot"
 package=$(makepkg --packagelist)
 pacman -Qip "$package"
 pacman -Qlp "$package"
+bsdtar -xOf "$package" .BUILDINFO
 sha256sum "$package"
 ```
 
@@ -84,16 +85,28 @@ package metadata, list installed paths and print the checksum to record
 with the candidate. The version includes the commit count and full Git SHA.
 Retain the staged recipe and source archive, the build
 log, built archive, revision, repository or snapshot details, dependency
-versions and checksums. From the checkout, `tools/record-baseline --build-dir
-build --output test-results/baseline.json` captures the configured compiler,
-protocol hashes and known system-package inputs for that build directory.
-Describe any missing artifacts when reporting how to rebuild the package.
+versions and checksums. The archive's `.BUILDINFO` records the clean chroot's
+actual package inputs. `tools/record-baseline --build-dir build --output
+test-results/baseline.json` records compiler and protocol details for the
+build directory it is run against. Describe any missing build inputs.
 
 Install the package in a clean or disposable Arch environment to verify
 package ownership and runtime dependencies independently of the build.
-The maintainer's VirtualBox console runner requires the Council test setup
-and an idle foreground guest shell. Its results supplement the normal Meson
-suite. [Part 10 test plan](Parts/Part-10/PLAN.md#harness-and-arch-vm-acceptance) · [Native desktop checklist](Research/NATIVE_ARCH_CHECKLIST.md)
+The maintainer's VirtualBox console runner requires the Council test setup,
+an idle foreground guest shell on TTY 1, and a `.pkg.tar.zst` archive built
+from the checkout's exact Git `HEAD`. Inspect the idle console before invoking
+the runner. Use `--disposable` for the install, reinstall and removal checks
+on a disposable guest with noninteractive `sudo` for pacman. Use
+`--preinstalled` to verify the matching archive already installed in the
+test guest. `--pkg-config-path` only affects guest fixture builds.
+
+```sh
+python3 tests/session/part10_vm.py --vm "$vm" --console-ready --disposable --package "$package"
+```
+
+Set `vm` to the disposable guest's name and `package` to the absolute archive
+path. Keep the guest reports with the candidate's other evidence.
+[Part 10 test plan](Parts/Part-10/PLAN.md#harness-and-arch-vm-acceptance) · [Native desktop checklist](Research/NATIVE_ARCH_CHECKLIST.md)
 
 ## Share changes and evidence
 

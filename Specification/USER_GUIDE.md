@@ -41,6 +41,8 @@ installs declared dependencies as needed and builds the package.
 
 ```sh
 sudo pacman -Syu --needed base-devel git
+git clone https://github.com/Zelmari/seaside.git
+cd seaside
 staging=$(mktemp -d)
 packaging/prepare-source "$staging" "$(git rev-parse HEAD)"
 cd "$staging"
@@ -181,10 +183,12 @@ error formats](SEASIDE_SPEC.md#10-ipc-cli-command-and-event-protocol--v1).
 | Sharing has no picker or stream | Check the application's portal sharing mode and the installed portal backend and Wofi. Review the session log and `journalctl --user -b` for the failing component. If you use a local portal override, compare it with the package's installed routing and chooser defaults. |
 
 For a reproducible startup log, run this on the active TTY as an ordinary
-foreground command. The log captures the same output shown on the console.
+foreground command. After Seaside returns, inspect the log and exit status.
 
 ```sh
-seaside 2>&1 | tee "$HOME/seaside-session.log"
+seaside >"$HOME/seaside-session.log" 2>&1
+printf 'Seaside exit status: %s\n' "$?"
+tail -n 50 "$HOME/seaside-session.log"
 ```
 
 Inside a running session, collect detailed frame observations only if needed.
