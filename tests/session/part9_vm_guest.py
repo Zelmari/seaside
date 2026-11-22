@@ -10,6 +10,7 @@ import signal
 import stat
 import subprocess
 import tempfile
+import time
 
 
 require = helpers["require"]
@@ -206,6 +207,23 @@ def run_idle(session, output, client, state):
     session.wait(lambda: snapshot.read_text() == wanted, "the one-minute idle setting")
     event("part9-input", "reset the idle clock with a guest key", key="wake")
     event("part9", "waiting for the one-minute DRM idle deadline")
+    # Sample the running compositor without making IPC queries or drawing frames
+    # during this portion of the existing idle timeout.
+    proc = Path("/proc") / str(session.process.pid)
+
+    def usage():
+        fields = (proc / "stat").read_text().rsplit(")", 1)[1].split()
+        status = (proc / "status").read_text()
+        switches = re.search(r"^voluntary_ctxt_switches:\s+(\d+)$", status, re.MULTILINE)
+        return time.monotonic(), int(fields[11]) + int(fields[12]), int(switches[1])
+
+    start, cpu, switches = usage()
+    time.sleep(5)
+    end, final_cpu, final_switches = usage()
+    state["idle_sample"] = {
+        "seconds": end - start, "cpu_seconds": (final_cpu - cpu) / os.sysconf("SC_CLK_TCK"),
+        "main_thread_voluntary_switches": final_switches - switches,
+    }
     off = f"output {output['connector']} display power off"
     on = f"output {output['connector']} display power on"
     text = lambda: session.log.read_text(errors="replace")
