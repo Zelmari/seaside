@@ -93,6 +93,7 @@ class PortalActivationTest : public testing::Test {
     std::vector<std::string> started;
     std::vector<std::string> stopped;
     bool foreign_unit = false;
+    bool next_portal_claims_on_launch = false;
     unsigned get_unit_by_pid = 0;
     StopBehavior stop_behavior = StopBehavior::normal;
 
@@ -259,6 +260,7 @@ class PortalActivationTest : public testing::Test {
             return -EINVAL;
         }
         bool environment = false;
+        bool graphical_wants = false, graphical_after = false;
         int entry = 0;
         while ((entry = sd_bus_message_enter_container(message, 'r', "sv")) > 0) {
             const char *key = nullptr;
@@ -270,6 +272,20 @@ class PortalActivationTest : public testing::Test {
                 if (!environment) {
                     return -EINVAL;
                 }
+            } else if (std::string_view(key) == "Wants" || std::string_view(key) == "After") {
+                const char *target = nullptr;
+                if (sd_bus_message_enter_container(message, 'v', "as") <= 0 ||
+                    sd_bus_message_enter_container(message, 'a', "s") <= 0 ||
+                    sd_bus_message_read(message, "s", &target) <= 0 ||
+                    sd_bus_message_exit_container(message) < 0 ||
+                    sd_bus_message_exit_container(message) < 0) {
+                    return -EINVAL;
+                }
+                EXPECT_STREQ(target, "graphical-session.target");
+                auto &property =
+                    std::string_view(key) == "Wants" ? graphical_wants : graphical_after;
+                EXPECT_FALSE(property);
+                property = true;
             } else if (sd_bus_message_skip(message, "v") < 0) {
                 return -EINVAL;
             }
@@ -278,6 +294,8 @@ class PortalActivationTest : public testing::Test {
             }
         }
         EXPECT_TRUE(environment);
+        EXPECT_TRUE(graphical_wants);
+        EXPECT_TRUE(graphical_after);
         if (entry < 0 || sd_bus_message_exit_container(message) < 0) {
             return -EINVAL;
         }
@@ -292,6 +310,15 @@ class PortalActivationTest : public testing::Test {
         if (std::ranges::none_of(units,
                                  [&](const RunningUnit &unit) { return unit.name == name; })) {
             units.push_back({name, path.get(), &*chosen});
+        }
+        if (next_portal_claims_on_launch && &*chosen == &portals.front()) {
+            // Acquire the next name after the initial discovery pass and
+            // before returning this launch. Its independent bus can reply
+            // without reentering the fixture's Wayland event loop.
+            const int claimed = sd_bus_request_name(external->native_handle(), portals[1].name, 0);
+            if (claimed < 0) {
+                return claimed;
+            }
         }
         const int claimed = sd_bus_request_name_async(manager->native_handle(), nullptr,
                                                       chosen->name, 0, nullptr, nullptr);
@@ -372,6 +399,19 @@ TEST_F(PortalActivationTest, RejectsAnExistingCaptureBackendWithoutStartingOrSto
     EXPECT_TRUE(activation->stop());
     EXPECT_EQ(portal_binary_checks, 0U);
     EXPECT_TRUE(units.empty());
+    EXPECT_TRUE(stopped.empty());
+}
+
+TEST_F(PortalActivationTest, RejectsAnExistingFrontendBeforeAcquiringTheGraphicalTarget) {
+    ASSERT_TRUE(connect(external));
+    ASSERT_TRUE(claim(*external, portals.back().name));
+    start();
+    ASSERT_TRUE(outcome);
+    EXPECT_EQ(outcome->first, StartupService::portal_frontend);
+    EXPECT_EQ(outcome->second.failure, ServiceFailure::wrong_environment);
+    EXPECT_TRUE(activation->stop());
+    EXPECT_EQ(portal_binary_checks, 0U);
+    EXPECT_TRUE(started.empty());
     EXPECT_TRUE(stopped.empty());
 }
 
@@ -466,9 +506,9 @@ TEST_F(PortalActivationTest, ReportsAUnitStillActiveAtTheShutdownDeadline) {
     }
 }
 
-TEST_F(PortalActivationTest, RollsBackOnlyItsOwnUnitWhenTheNextPortalAlreadyExists) {
+TEST_F(PortalActivationTest, RollsBackOnlyItsOwnUnitWhenTheNextPortalClaimsItsName) {
     ASSERT_TRUE(connect(external));
-    ASSERT_TRUE(claim(*external, portals[1].name));
+    next_portal_claims_on_launch = true;
     start();
     ASSERT_TRUE(outcome);
     EXPECT_EQ(outcome->second.failure, ServiceFailure::wrong_environment);

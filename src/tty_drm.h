@@ -110,6 +110,8 @@ bool seaside_tty_drm_set_output_power(struct seaside_tty_drm *drm, struct wlr_ou
 void seaside_tty_drm_set_direct_scanout(struct seaside_tty_drm *drm, struct wlr_output *output,
                                         bool enabled);
 void seaside_tty_drm_reject_unrestorable(struct seaside_tty_drm *drm, struct wlr_output *output);
+/* Reject only unverified outputs when the active seat's initial presentation expires. */
+void seaside_tty_drm_reject_unpresented_cursors(struct seaside_tty_drm *drm);
 void seaside_tty_drm_reconcile_cursor(struct seaside_tty_drm *drm);
 
 /* First-output qualification fixture. The result is borrowed. */

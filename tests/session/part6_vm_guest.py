@@ -122,7 +122,7 @@ class Session:
             if "PIPEWIRE_REMOTE" not in self.environment:
                 wait_for(lambda: re.search(r"^seaside READY cursor-plane=([1-9][0-9]*)$",
                                            self.log.read_text(errors="replace"), re.MULTILINE),
-                         25, "Part 6 startup and hardware cursor", self.process)
+                         40, "Part 6 startup and hardware cursor", self.process)
                 ready = self.ctl("status")["result"]
                 require(ready["ready"] and ready["phase"] == "ready",
                         "IPC readiness disagrees with TTY")
@@ -521,7 +521,7 @@ def run_preflight(repo, directory, result_dir, state):
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as silent:
         silent.bind(str(silent_path))
         silent.listen(1)
-        silent.settimeout(4)
+        silent.settimeout(8)
         with Session(repo, directory, result_dir, "preflight", PIPEWIRE_REMOTE=silent_path.name,
                      PIPEWIRE_RUNTIME_DIR=str(directory)) as session:
             connection, _ = silent.accept()

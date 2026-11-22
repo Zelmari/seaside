@@ -1319,6 +1319,18 @@ void seaside_tty_drm_reconcile_cursor(struct seaside_tty_drm *drm) {
     }
 }
 
+void seaside_tty_drm_reject_unpresented_cursors(struct seaside_tty_drm *drm) {
+    if (!drm || !drm->evidence.active) {
+        return;
+    }
+    struct tty_output *view;
+    wl_list_for_each(view, &drm->outputs, link) {
+        if (available(view) && !view->sleeping && !view->cursor_presented) {
+            reject_output(view, "hardware cursor presentation timed out");
+        }
+    }
+}
+
 bool seaside_tty_drm_enable_pending(struct seaside_tty_drm *drm, struct wlr_allocator *allocator,
                                     struct wlr_renderer *renderer) {
     if (!drm || !allocator || !renderer || drm->evidence.failed) {

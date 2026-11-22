@@ -26,6 +26,7 @@ constexpr char manager_interface[] = "org.freedesktop.systemd1.Manager";
 constexpr char bus_name[] = "org.freedesktop.DBus";
 constexpr char bus_path[] = "/org/freedesktop/DBus";
 constexpr char unit_prefix[] = "/org/freedesktop/systemd1/unit";
+constexpr char graphical_target[] = "graphical-session.target";
 
 struct Service {
     const char *suffix;
@@ -44,7 +45,7 @@ constexpr std::array services{
 constexpr ServiceReport timeout_error{ServiceFailure::timeout, -ETIMEDOUT};
 constexpr ServiceReport malformed{ServiceFailure::incompatible, -EBADMSG};
 
-enum class Step { unowned, launch, owner, pid, unit };
+enum class Step { check_owners, unowned, launch, owner, pid, unit };
 
 using Message = std::unique_ptr<sd_bus_message, decltype(&sd_bus_message_unref)>;
 
@@ -182,6 +183,14 @@ struct PortalActivation::Impl final : std::enable_shared_from_this<Impl> {
         if (properties < 0) {
             return properties;
         }
+        // Each owned service keeps the passive target active through an
+        // individual portal restart. Only systemd stops it when unneeded.
+        const int graphical =
+            sd_bus_message_append(message, "(sv)(sv)", "Wants", "as", 1, graphical_target, "After",
+                                  "as", 1, graphical_target);
+        if (graphical < 0) {
+            return graphical;
+        }
         // An explicit XDG config directory also contains the external chooser's config.
         const int environment = sd_bus_message_append(
             message, "(sv)", "Environment", "as", config_home.empty() ? 5 : 6, wayland.c_str(),
@@ -205,8 +214,12 @@ struct PortalActivation::Impl final : std::enable_shared_from_this<Impl> {
 
     ServiceReport request(Step step, const char *owner = nullptr, std::uint32_t pid = 0) noexcept {
         try {
-            constexpr std::array methods{"GetNameOwner", "StartTransientUnit", "GetNameOwner",
-                                         "GetConnectionUnixProcessID", "GetUnitByPID"};
+            constexpr std::array methods{"GetNameOwner",
+                                         "GetNameOwner",
+                                         "StartTransientUnit",
+                                         "GetNameOwner",
+                                         "GetConnectionUnixProcessID",
+                                         "GetUnitByPID"};
             const bool manager = step == Step::launch || step == Step::unit;
             const auto remaining =
                 std::chrono::duration_cast<std::chrono::microseconds>(deadline - Clock::now());
@@ -304,7 +317,14 @@ struct PortalActivation::Impl final : std::enable_shared_from_this<Impl> {
         std::uint32_t pid = 0;
         if (reply.error != BusError::none) {
             if (reply.error == BusError::remote_error && is_missing(reply.message)) {
-                if (step == Step::unowned) {
+                if (step == Step::check_owners) {
+                    if (++stage == services.size()) {
+                        stage = 0;
+                        result = request(Step::unowned);
+                    } else {
+                        result = request(Step::check_owners);
+                    }
+                } else if (step == Step::unowned) {
                     if (access(service.binary, X_OK) < 0) {
                         const int error = errno;
                         result = {error == ENOENT ? ServiceFailure::missing
@@ -325,6 +345,9 @@ struct PortalActivation::Impl final : std::enable_shared_from_this<Impl> {
             result = malformed;
         } else {
             switch (step) {
+            case Step::check_owners:
+                result = {ServiceFailure::wrong_environment, -EADDRINUSE};
+                break;
             case Step::unowned:
                 if (!recovering || !units[stage].requested) {
                     result = {ServiceFailure::wrong_environment, -EADDRINUSE};
@@ -582,7 +605,9 @@ PortalActivation::start(SessionBus &bus, std::string_view socket, Completion com
         if (const auto result = impl->prepare(); result.failure != ServiceFailure::none) {
             return std::unexpected(result);
         }
-        if (const auto result = impl->request(Step::unowned);
+        // Detect a foreign portal before starting any owned service that
+        // would acquire the shared graphical target. Check again before launch.
+        if (const auto result = impl->request(Step::check_owners);
             result.failure != ServiceFailure::none) {
             return std::unexpected(result);
         }

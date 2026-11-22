@@ -53,7 +53,8 @@ using seaside::ServiceReport;
 using seaside::StartupService;
 
 constexpr auto appearance_timeout = 5s;
-constexpr auto preflight_timeout = 10s;
+constexpr auto preflight_timeout = 30s;
+constexpr auto probe_timeout = 10s;
 constexpr auto recovery_timeout = 4s;
 
 struct RecoveryRetry {
@@ -394,7 +395,6 @@ class Session {
         };
         seaside_tty_drm_set_output_callbacks(drm_, &callbacks, this);
         timer_.reset(wl_event_loop_add_timer(loop_, on_tick, this));
-        appearance_deadline_ = Clock::now() + appearance_timeout;
         return timer_ && wl_event_source_timer_update(timer_.get(), 1) == 0;
     }
 
@@ -822,7 +822,11 @@ class Session {
             std::fputs("seaside: could not enable X11 listeners\n", stderr);
         }
         ready_ = true;
-        std::fprintf(stderr, "seaside READY cursor-plane=%" PRIu32 "\n", cursor_plane);
+        if (cursor_plane) {
+            std::fprintf(stderr, "seaside READY cursor-plane=%" PRIu32 "\n", cursor_plane);
+        } else {
+            std::fputs("seaside READY outputs=none\n", stderr);
+        }
         config_->session_ready();
         for (const auto &command : startup_commands_) {
             launch(command);
@@ -899,8 +903,11 @@ class Session {
         }
     }
 
-    std::chrono::milliseconds remaining() const noexcept {
-        return std::chrono::ceil<std::chrono::milliseconds>(preflight_deadline_ - Clock::now());
+    std::chrono::milliseconds probe_budget() const noexcept {
+        const auto remaining =
+            std::chrono::ceil<std::chrono::milliseconds>(preflight_deadline_ - Clock::now());
+        return std::min(remaining,
+                        std::chrono::duration_cast<std::chrono::milliseconds>(probe_timeout));
     }
 
     void start_portal_probe(bool recovery = false) noexcept {
@@ -911,7 +918,7 @@ class Session {
                 report(service, detail);
             }
         };
-        const auto timeout = recovery ? recovery_timeout : remaining();
+        const auto timeout = recovery ? recovery_timeout : probe_budget();
         if (timeout <= 0ms) {
             complete(StartupService::portal_frontend, {ServiceFailure::timeout, -ETIMEDOUT});
             return;
@@ -978,8 +985,13 @@ class Session {
                 pipewire_retry_ = {};
             }
         };
+        const auto timeout = recovery ? recovery_timeout : probe_budget();
+        if (timeout <= 0ms) {
+            complete({ServiceFailure::timeout, -ETIMEDOUT});
+            return;
+        }
         auto probe = seaside::PipeWireProbe::create(
-            loop_, {.timeout = recovery ? recovery_timeout : preflight_timeout},
+            loop_, {.timeout = timeout},
             [complete](seaside::PipeWireResult result) {
                 complete(seaside::pipewire_service_report(result));
             },
@@ -1013,7 +1025,7 @@ class Session {
     }
 
     void start_activation() noexcept {
-        const auto timeout = remaining();
+        const auto timeout = probe_budget();
         if (timeout <= 0ms) {
             report(StartupService::capture_backend, {ServiceFailure::timeout, -ETIMEDOUT});
             return;
@@ -1061,7 +1073,7 @@ class Session {
                     start_activation();
                 }
             },
-            preflight_timeout);
+            probe_budget());
         if (!systemd) {
             report(StartupService::systemd_user, systemd.error());
             return;
@@ -1168,23 +1180,31 @@ class Session {
         if (display.active && (display.output_pending || session.output_config_pending_)) {
             session.apply_detected_outputs();
             seaside_tty_input_refresh_pointer(session.input_);
+            display = seaside_tty_drm_observation(session.drm_);
         }
-        if (!session.gate_) {
-            if (Clock::now() >= session.appearance_deadline_) {
-                session.fail("hardware-cursor-presentation");
-                return 0;
+        if (!display.active) {
+            session.appearance_deadline_.reset();
+        } else if (!session.ready_) {
+            const bool has_output = std::ranges::any_of(
+                session.outputs_.outputs(), [](const auto &entry) { return entry.second.enabled; });
+            // With no usable output there is no cursor to present. The seat and
+            // Wayland server can still run the same mandatory service checks.
+            if (display.cursor_presented || (!has_output && !display.output_pending)) {
+                session.appearance_deadline_.reset();
+                if (!session.gate_) {
+                    session.begin_preflight();
+                } else if (session.preflight_passed_) {
+                    session.mark_ready(display.cursor_plane_id);
+                }
+            } else if (has_output) {
+                const auto now = Clock::now();
+                if (!session.appearance_deadline_) {
+                    session.appearance_deadline_ = now + appearance_timeout;
+                } else if (now >= *session.appearance_deadline_) {
+                    seaside_tty_drm_reject_unpresented_cursors(session.drm_);
+                    session.appearance_deadline_.reset();
+                }
             }
-            if (display.active && display.cursor_presented) {
-                // The display loop is already live, so a newly activated
-                // portal client can connect while readiness checks run.
-                session.begin_preflight();
-            }
-        }
-        // Preflight can finish during a VT switch. Wait for the resumed
-        // output's hardware cursor before calling the session ready.
-        if (!session.ready_ && session.preflight_passed_ && display.active &&
-            display.cursor_presented) {
-            session.mark_ready(display.cursor_plane_id);
         }
         if (session.ready_) {
             session.recover_integrations();
@@ -1228,7 +1248,8 @@ class Session {
     std::unique_ptr<seaside::PortalProbe> portal_;
     std::array<bool, 4> integration_failed_{};
     RecoveryRetry portal_retry_, pipewire_retry_;
-    Clock::time_point appearance_deadline_, preflight_deadline_;
+    std::optional<Clock::time_point> appearance_deadline_;
+    Clock::time_point preflight_deadline_;
     Outcome outcome_;
     bool attaching_startup_ = true;
     bool applying_config_ = false;
