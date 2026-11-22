@@ -66,6 +66,10 @@ another function key. The command uses the logged-in user's runtime directory
 and seat. SSH, an existing desktop terminal emulator, and a background job
 cannot provide the required foreground console.
 
+In a VirtualBox guest with 3D acceleration disabled, run
+`WLR_RENDERER=pixman seaside` from the TTY. Pixman renders the desktop on the
+CPU. The virtual display still needs a usable DRM cursor plane.
+
 After required session services pass startup checks, expect a black desktop
 with no windows. A panel is optional. Press **Super+Enter** to open `foot`.
 In that terminal, run `seasidectl status` to confirm the session is ready or
@@ -177,6 +181,7 @@ error formats](SEASIDE_SPEC.md#10-ipc-cli-command-and-event-protocol--v1).
 | `seaside FAIL: start on the active Linux console as a foreground job` | Log in on the currently visible virtual console and run `seaside` there as your normal user. `tty` should print a numbered `/dev/ttyN`. |
 | The login has no standard Arch user runtime directory | Check that the normal systemd-managed login set `XDG_RUNTIME_DIR` to `/run/user/` followed by your user ID. Sign into a fresh local TTY if the login environment is stale. |
 | `seaside FAIL service=...` | Note the named service and reason. Use `systemctl --user status pipewire.socket wireplumber.service` and `journalctl --user -b` to inspect the relevant login services. If a portal name already belongs to another graphical session, exit that session normally or use another account. Seaside keeps the existing owner. |
+| `seaside FAIL stage=seat-drm-renderer` in VirtualBox with 3D disabled | Run `WLR_RENDERER=pixman seaside` from the logged-in console. |
 | The console reports a seat, DRM, or hardware-cursor error | Check the `seaside FAIL` line and earlier graphics messages. Seaside requires placement on a hardware cursor plane. On a running output, inspect `seasidectl outputs` and `seasidectl debug render`. |
 | The screen is black after launch | Press **Super+Enter**. A working terminal on a black background is the default empty desktop. If the screen remains dark, press a key or move the pointer to wake it and check the console log on exit. |
 | A `seasidectl` command cannot connect | Run it as your normal user from the Seaside terminal. It needs the running session's `SEASIDE_SOCKET` or `WAYLAND_DISPLAY` and `XDG_RUNTIME_DIR`. |

@@ -52,6 +52,9 @@ sudo pacman -U ./seaside-example-x86_64.pkg.tar.zst
    Run `seasidectl exit` in `foot` to return to the original console.
    [Configuration and shortcuts](Specification/USER_GUIDE.md#configure-seaside) · [Command reference](Specification/USER_GUIDE.md#control-the-session)
 
+In VirtualBox with 3D acceleration disabled, launch with
+`WLR_RENDERER=pixman seaside`. [Startup help](Specification/USER_GUIDE.md#start-and-exit)
+
 ## Find what you need
 
 - [Troubleshoot startup, output, or capture](Specification/USER_GUIDE.md#troubleshoot)
