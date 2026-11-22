@@ -1,74 +1,35 @@
 # Seaside
 
-An Arch Linux Wayland compositor using **C++23 and wlroots**, **GCC** as the
-primary compiler and **Meson + Ninja** for builds. The TTY session owns a live
-Wayland display, enforces hardware cursors, and checks mandatory session
-services before it starts configured commands. It manages XDG windows,
-workspaces, focus, maximize, fullscreen, and pin. Dwindle is the default
-tiling layout, and scrolling columns are selectable in the TOML config.
-TOML edits apply live, and `seasidectl` exposes local status, actions, and events.
+Seaside is a Wayland compositor for Arch Linux. It starts from a logged-in
+Linux console and provides tiling or floating windows, workspaces, live TOML
+configuration, and the `seasidectl` command-line client. Dwindle is the default
+tiling layout. Scrolling columns are also available. You can add your own
+Wayland panel or keep the default empty desktop.
 
-The product contract is in [the design](Specification/SEASIDE_SPEC.md). Find
-development plans, handoffs, native testing, and performance notes in the
-[documentation index](Specification/README.md).
+Seaside is in development. The dedicated Arch VirtualBox guest has verified
+TTY startup, window management, virtual display power, and real portal capture.
+Native AMD display, gaming, and application compatibility checks are still
+open. [Verification and support status](Specification/PUBLIC_DOCUMENTATION.md)
 
-## Build and test
+## Start a session
 
-Install the build and test dependencies in the Arch development environment:
+1. Install the Arch package from a supplied archive or build it from this
+   repository's package recipe. [Install on Arch](Specification/USER_GUIDE.md#install-on-arch)
+2. Log into an active Linux virtual console (TTY) as your normal user and
+   run `seaside` in the foreground. The default desktop is black with no
+   windows. Press **Super+Enter** to open the `foot` terminal. **Super** is
+   usually the Windows or Meta key.
+3. Edit the generated `~/.config/seaside/config.toml` to change settings and
+   shortcuts, or run `seasidectl status` in `foot` to inspect the session.
+   Run `seasidectl exit` in `foot` to return to the original console.
+   [Configuration and shortcuts](Specification/USER_GUIDE.md#configure-seaside) · [Command reference](Specification/USER_GUIDE.md#control-the-session)
 
-```sh
-sudo pacman -S --needed gcc pkgconf meson ninja python wlroots0.20 wayland wayland-protocols \
-  wlr-protocols libdrm libinput pixman gtest clang gdb tomlplusplus nlohmann-json \
-  libxkbcommon libxau libxcb systemd-libs \
-  libpipewire pipewire dbus libpng libjpeg-turbo libwebp pango cairo ttf-dejavu
-```
+## Find what you need
 
-Then run:
-
-```sh
-meson setup build --buildtype=debug
-meson compile -C build
-meson test -C build
-```
-
-For a build directory created before the C++ migration, first run
-`meson setup --reconfigure build -Dcpp_std=c++23 -Dwrap_mode=nodownload`.
-Fresh builds use those defaults automatically; no dependency is downloaded.
-
-The development runner also builds, independently discovers GoogleTest cases,
-runs tests and collects bounded logs, individual case results with part and
-requirement metadata, and a baseline manifest:
-
-```sh
-tools/run-tests
-```
-
-Meson also runs GoogleTest ownership/failure-path cases and the `code-quality`
-suite. Run `tools/check-code --build-dir build` independently to check
-clang-format on the migrated core/new unit fixtures and clang-tidy on every
-project translation unit using the actual compilation database. Retained legacy
-C integration clients/probes keep their existing formatting; the new Part 3
-integration fixture is checked too. GDB is available
-for interactive debugging, for example `gdb --args build/seaside-server-tests`.
-The tool versions tested with this foundation are recorded in the
-[Part 1 handoff](Specification/Parts/Part-01/HANDOFF.md).
-
-Static analysis runs at most two Clang processes concurrently, with a per-file
-deadline. The runner's default command deadline is 540 seconds; `--timeout`
-can change it for a slower guest. Missing tests, inconsistent reports or missing
-GoogleTest case results are failures rather than evidence of completion.
-
-Reports go under the ignored `test-results/` directory. A skipped hardware check
-is explicitly reported as skipped; it does not qualify a cursor plane or GPU.
-The headless fixture uses an offscreen pixman renderer and never controls a
-physical display. No foundation executable is installed as `seaside` or adds a
-way to bypass the production session/preflight requirements. The Part 3 fixture
-uses real XDG clients and inspects offscreen scene pixels; private D-Bus/PipeWire
-tests do not change the normal user's service environment. Their results do not
-establish a real TTY session, hardware cursors, portal compatibility, audio
-playback or sharing.
-
-## Licence
+- [Troubleshoot startup, output, or capture](Specification/USER_GUIDE.md#troubleshoot)
+- [Use X11 apps, audio, and screen sharing](Specification/USER_GUIDE.md#use-applications-and-sharing)
+- [Build, test, and contribute](Specification/CONTRIBUTING.md)
+- [Engineering design, development handoffs, and native checklist](Specification/README.md)
 
 Seaside is licensed under the [MIT License](LICENSE). Third-party dependencies
 retain their own licences.

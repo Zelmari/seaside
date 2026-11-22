@@ -1,99 +1,62 @@
-# Public documentation record
+# Verification and support
 
-Updated: 2026-11-20
+Seaside targets Arch Linux on a logged-in local console. The Framework Desktop
+with AMD graphics is the native release reference. A participating output
+needs a driver that can put the cursor on a hardware plane. The native release
+checks remain open. [Install prerequisites](USER_GUIDE.md#install-on-arch) · [Native Arch desktop checklist](Research/NATIVE_ARCH_CHECKLIST.md)
 
-Seaside is an open-source Arch Linux Wayland compositor project, licensed
-under the [MIT License](../LICENSE).
-This document collects approved decisions and material to explain to users
-and contributors. Keep the same requirements in the
-[specification](SEASIDE_SPEC.md); this companion record supplements it.
-Update both when a relevant approved decision changes. Proposed additions
-remain proposals until approved.
+## Verification and support
 
-## Current implementation status
-
-The repository contains the part 1 foundation with a C++23 RAII lifecycle owner,
-a narrow C bridge for wlroots, GoogleTest ownership/failure cases, development
-code checks, a retained real-client C headless fixture, bounded Python test
-runner and safe DRM inspection tool. See the
-[README](../README.md) for current commands and the
-[part 1 handoff](Parts/Part-01/HANDOFF.md) for evidence and pending checks.
-
-The foundation uses C++23; later compositor features, an installable desktop
-session and native hardware qualification remain pending. Documentation must
-distinguish selected, implemented and
-verified behavior. WSL/headless results do not qualify physical AMD outputs
-or establish input-to-screen latency.
-
-[Part 2's configuration/state foundations](Parts/Part-02/HANDOFF.md) are implemented, with
-normal/sanitizer verification and external static review completed in Arch WSL2.
-Designated VM/native qualification remains pending. The [plan](Parts/Part-02/PLAN.md) retains
-the acceptance cases and scope; the specification retains the requirements.
-
-[Part 3 headless groundwork](Parts/Part-03/HANDOFF.md) adds a live Wayland socket, minimal
-XDG/scene ownership, asynchronous direct sd-bus and libpipewire adapters, and
-mandatory-service result coordination. Real-client offscreen pixels and private
-service exchanges provide software evidence; systemd activation, actual portal
-readiness, TTY/seat/output/input and hardware cursors remain unqualified. The
-owner-approved [milestone boundary](Parts/Part-03/PLAN.md) stops for the first Arch-VM
-checks before extending the real graphical session.
-
-## Approved technology choices
-
-| Area | Selected approach | Specification |
+| Environment | Evidence recorded | Release context |
 |---|---|---|
-| Language and build | C++23, GCC, Meson and Ninja; retain useful C fixtures | §14 |
-| Compositor and rendering | wlroots, its existing scene graph/renderers, automatic renderer selection | §2 |
-| Main loop and slow work | libwayland event loop owns compositor state; standard C++ `std::jthread` workers with a bounded task queue return results to it | §2 |
-| Configuration | TOML 1.0 through toml++; Seaside validates the schema and applies configuration transactions | §8 |
-| Local control | JSON Lines over a Unix stream socket, using nlohmann/json; `seasidectl` is a thin client | §10 |
-| D-Bus | Direct sd-bus from libsystemd with small C++ ownership wrappers and asynchronous main-loop integration | §3.1 |
-| Audio integration | libpipewire for the required startup connection check; external PipeWire/WirePlumber services and `wpctl` controls | §3.1 |
-| Wallpaper | Static PNG/JPEG/WebP via libpng, libjpeg-turbo's TurboJPEG API and libwebp; reuse decoded content while unchanged | §2 |
-| Configuration-error banner | Pango and Cairo/PangoCairo text rendering; wlroots displays the cached image | §8.1 |
-| Tests | GoogleTest for C++ unit/component tests, Meson execution, Python-standard-library supervision and useful C fixtures | §12.2b |
-| Dependencies | Arch packages by default, compatible version constraints, exact tested manifests; explicit bundled-copy exceptions and no silent downloads | §11.1 |
-| Project licence | MIT only, without additional commercial-use or proprietary-derivative restrictions; third-party licences remain applicable | §11.1 |
-| Error handling | `std::expected` for recoverable failures, RAII cleanup, exceptions contained at C callback and worker boundaries | §2.2 |
-| Development tools | clang-format, clang-tidy, GDB and AddressSanitizer/UndefinedBehaviorSanitizer test builds; GCC remains primary | §14.3 |
+| Arch development builds | Unit tests and real clients on offscreen Wayland outputs. Coverage includes configuration, layouts, IPC, sharing, layer-shell, idle inhibition, and trace export. | The source-tree fixtures exercise software behavior. |
+| Dedicated Arch VirtualBox guest | Real TTY start and exit, virtual cursor placement, application/workspace behavior, portal capture and audio routing with test clients, live config, display sleep and wake, and service recovery. The guest uses `vmwgfx` with the Pixman renderer. | Coverage is scoped to the virtual device and the cases recorded in the guest reports. |
+| Native Framework Desktop on Arch | Test actions and the read-only display collector are available. | Real AMD renderer and cursor paths, DMA-BUF and explicit sync, scanout, VRR and tearing, night light, mixed outputs and hotplug, suspend/resume, physical audio and input, Steam/Proton, and OBS/Discord compatibility remain in the native checklist. |
 
-The [part 1 handoff](Parts/Part-01/HANDOFF.md) records qualified foundation versions and commands;
-later feature libraries still need integration qualification. The specification retains library-specific constraints,
-including the initial toml++ release to qualify. The portal backend/chooser
-and font baseline still need resolution and evidence.
+The [Part 7 handoff](Parts/Part-07/HANDOFF.md) records the underlying sharing
+and audio trials. The [Part 8 handoff](Parts/Part-08/HANDOFF.md) records the
+virtual display and render trials. The [Part 9 handoff](Parts/Part-09/HANDOFF.md)
+records portal recovery, layer-shell, virtual sleep and wake, and diagnostic
+checks. The [Part 10 plan](Parts/Part-10/PLAN.md) defines package and release
+qualification. Its handoff records the exact candidate and environment results
+as those checks finish.
 
-## Contributor conventions to explain
+The installed session provides compositing, layouts, local control, Wayland
+layer-shell support, and integrations for external clients. An optional panel
+or launcher can run separately. Seaside validates the required login services
+at startup and returns to the TTY when a required service fails. The same
+session can report and recover from later portal and PipeWire failures.
+[Session contract](SEASIDE_SPEC.md#3-startup-session-recovery-and-shutdown) · [How to start and exit](USER_GUIDE.md#start-and-exit)
 
-- Comments explain non-obvious decisions, invariants, ownership, ordering and
-  workarounds. Clear code carries ordinary syntax; comments do not narrate it.
-- Implement approved behavior in the ten testable development parts, extending
-  meaningful acceptance/regression coverage with each part.
-- Report commands and actual results, separating simulated, headless and native
-  hardware evidence. Record unresolved qualification explicitly.
-- Use Conventional Commit subjects and
-  PR/MR titles, concise descriptions with important review details, meaningful
-  coherent local commits and genuine human attribution. Agents do not add
-  themselves as contributors. External Git actions need task authorization.
+## Feature boundaries
 
-The committed formatting/static-analysis configurations and `tools/check-code`
-now run through Meson. Formatting covers the migrated core and new unit fixtures;
-all compiled project translation units receive static analysis. GCC remains the
-build compiler. The part 1 handoff records tool versions and actual results.
+- **Graphics.** Direct scanout, variable refresh, tearing, explicit sync and
+  hardware night light depend on the output, driver and workload. A display
+  without a usable hardware cursor plane is disabled. `seasidectl outputs`
+  and `seasidectl debug render` expose observed state.
+- **Sharing.** The portal chooser and audio routing run in external services.
+  Actual OBS and Discord results belong to the native test matrix and must
+  name the application version and path tested. Isolated audio for one
+  selected application is deferred.
+- **Session and platform.** Seaside starts in the foreground on a local Arch
+  TTY. The recovery and input behavior in other environments depends on their
+  seat, service manager and graphics stack. Display-manager integration and
+  secure session locking are outside the current release scope.
 
-## Public documentation work to carry forward
+[Protocol coverage and release posture](SEASIDE_SPEC.md#11-wayland-and-external-protocol-coverage) · [Performance verification](Research/PERFORMANCE.md)
 
-| Topic | Existing source and remaining work |
+## Keep the public documentation current
+
+| Document | Purpose |
 |---|---|
-| Project introduction and support limits | README and specification §§1–3; keep current prototype status visible and describe Arch/TTY use when the session works |
-| Build and contributor setup | README, part 1 handoff and §§11.1/14; extend with qualified C++ dependencies, tool versions and check commands during migration |
-| Configuration and defaults | §§8–9 and the [reference TOML](SEASIDE_CONFIG_EXAMPLE.toml); document actual reload/recovery behavior and keep examples synchronized |
-| Window/workspace behavior and bindings | §§4–9; explain implemented interactions and defaults as their acceptance tests pass |
-| CLI and integration reference | §10; document implemented commands, JSONL schemas, errors and version behavior |
-| Audio, X11 and screen sharing | §§3/7/11; explain external-service requirements and tested client/backend combinations; isolated application audio remains deferred beyond v1 |
-| Troubleshooting and diagnostics | §§3/8/10/12; document startup errors, persistent config errors, bounded opt-in diagnostics and reproducible bug-report information |
-| Performance and hardware support | §12 and [performance investigations](Research/PERFORMANCE.md); publish measured results with methodology and limitations when available |
-| Packaging and releases | §§11/14; document clean-install dependencies, tested versions and remaining limits once packaging is verified |
-| Licence and third-party notices | MIT selected and recorded in the root [LICENSE](../LICENSE); preserve its notice and applicable third-party dependency/asset notices when preparing the release |
+| [README](../README.md) | Starting point, short first session and qualification status |
+| [User guide](USER_GUIDE.md) | Install, use, configure and troubleshoot the actual workflow |
+| [Contributing](CONTRIBUTING.md) | Build and regression commands, package reproduction and publication policy |
+| [Canonical TOML](SEASIDE_CONFIG_EXAMPLE.toml) | Complete example and defaults for the user configuration |
+| [Engineering design](SEASIDE_SPEC.md) | Product contract, interfaces, engineering decisions and release requirements |
+| [Development handoffs](README.md#development-parts) | Dated results with commands, environment, artifacts and unresolved checks |
 
-These entries track documentation for existing scope. They do not approve new
-features, a documentation website, a hosting service or a new release workflow.
+Update examples and reader-facing instructions when a supported workflow
+changes. Preserve dated results as the record of what was exercised. Close a
+release gate after the required test passes in its intended environment.
+[Release checklist](SEASIDE_SPEC.md#124-release-checklist)

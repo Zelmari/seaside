@@ -1,12 +1,24 @@
 # Seaside documentation
 
-Start with the [project README](../README.md) for build and test commands.
+The [project README](../README.md) gives you the shortest path to a first
+session. Find detailed workflows and verification below.
 
-## Design and configuration
+## Using Seaside
 
-- [Engineering design](SEASIDE_SPEC.md) for the product contract, architecture, and roadmap.
-- [Example configuration](SEASIDE_CONFIG_EXAMPLE.toml) for the canonical TOML settings.
-- [Public documentation record](PUBLIC_DOCUMENTATION.md) for user and contributor documentation requirements.
+- [Install on Arch](USER_GUIDE.md#install-on-arch) and [start or exit a session](USER_GUIDE.md#start-and-exit).
+- [Configure settings and shortcuts](USER_GUIDE.md#configure-seaside) or open the [canonical TOML example](SEASIDE_CONFIG_EXAMPLE.toml).
+- [Control the session with `seasidectl`](USER_GUIDE.md#control-the-session).
+- [Use X11 apps, audio, and screen sharing](USER_GUIDE.md#use-applications-and-sharing).
+- [Troubleshoot startup, configuration, or capture](USER_GUIDE.md#troubleshoot).
+- [Verification and support](PUBLIC_DOCUMENTATION.md) explains tested environments and remaining checks.
+
+## Developing Seaside
+
+- [Build and run the test harness](CONTRIBUTING.md#build-and-test).
+- [Reproduce an Arch package in a clean chroot](CONTRIBUTING.md#build-in-a-clean-arch-chroot).
+- [Share changes and test evidence](CONTRIBUTING.md#share-changes-and-evidence).
+- [Engineering design](SEASIDE_SPEC.md) contains the approved behavior, IPC protocol, and release requirements.
+- [Native Arch desktop checklist](Research/NATIVE_ARCH_CHECKLIST.md) and [performance investigations](Research/PERFORMANCE.md) describe hardware and measurement workloads.
 
 ## Development parts
 
@@ -26,8 +38,3 @@ still needs verification.
 | 8 | Display and GPU behavior | [Plan](Parts/Part-08/PLAN.md) | [Handoff](Parts/Part-08/HANDOFF.md) |
 | 9 | Idle, layer-shell, diagnostics, and recovery | [Plan](Parts/Part-09/PLAN.md) | [Handoff](Parts/Part-09/HANDOFF.md) |
 | 10 | Packaging and release qualification | [Plan](Parts/Part-10/PLAN.md) | |
-
-## Native testing and performance
-
-- [Native Arch desktop checklist](Research/NATIVE_ARCH_CHECKLIST.md) for the main-desktop trial, including OBS, Discord, physical devices, and gaming.
-- [Performance investigations](Research/PERFORMANCE.md) for planned latency, rendering, and resource measurements.

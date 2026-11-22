@@ -12,6 +12,12 @@ agents.md
 claude.md
 skills/
 
+# Personal environment and XDG data kept under a checkout during local trials
+/.env
+/.env.local
+/.config/seaside/
+/.local/state/seaside/
+
 # Test-run output; keep test sources and fixtures trackable
 /test-results/
 /test-artifacts/
@@ -27,6 +33,7 @@ __pycache__/
 *.pkg.tar.*
 *.src.tar
 *.src.tar.*
+seaside-*dev.r*.g*.tar.gz
 
 # Local editor backups and KDE folder metadata
 *~
