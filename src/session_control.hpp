@@ -7,6 +7,8 @@
 
 namespace seaside {
 
+class Trace;
+
 struct IpcAction {
     Action action;
     std::optional<WindowId> window;
@@ -22,8 +24,8 @@ class SessionControl {
   public:
     SessionControl(Scene &scene, Desktop &desktop, OutputConfig &output_config)
         : scene_(scene), desktop_(desktop), outputs_(output_config) {}
-    IpcResult query(std::string_view method, const LiveConfig &config, std::string_view path,
-                    std::string_view phase, const IpcJson &last_error);
+    IpcResult query(std::string_view method, const LiveConfig &config, Trace &trace,
+                    std::string_view path, std::string_view phase, const IpcJson &last_error);
     void publish(IpcServer &ipc);
     void set_renderer(const char *renderer) noexcept { renderer_ = renderer; }
 
@@ -63,7 +65,7 @@ class SessionControl {
     IpcJson windows() const;
     IpcJson output_rows() const;
     IpcJson night_light(const ConfigTransaction &config) const;
-    IpcJson diagnostics() const;
+    IpcJson diagnostics(Trace &trace) const;
     FocusState focus_state() const;
     WorkspaceState workspace_state(WorkspaceId id) const;
 

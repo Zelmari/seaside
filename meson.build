@@ -609,7 +609,7 @@ part6_output_tests = executable(
    'src/output_config.cpp', 'src/session_control.cpp'],
   include_directories: include_directories('src', 'tests/unit', 'tests/integration'),
   dependencies: [gtest, wlroots, wayland_server, pixman, libdrm, nlohmann_json],
-  link_with: [desktop_foundation, core, tty_foundation, config_foundation, ipc_foundation],
+  link_with: [desktop_foundation, core, tty_foundation, config_foundation, ipc_foundation, trace_foundation],
   install: false,
 )
 test('part8-output-policy', part6_output_tests, suite: ['integration', 'part6', 'part8'], timeout: 20,

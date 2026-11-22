@@ -626,15 +626,11 @@ class Session {
             if (const auto &diagnostic = config_->transaction().diagnostic()) {
                 last_error = seaside::ipc_diagnostic(*diagnostic);
             }
-            auto response = control_.query(method, *config_, paths_.user.string(),
-                                           ending   ? "stopping"
-                                           : ready_ ? "ready"
-                                                    : "starting",
-                                           last_error);
-            if (response && method == "query.diagnostics") {
-                (*response)["trace"] = trace_->status();
-            }
-            return response;
+            return control_.query(method, *config_, *trace_, paths_.user.string(),
+                                  ending   ? "stopping"
+                                  : ready_ ? "ready"
+                                           : "starting",
+                                  last_error);
         }
         if (method == "action.exit") {
             const bool changed = !ending;

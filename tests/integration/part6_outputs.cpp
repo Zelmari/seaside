@@ -3,6 +3,7 @@
 #include "server.hpp"
 #include "session_control.hpp"
 #include "test_directory.hpp"
+#include "trace.hpp"
 #include "wlroots_bridge.h"
 
 #include <algorithm>
@@ -105,6 +106,9 @@ class OutputTrial : public testing::Test {
         server = std::move(*created_server);
         auto *display = server->display();
         loop = wl_display_get_event_loop(display);
+        auto created_trace = Trace::create(loop, paths.recovery.parent_path());
+        ASSERT_TRUE(created_trace);
+        trace = std::move(*created_trace);
         auto created_scene = Scene::create(display);
         ASSERT_TRUE(created_scene);
         scene = std::move(*created_scene);
@@ -199,6 +203,7 @@ class OutputTrial : public testing::Test {
     seaside_tty_drm drm;
     std::unique_ptr<OutputConfig> outputs;
     std::unique_ptr<LiveConfig> live;
+    std::unique_ptr<Trace> trace;
     wl_event_loop *loop = nullptr;
 };
 
@@ -255,7 +260,7 @@ TEST_F(OutputTrial, ReportsNoUsableOutputsAndRecoversTheSameOutputAndWorkspace) 
     auto ipc_server = IpcServer::create(
         loop, "wayland-6",
         [&](std::string_view method, const IpcJson &) {
-            return control.query(method, *live, paths.user.string(), "ready", nullptr);
+            return control.query(method, *live, *trace, paths.user.string(), "ready", nullptr);
         },
         [] {});
     ASSERT_EQ(
@@ -351,7 +356,7 @@ TEST_F(OutputTrial, ReportsOnlyActiveConfigAndShortcutsAcrossReloads) {
     ASSERT_NO_FATAL_FAILURE(attach(output.get(), "monitor", 0));
     SessionControl control(*scene, *desktop, *outputs);
     const auto query = [&](std::string_view method) {
-        auto result = control.query(method, *live, paths.user.string(), "ready", nullptr);
+        auto result = control.query(method, *live, *trace, paths.user.string(), "ready", nullptr);
         EXPECT_TRUE(result);
         return result.value_or(IpcJson::object());
     };

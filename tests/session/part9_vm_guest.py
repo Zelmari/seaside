@@ -135,13 +135,19 @@ def run_layer_shell(session, state, output):
 
 
 def run_trace(session, output, pattern, state):
+    diagnostics = session.ctl("debug", "render")
+    require(isinstance(diagnostics["outputs"], list) and diagnostics["trace"] == {
+        "state": "empty", "entries": 0, "bytes": 0, "dropped_samples": 0, "stop_reason": None,
+    }, "Unexpected initial trace diagnostics")
     require(session.ctl("trace", "start")["trace"]["state"] == "running", "Trace did not start")
     pattern.stdin.write("3968b0\n")
     pattern.stdin.flush()
-    session.wait(lambda: session.ctl("debug", "render")["trace"]["entries"] >= 2,
+    session.wait(lambda: (trace := session.ctl("debug", "render")["trace"])["state"] == "running"
+                 and trace["entries"] >= 2 and trace["stop_reason"] is None,
                  "committed and presented trace samples")
     stopped = session.ctl("trace", "stop")["trace"]
     require(stopped["state"] == "stopped" and stopped["stop_reason"] == "requested", "Trace did not stop")
+    require(session.ctl("debug", "render")["trace"] == stopped, "Stopped trace diagnostics changed")
     path = Path(session.ctl("trace", "export")["path"])
     require(path.parent == session.state_dir / "seaside/traces" and path.is_file(),
             f"The exported trace is outside its private directory: {path}")

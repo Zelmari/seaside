@@ -1,4 +1,5 @@
 #include "session_control.hpp"
+#include "trace.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -306,7 +307,7 @@ IpcJson SessionControl::night_light(const ConfigTransaction &config) const {
             {"outputs", std::move(outputs)}};
 }
 
-IpcJson SessionControl::diagnostics() const {
+IpcJson SessionControl::diagnostics(Trace &trace) const {
     auto outputs = Json::array();
     for (const auto &[id, output] : outputs_.outputs()) {
         const auto &status = output.status;
@@ -328,16 +329,10 @@ IpcJson SessionControl::diagnostics() const {
                                          : Json(nullptr)},
         });
     }
-    return {{"outputs", std::move(outputs)},
-            {"trace",
-             {{"state", "empty"},
-              {"entries", 0},
-              {"bytes", 0},
-              {"dropped_samples", 0},
-              {"stop_reason", nullptr}}}};
+    return {{"outputs", std::move(outputs)}, {"trace", trace.status()}};
 }
 
-IpcResult SessionControl::query(std::string_view method, const LiveConfig &config,
+IpcResult SessionControl::query(std::string_view method, const LiveConfig &config, Trace &trace,
                                 std::string_view path, std::string_view phase,
                                 const Json &last_error) {
     if (method == "query.status") {
@@ -367,7 +362,7 @@ IpcResult SessionControl::query(std::string_view method, const LiveConfig &confi
     }
     if (method == "query.diagnostics") {
         outputs_.refresh();
-        return diagnostics();
+        return diagnostics(trace);
     }
     if (method == "query.night_light") {
         return night_light(config.transaction());
