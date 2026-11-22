@@ -19,7 +19,8 @@ class PortalActivation final {
 
     static std::expected<std::unique_ptr<PortalActivation>, ServiceReport>
     start(SessionBus &bus, std::string_view socket, Completion completion,
-          std::chrono::milliseconds timeout) noexcept;
+          std::chrono::milliseconds timeout, std::string_view display = {},
+          std::string_view authority = {}) noexcept;
 
     ~PortalActivation() noexcept;
     PortalActivation(const PortalActivation &) = delete;

@@ -90,6 +90,7 @@ class PortalActivationTest : public testing::Test {
     std::unique_ptr<PortalActivation> activation;
     std::optional<std::pair<StartupService, ServiceReport>> outcome;
     std::vector<RunningUnit> units;
+    std::string lifetime;
     std::vector<std::string> started;
     std::vector<std::string> stopped;
     bool foreign_unit = false;
@@ -252,6 +253,10 @@ class PortalActivationTest : public testing::Test {
             return -EINVAL;
         }
         EXPECT_STREQ(mode, "fail");
+        if (std::string_view(name).starts_with("seaside-session-")) {
+            lifetime = name;
+            return sd_bus_reply_method_return(message, "o", "/org/freedesktop/systemd1/job/1");
+        }
         EXPECT_TRUE(std::string_view(name).starts_with("seaside-portal-"));
         const auto chosen = std::ranges::find_if(portals, [&](const Portal &portal) {
             return std::string_view(name).ends_with(portal.suffix);
@@ -260,7 +265,7 @@ class PortalActivationTest : public testing::Test {
             return -EINVAL;
         }
         bool environment = false;
-        bool graphical_wants = false, graphical_after = false;
+        bool graphical_wants = false, graphical_after = false, bound_to_session = false;
         int entry = 0;
         while ((entry = sd_bus_message_enter_container(message, 'r', "sv")) > 0) {
             const char *key = nullptr;
@@ -272,20 +277,33 @@ class PortalActivationTest : public testing::Test {
                 if (!environment) {
                     return -EINVAL;
                 }
-            } else if (std::string_view(key) == "Wants" || std::string_view(key) == "After") {
+            } else if (std::string_view(key) == "Wants" || std::string_view(key) == "After" ||
+                       std::string_view(key) == "BindsTo") {
                 const char *target = nullptr;
                 if (sd_bus_message_enter_container(message, 'v', "as") <= 0 ||
                     sd_bus_message_enter_container(message, 'a', "s") <= 0 ||
-                    sd_bus_message_read(message, "s", &target) <= 0 ||
-                    sd_bus_message_exit_container(message) < 0 ||
+                    sd_bus_message_read(message, "s", &target) <= 0) {
+                    return -EINVAL;
+                }
+                if (std::string_view(key) == "BindsTo") {
+                    EXPECT_EQ(target, lifetime);
+                    bound_to_session = true;
+                } else {
+                    EXPECT_STREQ(target, "graphical-session.target");
+                    if (std::string_view(key) == "After") {
+                        if (sd_bus_message_read(message, "s", &target) <= 0) {
+                            return -EINVAL;
+                        }
+                        EXPECT_EQ(target, lifetime);
+                        graphical_after = true;
+                    } else {
+                        graphical_wants = true;
+                    }
+                }
+                if (sd_bus_message_exit_container(message) < 0 ||
                     sd_bus_message_exit_container(message) < 0) {
                     return -EINVAL;
                 }
-                EXPECT_STREQ(target, "graphical-session.target");
-                auto &property =
-                    std::string_view(key) == "Wants" ? graphical_wants : graphical_after;
-                EXPECT_FALSE(property);
-                property = true;
             } else if (sd_bus_message_skip(message, "v") < 0) {
                 return -EINVAL;
             }
@@ -294,6 +312,7 @@ class PortalActivationTest : public testing::Test {
             }
         }
         EXPECT_TRUE(environment);
+        EXPECT_TRUE(bound_to_session);
         EXPECT_TRUE(graphical_wants);
         EXPECT_TRUE(graphical_after);
         if (entry < 0 || sd_bus_message_exit_container(message) < 0) {

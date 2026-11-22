@@ -6,6 +6,7 @@
 #include "server.hpp"
 #include "session_activation.hpp"
 #include "session_control.hpp"
+#include "session_environment.hpp"
 #include "session_portal.hpp"
 #include "session_services.hpp"
 #include "session_systemd.hpp"
@@ -926,7 +927,10 @@ class Session {
             }
             return;
         }
-        auto activation = seaside::PortalActivation::start(*bus_, socket_, complete, probe_timeout);
+        auto activation = seaside::PortalActivation::start(
+            *bus_, socket_, complete, probe_timeout,
+            satellite_ ? satellite_->display_name() : std::string_view{},
+            satellite_ ? satellite_->authority_path() : std::string_view{});
         if (activation) {
             activation_ = std::move(*activation);
         } else {
@@ -1281,6 +1285,9 @@ int report_exit(const std::expected<Outcome, const char *> &result) noexcept {
 } // namespace
 
 int main(int argc, char **argv) try {
+    if (argc == 5 && std::string_view(argv[1]) == "--activation-environment") {
+        return seaside::run_session_environment(argv[2], argv[3], argv[4]);
+    }
     if (argc == 2 && std::string_view(argv[1]) == "--help") {
         std::fputs("Usage: seaside [--help | --version]\n"
                    "Start Seaside as your normal user on the active Linux console.\n"

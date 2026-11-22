@@ -542,7 +542,7 @@ executable('seaside-part9-panel',
 )
 
 seaside = executable(
-  'seaside', ['src/session_entry.cpp', 'src/session_control.cpp', 'src/output_config.cpp', build_info],
+  'seaside', ['src/session_entry.cpp', 'src/session_environment.cpp', 'src/session_control.cpp', 'src/output_config.cpp', build_info],
   include_directories: include_directories('src'),
   dependencies: [wlroots, wayland_server, pixman, libdrm, systemd, pipewire, xkbcommon, xau, threads, nlohmann_json],
   link_with: [core, tty_foundation, config_foundation, capture_foundation, session_foundation,

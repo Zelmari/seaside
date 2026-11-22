@@ -7,7 +7,10 @@
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
+#include <fcntl.h>
+#include <filesystem>
 #include <optional>
+#include <span>
 #include <string>
 #include <sys/random.h>
 #include <systemd/sd-bus.h>
@@ -45,7 +48,7 @@ constexpr std::array services{
 constexpr ServiceReport timeout_error{ServiceFailure::timeout, -ETIMEDOUT};
 constexpr ServiceReport malformed{ServiceFailure::incompatible, -EBADMSG};
 
-enum class Step { check_owners, unowned, launch, owner, pid, unit };
+enum class Step { check_owners, unowned, launch, owner, pid, unit, lifetime };
 
 using Message = std::unique_ptr<sd_bus_message, decltype(&sd_bus_message_unref)>;
 
@@ -99,7 +102,10 @@ struct PortalActivation::Impl final : std::enable_shared_from_this<Impl> {
     };
 
     SessionBus *bus;
-    std::array<Unit, services.size()> units{};
+    static constexpr size_t lifetime_index = services.size();
+    std::array<Unit, lifetime_index + 1> units{};
+    std::array<int, 2> pipe{-1, -1};
+    std::string executable, display, authority;
     std::string wayland;
     std::string bus_address;
     std::string config_home;
@@ -119,7 +125,14 @@ struct PortalActivation::Impl final : std::enable_shared_from_this<Impl> {
           config_home(config_home_environment()), completion(std::move(callback)),
           deadline(Clock::now() + limit) {}
 
-    ~Impl() { remove_timer(); }
+    ~Impl() {
+        remove_timer();
+        for (int fd : pipe) {
+            if (fd >= 0) {
+                close(fd);
+            }
+        }
+    }
 
     void remove_timer() noexcept {
         if (auto *source = std::exchange(timer, nullptr)) {
@@ -130,6 +143,10 @@ struct PortalActivation::Impl final : std::enable_shared_from_this<Impl> {
     ServiceReport prepare() {
         // Private unit names keep concurrent failed attempts from stopping each
         // other's processes. The bus names remain the official portal names.
+        executable = std::filesystem::read_symlink("/proc/self/exe").string();
+        if (pipe2(pipe.data(), O_CLOEXEC) < 0) {
+            return {ServiceFailure::internal_error, -errno};
+        }
         std::uint64_t nonce = 0;
         if (getrandom(&nonce, sizeof(nonce), GRND_NONBLOCK) != sizeof(nonce)) {
             return {ServiceFailure::internal_error, -EIO};
@@ -138,8 +155,9 @@ struct PortalActivation::Impl final : std::enable_shared_from_this<Impl> {
         std::snprintf(id, sizeof(id), "%016llx", static_cast<unsigned long long>(nonce));
         for (std::size_t index = 0; index < units.size(); ++index) {
             auto &unit = units[index];
-            unit.name =
-                std::string("seaside-portal-") + id + "-" + services[index].suffix + ".service";
+            unit.name = index == lifetime_index ? std::string("seaside-session-") + id + ".service"
+                                                : std::string("seaside-portal-") + id + "-" +
+                                                      services[index].suffix + ".service";
             char *path = nullptr;
             const int encoded = sd_bus_path_encode(unit_prefix, unit.name.c_str(), &path);
             const std::unique_ptr<char, decltype(&free)> owned_path(path, free);
@@ -165,9 +183,21 @@ struct PortalActivation::Impl final : std::enable_shared_from_this<Impl> {
         return Message(message, sd_bus_message_unref);
     }
 
+    int append_lifetime(sd_bus_message *message) const {
+        const auto *cmd = executable.c_str();
+        // systemd starts the portal units only after this helper has published
+        // the session's environment. Pipe EOF also reaches it after SIGKILL.
+        return sd_bus_message_append(
+            message, "ssa(sv)a(sa(sv))", units[lifetime_index].name.c_str(), "fail", 7, "Type", "s",
+            "notify", "CollectMode", "s", "inactive-or-failed", "Before", "as", 1, graphical_target,
+            "StandardInputFileDescriptor", "h", pipe[0], "TimeoutStartUSec", "t",
+            static_cast<std::uint64_t>(5'000'000), "TimeoutStopUSec", "t",
+            static_cast<std::uint64_t>(3'000'000), "ExecStart", "a(sasb)", 1, cmd, 5, cmd,
+            "--activation-environment", wayland.c_str() + sizeof("WAYLAND_DISPLAY=") - 1,
+            display.c_str(), authority.c_str(), 0, 0);
+    }
+
     int append_launch(sd_bus_message *message, const Service &service) const {
-        // The environment belongs to these unit invocations. A manager-wide
-        // SetEnvironment cannot be restored atomically if another session starts.
         const int fixed = sd_bus_message_append(message, "ss", units[stage].name.c_str(), "fail");
         if (fixed < 0) {
             return fixed;
@@ -186,9 +216,10 @@ struct PortalActivation::Impl final : std::enable_shared_from_this<Impl> {
         }
         // Each owned service keeps the passive target active through an
         // individual portal restart. Only systemd stops it when unneeded.
-        const int graphical =
-            sd_bus_message_append(message, "(sv)(sv)", "Wants", "as", 1, graphical_target, "After",
-                                  "as", 1, graphical_target);
+        const int graphical = sd_bus_message_append(
+            message, "(sv)(sv)(sv)", "Wants", "as", 1, graphical_target, "After", "as", 2,
+            graphical_target, units[lifetime_index].name.c_str(), "BindsTo", "as", 1,
+            units[lifetime_index].name.c_str());
         if (graphical < 0) {
             return graphical;
         }
@@ -220,8 +251,10 @@ struct PortalActivation::Impl final : std::enable_shared_from_this<Impl> {
                                          "StartTransientUnit",
                                          "GetNameOwner",
                                          "GetConnectionUnixProcessID",
-                                         "GetUnitByPID"};
-            const bool manager = step == Step::launch || step == Step::unit;
+                                         "GetUnitByPID",
+                                         "StartTransientUnit"};
+            const bool manager =
+                step == Step::launch || step == Step::unit || step == Step::lifetime;
             const auto remaining =
                 std::chrono::duration_cast<std::chrono::microseconds>(deadline - Clock::now());
             if (remaining.count() <= 0) {
@@ -231,6 +264,9 @@ struct PortalActivation::Impl final : std::enable_shared_from_this<Impl> {
             auto message = make(*bus, manager, methods[static_cast<std::size_t>(step)], error);
             if (error >= 0) {
                 switch (step) {
+                case Step::lifetime:
+                    error = append_lifetime(message.get());
+                    break;
                 case Step::launch:
                     error = append_launch(message.get(), services[stage]);
                     break;
@@ -261,8 +297,8 @@ struct PortalActivation::Impl final : std::enable_shared_from_this<Impl> {
             if (step == Step::pid) {
                 units[stage].owner = owner;
             }
-            if (step == Step::launch) {
-                units[stage].requested = true;
+            if (step == Step::launch || step == Step::lifetime) {
+                units[step == Step::lifetime ? lifetime_index : stage].requested = true;
             }
             return {};
         } catch (...) {
@@ -320,11 +356,15 @@ struct PortalActivation::Impl final : std::enable_shared_from_this<Impl> {
         const char *value = nullptr;
         std::uint32_t pid = 0;
         if (reply.error != BusError::none) {
-            if (reply.error == BusError::remote_error && is_missing(reply.message)) {
+            if (step == Step::lifetime && reply.message &&
+                sd_bus_message_is_method_error(reply.message,
+                                               "org.freedesktop.systemd1.UnitExists")) {
+                result = request(Step::unowned);
+            } else if (reply.error == BusError::remote_error && is_missing(reply.message)) {
                 if (step == Step::check_owners) {
                     if (++stage == services.size()) {
                         stage = 0;
-                        result = request(Step::unowned);
+                        result = request(Step::lifetime);
                     } else {
                         result = request(Step::check_owners);
                     }
@@ -349,6 +389,11 @@ struct PortalActivation::Impl final : std::enable_shared_from_this<Impl> {
             result = malformed;
         } else {
             switch (step) {
+            case Step::lifetime:
+                result = sd_bus_message_read(reply.message, "o", &value) > 0
+                             ? request(Step::unowned)
+                             : malformed;
+                break;
             case Step::check_owners:
                 result = {ServiceFailure::wrong_environment, -EADDRINUSE};
                 break;
@@ -479,7 +524,7 @@ struct PortalActivation::Impl final : std::enable_shared_from_this<Impl> {
     }
 
     bool confirm_stopped(Clock::time_point limit) noexcept {
-        std::array<StopCheck, services.size()> checks{};
+        std::array<StopCheck, lifetime_index + 1> checks{};
         for (std::size_t index = 0; index < units.size(); ++index) {
             checks[index].finished = !units[index].requested;
         }
@@ -532,12 +577,17 @@ struct PortalActivation::Impl final : std::enable_shared_from_this<Impl> {
         if (auto id = std::exchange(pending, std::nullopt)) {
             (void)bus->cancel(*id);
         }
+        // The lifetime unit performs conditional environment restoration on EOF.
+        // Stop only the portal processes, then wait for all four units to settle.
+        if (pipe[1] >= 0) {
+            close(std::exchange(pipe[1], -1));
+        }
         std::array<SessionBus::CallId, services.size()> calls{};
         unsigned remaining = 0;
         const auto started = Clock::now();
         const auto stop_reply_limit = started + 250ms;
         const auto limit = started + 2s;
-        for (std::size_t index = units.size(); index-- > 0;) {
+        for (std::size_t index = services.size(); index-- > 0;) {
             if (!units[index].requested) {
                 continue;
             }
@@ -598,13 +648,16 @@ PortalActivation::PortalActivation(std::shared_ptr<Impl> impl) noexcept : impl_(
 
 std::expected<std::unique_ptr<PortalActivation>, ServiceReport>
 PortalActivation::start(SessionBus &bus, std::string_view socket, Completion completion,
-                        std::chrono::milliseconds timeout) noexcept {
+                        std::chrono::milliseconds timeout, std::string_view display,
+                        std::string_view authority) noexcept {
     if (!completion || !bus.event_loop() || !valid_socket(socket) || timeout <= 0ms ||
         timeout > 60s) {
         return std::unexpected(ServiceReport{ServiceFailure::internal_error, -EINVAL});
     }
     try {
         auto impl = std::make_shared<Impl>(bus, socket, std::move(completion), timeout);
+        impl->display = display;
+        impl->authority = authority;
         auto activation = std::unique_ptr<PortalActivation>(new PortalActivation(impl));
         if (const auto result = impl->prepare(); result.failure != ServiceFailure::none) {
             return std::unexpected(result);
@@ -638,8 +691,9 @@ PortalActivation::recover(SessionBus &bus, Completion completion,
     impl_->deadline = Clock::now() + timeout;
     impl_->stage = 0;
     impl_->recovering = true;
-    const bool owns_units = std::ranges::any_of(impl.units, &Impl::Unit::requested);
-    const auto next = owns_units ? Step::unowned : Step::check_owners;
+    const bool owns_units =
+        std::ranges::any_of(std::span(impl.units).first(services.size()), &Impl::Unit::requested);
+    const auto next = owns_units ? Step::lifetime : Step::check_owners;
     if (const auto result = impl_->request(next); result.failure != ServiceFailure::none) {
         impl_->completion = {};
         return std::unexpected(result);
