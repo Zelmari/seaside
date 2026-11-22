@@ -1076,6 +1076,40 @@ bool run_workspace_during_opening(const Fixture &fixture) {
     return true;
 }
 
+bool run_floating_delayed_commits(const Fixture &fixture) {
+    auto &desktop = fixture.desktop;
+    auto output = fixture.output();
+    REQUIRE(output &&
+            desktop.add_output(part3_output_handle(output.get()), "main", "", output_bounds));
+    Connection connection(fixture.display);
+    Client client;
+    REQUIRE(connection.connect(client) && connection.open(client));
+    REQUIRE(connection.attach(client, ordinary_width, ordinary_height, true, red));
+    const auto id = desktop.keyboard_window().value();
+    const auto rect = desktop.windows().view(id).geometry;
+    const double x = rect.x + 4, y = rect.y + 4;
+    REQUIRE(begin_drag(fixture, id, BTN_RIGHT, x, y));
+    desktop.motion(x + 6, y);
+    REQUIRE(connection.wait(client, [&] { return client.configured.width == rect.width + 6; }));
+    desktop.motion(x + 12, y);
+    REQUIRE(desktop.windows().view(id).geometry.width == rect.width + 12);
+    REQUIRE(connection.attach_configured(client, red));
+    REQUIRE(desktop.windows().view(id).geometry.width == rect.width + 12);
+    REQUIRE(connection.wait(client, [&] { return client.configured.width == rect.width + 12; }));
+    desktop.motion(x + 18, y);
+    desktop.button(0, BTN_RIGHT, false, super, x + 18, y);
+    REQUIRE(connection.attach_configured(client, red));
+    REQUIRE(desktop.windows().view(id).geometry.width == rect.width + 18);
+    REQUIRE(connection.wait(client, [&] {
+        return !client.configured.resizing && client.configured.width == rect.width + 18;
+    }));
+    REQUIRE(connection.attach_configured(client, red));
+    REQUIRE(desktop.windows().view(id).geometry.width == rect.width + 18);
+    REQUIRE(connection.attach(client, ordinary_width, ordinary_height, false, green));
+    REQUIRE(desktop.windows().view(id).geometry.width == ordinary_width);
+    return true;
+}
+
 bool run_floating_resize_limits(const Fixture &fixture) {
     auto &desktop = fixture.desktop;
     auto output = fixture.output();
@@ -2124,6 +2158,7 @@ int main(int argc, char **argv) {
                        run_fixture(config, run_floating_borders) &&
                        run_fixture(config, run_floating_resize_dialogs) &&
                        run_fixture(config, run_floating_resize_limits) &&
+                       run_fixture(config, run_floating_delayed_commits) &&
                        run_fixture(config, run_client_gestures)
                    ? EXIT_SUCCESS
                    : EXIT_FAILURE;

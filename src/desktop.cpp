@@ -508,7 +508,8 @@ std::uint64_t Desktop::window_event(const seaside_scene_window_event &event) {
             scene_.set_fit_resize_buffer(event.id, false);
         }
         if (!event.ordinary_commit || current.tile_layout || current.maximized ||
-            current.fullscreen || (drag_ && drag_->window == event.id && drag_->resize_edges) ||
+            current.fullscreen ||
+            (drag_ && drag_->window == event.id && drag_->resize && drag_->started) ||
             (current.tiled && drag_ && drag_->started && !drag_->resize &&
              drag_->window == event.id) ||
             (current.geometry.width == event.geometry.width &&
