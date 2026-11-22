@@ -54,6 +54,12 @@ def check_startup(repo, root, results, env, state):
     connector, command = connector_command()
     state["target_before"] = target_state(env)
     session = helpers["Session"](repo, root, results, env, label="zero-output", config="")
+    # A source-built trial may run with the Arch portal packages installed
+    # but without Seaside's system routing file. Use the candidate's routing
+    # in the private config directory inherited by its own portal services.
+    routing = Path(session.env["XDG_CONFIG_HOME"]) / "xdg-desktop-portal/seaside-portals.conf"
+    routing.parent.mkdir()
+    routing.write_bytes((repo / "packaging/seaside-portals.conf").read_bytes())
     starts = root / "autostart.txt"
     marker = shlex.quote(str(session.marker))
     autostart = (
