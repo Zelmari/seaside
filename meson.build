@@ -87,7 +87,7 @@ idle_inhibit_code = custom_target(
 )
 display_protocols = {}
 foreach protocol : ['stable/presentation-time/presentation-time', 'staging/fractional-scale/fractional-scale-v1',
-                    'staging/tearing-control/tearing-control-v1']
+                    'staging/tearing-control/tearing-control-v1', 'stable/viewporter/viewporter']
   name = protocol.split('/')[-1]
   xml = wayland_protocols.get_variable(pkgconfig: 'pkgdatadir') / (protocol + '.xml')
   header = custom_target(
@@ -250,7 +250,7 @@ capture_test = executable(
   'seaside-output-capture-test',
   ['tests/integration/output_capture.c', 'tests/integration/capture_fence_fixture.c', capture_source_client, capture_copy_client, capture_copy_code,
    xdg_output_client, xdg_output_code, xdg_shell_client_header, xdg_shell_private_code,
-   foreign_toplevel_client, legacy_capture_client, display_protocols['tearing-control-v1']],
+   foreign_toplevel_client, legacy_capture_client, display_protocols['tearing-control-v1'], display_protocols['viewporter']],
   include_directories: include_directories('src'),
   dependencies: [wlroots, wayland_server, wayland_client, pixman, libdrm, threads],
   link_args: ['-Wl,--wrap=wlr_linux_drm_syncobj_v1_get_surface_state',

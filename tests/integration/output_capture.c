@@ -4,6 +4,7 @@
 #include "capture_fence_fixture.h"
 #include "scene_bridge.h"
 #include "tearing-control-v1-client-protocol.h"
+#include "viewporter-client-protocol.h"
 
 #include "ext-foreign-toplevel-list-v1-client-protocol.h"
 #include "ext-image-capture-source-v1-client-protocol.h"
@@ -32,6 +33,7 @@
 #include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_output.h>
 #include <wlr/types/wlr_subcompositor.h>
+#include <wlr/types/wlr_viewporter.h>
 #include <xf86drm.h>
 
 enum { WIDTH = 48, HEIGHT = 42, CURSOR_SIZE = 4 };
@@ -101,6 +103,7 @@ struct fixture {
     struct wl_output *other_output;
     struct wl_compositor *compositor;
     struct wl_subcompositor *subcompositor;
+    struct wp_viewporter *viewporter;
     struct wp_tearing_control_manager_v1 *tearing;
     struct xdg_wm_base *shell;
     struct ext_foreign_toplevel_list_v1 *list;
@@ -282,6 +285,8 @@ static void registry_add(void *data, struct wl_registry *registry, uint32_t name
             wl_registry_bind(registry, name, &zwlr_screencopy_manager_v1_interface, 3);
     } else if (strcmp(interface, wl_compositor_interface.name) == 0) {
         fixture->compositor = wl_registry_bind(registry, name, &wl_compositor_interface, 4);
+    } else if (strcmp(interface, wp_viewporter_interface.name) == 0) {
+        fixture->viewporter = wl_registry_bind(registry, name, &wp_viewporter_interface, 1);
     } else if (strcmp(interface, wp_tearing_control_manager_v1_interface.name) == 0) {
         fixture->tearing =
             wl_registry_bind(registry, name, &wp_tearing_control_manager_v1_interface, 1);
@@ -1043,11 +1048,12 @@ static bool check_selected_window(struct fixture *fixture) {
     struct capture_client window = {0}, painted = {0}, stale = {0};
     struct wl_surface *child = NULL;
     struct wl_subsurface *subsurface = NULL;
+    struct wp_viewport *viewport = NULL;
     struct ext_image_capture_source_v1 *selected_source = NULL, *stale_source = NULL;
     struct wl_callback *idle_callback = NULL;
     bool idle_frame = false, hidden_frame = false;
     CHECK(scene && wlr_compositor_create(fixture->server, 6, fixture->renderer));
-    CHECK(wlr_subcompositor_create(fixture->server));
+    CHECK(wlr_subcompositor_create(fixture->server) && wlr_viewporter_create(fixture->server));
     CHECK(
         seaside_scene_enable_window_capture(scene, fixture->allocator, fixture->renderer,
                                             seaside_output_capture_copy_manager(fixture->capture)));
@@ -1060,7 +1066,7 @@ static bool check_selected_window(struct fixture *fixture) {
     CHECK(!seaside_scene_window_capture_client_ready(scene, getpid(), getuid()));
     CHECK(sync_client(fixture) && sync_client(fixture));
     CHECK(fixture->compositor && fixture->subcompositor && fixture->shell &&
-          fixture->window_manager && fixture->list);
+          fixture->window_manager && fixture->list && fixture->viewporter);
     CHECK(seaside_scene_window_capture_client_ready(scene, getpid(), getuid()));
     CHECK(!seaside_scene_window_capture_client_ready(scene, getpid(), getuid() + 1));
     CHECK(!seaside_scene_window_capture_client_ready(scene, getpid() + 1, getuid()));
@@ -1142,6 +1148,25 @@ static bool check_selected_window(struct fixture *fixture) {
           (painted.pixels[11 * painted.width + 11] & 0xffffff) == SECOND_RGB);
     wl_surface_set_buffer_transform(selected.surface, WL_OUTPUT_TRANSFORM_NORMAL);
     wl_surface_set_buffer_scale(selected.surface, 1);
+    // A 1.5x cropped viewport retains all 30x21 sampled pixels. The raw
+    // buffer extends outside that crop, shifting both color boundaries.
+    viewport = wp_viewporter_get_viewport(fixture->viewporter, selected.surface);
+    CHECK(viewport);
+    wp_viewport_set_source(viewport, wl_fixed_from_int(2), wl_fixed_from_int(3),
+                           wl_fixed_from_int(30), wl_fixed_from_int(21));
+    wp_viewport_set_destination(viewport, 20, 14);
+    window.constrained = false;
+    CHECK(paint_pattern(fixture, selected.surface, 32, 24, 0, true) &&
+          pump_until(fixture, &window.constrained));
+    CHECK(window.width == 30 && window.height == 21);
+    release_buffer(&window);
+    CHECK(create_buffer(fixture, &window) && request_capture(&window) &&
+          pump_until(fixture, &window.ready));
+    CHECK((window.pixels[8 * window.width + 13] & 0xffffff) == CURSOR_RGB &&
+          (window.pixels[8 * window.width + 14] & 0xffffff) == BACKGROUND_RGB &&
+          (window.pixels[9 * window.width + 13] & 0xffffff) == SECOND_RGB);
+    wp_viewport_destroy(viewport);
+    viewport = NULL;
     window.constrained = false;
     CHECK(paint(fixture, selected.surface, 20, 14, selected_rgb) &&
           pump_until(fixture, &window.constrained) && window.width == 20 && window.height == 14);
@@ -1273,6 +1298,9 @@ static bool check_selected_window(struct fixture *fixture) {
 done:
     if (idle_callback && !idle_frame) {
         wl_callback_destroy(idle_callback);
+    }
+    if (viewport) {
+        wp_viewport_destroy(viewport);
     }
     if (subsurface) {
         wl_subsurface_destroy(subsurface);
@@ -1433,6 +1461,9 @@ done:
     }
     if (fixture.list) {
         ext_foreign_toplevel_list_v1_destroy(fixture.list);
+    }
+    if (fixture.viewporter) {
+        wp_viewporter_destroy(fixture.viewporter);
     }
     if (fixture.shell) {
         xdg_wm_base_destroy(fixture.shell);
