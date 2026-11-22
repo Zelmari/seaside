@@ -8,6 +8,10 @@ is available. Record results here as the native trial progresses.
 
 ## First login
 
+- [ ] Install the Part 10 Arch package on the Framework Desktop. Record the
+  exact revision and SHA-256 checksum. Use `pacman -Q seaside` and
+  `pacman -Qoq /usr/bin/seaside` to verify the installed version and owner.
+  Run the first-login checks from that package. [Install on Arch](../USER_GUIDE.md#install-on-arch)
 - [ ] Start Seaside from the logged-in TTY. Open `foot`, use the keyboard and
   pointer, and exit back to the same TTY. Check the hardware cursor on every
   enabled output and verify the expected resolution, refresh rate, and scale.
@@ -135,6 +139,11 @@ python3 tests/hardware/part8_display.py 'fullscreen before sharing' --seconds 5
   or memory growth that persists after closing a share or recording. Record
   what was running and what operation preceded the issue. Use the performance
   notes for repeatable timing measurements. [Performance investigations](PERFORMANCE.md)
+- [ ] For release qualification, collect matched native idle, desktop, and
+  gameplay runs. Record idle CPU/GPU work, frame timing and missed
+  presentations, scanout coverage and fallback, and recovery after VT,
+  hotplug, or suspend. Include the workloads, repetition count, hardware
+  settings and builds behind each comparison. [Measurement method](PERFORMANCE.md#measurements-needed-first)
 
 Record the date, Seaside revision, kernel, Mesa and renderer, monitor modes,
 keyboard and audio devices, and app, portal, PipeWire, and WirePlumber
