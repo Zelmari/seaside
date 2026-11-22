@@ -191,7 +191,20 @@ def run_recovery(session, output, pattern, client, server, state):
             "An integration recovery event preceded its failure")
     require(session.ctl("window", "toggle-fullscreen")["changed"], "Fullscreen did not start for sharing")
     mode = output["mode"]
-    helpers["run_portal"](session, pattern, "monitor", (mode["width"], mode["height"]), state)
+    def share_across_sleep(reader, log):
+        require(session.ctl("window", "toggle-fullscreen")["changed"], "Fullscreen did not end before idle")
+        run_idle(session, output, client, state)
+        require(session.ctl("window", "toggle-fullscreen")["changed"], "Fullscreen did not resume after wake")
+        pattern.stdin.write("2965a7\n")
+        pattern.stdin.flush()
+        def fresh_frame():
+            return next((line for line in log.read_text(errors="replace").splitlines()
+                         if line.startswith("frame ") and set(line.split()[3:]) == {"2965a7"}), None)
+        frame = wait_for(fresh_frame, 10, "a fresh frame on the original monitor stream after wake", reader)
+        state["idle_power"]["resumed_portal_frame"] = frame
+
+    helpers["run_portal"](session, pattern, "monitor", (mode["width"], mode["height"]), state,
+                          active_stream=share_across_sleep)
     require(state["fullscreen_portal"]["monitor"]["status"] == "pass",
             "The new monitor share requires the real chooser and a received frame")
     require(session.ctl("focus")["window_id"] == client["id"], "Sharing did not return focus to its client")
@@ -293,7 +306,6 @@ def trial():
                             run_layer_shell(session, state, output)
                             run_trace(session, output, pattern, state)
                             run_recovery(session, output, pattern, target, server, state)
-                            run_idle(session, output, target, state)
                         session.close()
         state["suspend"] = {"status": "skip", "reason": "The guest runner has no verified targeted system wake path"}
         state["ok"] = True

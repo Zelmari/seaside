@@ -456,7 +456,7 @@ void run(std::string_view source, std::string_view lifetime) {
     }
     VideoReceiver receiver;
     receiver.start(bus.get(), session.path(), stream_node(result, requested));
-    const auto deadline = Clock::now() + 24s;
+    const auto deadline = Clock::now() + (lifetime == "observe" ? 120s : 24s);
     while (!receiver.ended() && !session.closed && Clock::now() < deadline) {
         receiver.dispatch();
         check(sd_bus_process(bus.get(), nullptr), "dispatch active session events");
@@ -475,8 +475,10 @@ int main(int argc, char **argv) {
     const std::string_view source = argc > 1 ? argv[1] : "";
     const std::string_view lifetime = argc > 2 ? argv[2] : "";
     if (argc != 3 || (source != "monitor" && source != "window") ||
-        (lifetime != "cancel" && lifetime != "frame" && lifetime != "closed")) {
-        std::fputs("Usage: seaside-portal-stream monitor|window cancel|frame|closed\n", stderr);
+        (lifetime != "cancel" && lifetime != "frame" && lifetime != "closed" &&
+         lifetime != "observe")) {
+        std::fputs("Usage: seaside-portal-stream monitor|window cancel|frame|closed|observe\n",
+                   stderr);
         return EXIT_FAILURE;
     }
     std::setvbuf(stdout, nullptr, _IOLBF, 0);

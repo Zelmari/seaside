@@ -351,14 +351,15 @@ def run_adaptive_sync(session, state, output):
     state["adaptive_sync"] = {"status": "pass", "policies": outcomes}
 
 
-def run_portal(session, pattern, source_type, size, state, chooser_ready=None):
+def run_portal(session, pattern, source_type, size, state, chooser_ready=None, active_stream=None):
     outcomes = state.setdefault("fullscreen_portal", {})
     if not session.chooser:
         outcomes[source_type] = {"status": "blocked", "reason": "Wofi is unavailable in the guest trial"}
         return
     log = session.results / f"{session.label}-portal-{source_type}.log"
     for attempt in range(1, 4):
-        with fixture(session, log, "seaside-portal-stream", source_type, "frame") as reader:
+        lifetime = "observe" if active_stream else "frame"
+        with fixture(session, log, "seaside-portal-stream", source_type, lifetime) as reader:
             def chooser_focused():
                 focus = session.ctl("focus")["window_id"]
                 return any(row["id"] == focus and "wofi" in
@@ -388,12 +389,14 @@ def run_portal(session, pattern, source_type, size, state, chooser_ready=None):
                 event(session.label, f"retrying linked portal stream without frames, attempt {attempt}")
                 state.setdefault("portal_linked_retries", {})[source_type] = attempt
                 continue
-            code = reader.wait(timeout=8)
+            if not active_stream:
+                require(reader.wait(timeout=8) == 0, log.read_text(errors="replace"))
             contents = log.read_text(errors="replace")
-            require(code == 0, f"The {source_type} stream did not complete: {contents}")
             frame = next((line.split()[1:] for line in contents.splitlines() if line.startswith("frame ")), [])
             require(tuple(map(int, frame[:2])) == size and
                     set(frame[2:]) == {"64482c"}, f"Unexpected fullscreen portal frame {frame}")
+            if active_stream:
+                active_stream(reader, log)
             outcomes[source_type] = {"status": "pass", "frame": frame}
             return
 
