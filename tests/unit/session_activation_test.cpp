@@ -79,6 +79,7 @@ class PortalActivationTest : public testing::Test {
         bool stopping = false;
         unsigned stop_polls = 0;
     };
+    enum class StopBehavior { normal, reply_error, unknown_state, stays_active };
 
     seaside::test::Directory directory;
     const std::string address = "unix:path=" + (directory.path() / "bus").string();
@@ -93,6 +94,7 @@ class PortalActivationTest : public testing::Test {
     std::vector<std::string> stopped;
     bool foreign_unit = false;
     unsigned get_unit_by_pid = 0;
+    StopBehavior stop_behavior = StopBehavior::normal;
 
     void SetUp() override {
         RecordProperty("part", "3");
@@ -322,6 +324,9 @@ class PortalActivationTest : public testing::Test {
         if (released < 0) {
             return released;
         }
+        if (found->portal == &portals.back() && stop_behavior == StopBehavior::reply_error) {
+            return sd_bus_reply_method_errorf(message, SD_BUS_ERROR_FAILED, "test stop reply lost");
+        }
         return sd_bus_reply_method_return(message, "o", "/org/freedesktop/systemd1/job/2");
     }
 
@@ -342,6 +347,15 @@ class PortalActivationTest : public testing::Test {
         }
         EXPECT_TRUE(found->stopping);
         const auto *state = found->stop_polls++ == 0 ? "deactivating" : "inactive";
+        if (found->portal == &portals.back()) {
+            if (stop_behavior == StopBehavior::unknown_state) {
+                return sd_bus_reply_method_errorf(message, SD_BUS_ERROR_FAILED,
+                                                  "test unit state unavailable");
+            }
+            if (stop_behavior == StopBehavior::stays_active) {
+                state = "active";
+            }
+        }
         return sd_bus_reply_method_return(message, "v", "s", state);
     }
 };
@@ -397,6 +411,41 @@ TEST_F(PortalActivationTest, VerifiesAllOwnedPortalUnitsAndWaitsForThemToStop) {
     }
     EXPECT_TRUE(activation->stop());
     EXPECT_EQ(stopped.size(), units.size());
+}
+
+TEST_F(PortalActivationTest, ConfirmsEveryUnitStoppedDespiteAFailedStopReply) {
+    start();
+    ASSERT_TRUE(outcome);
+    ASSERT_EQ(outcome->second.failure, ServiceFailure::none);
+    stop_behavior = StopBehavior::reply_error;
+
+    EXPECT_TRUE(activation->stop());
+    ASSERT_EQ(stopped.size(), portals.size());
+    for (const auto &unit : units) {
+        EXPECT_GE(unit.stop_polls, 2U);
+    }
+}
+
+TEST_F(PortalActivationTest, ReportsAnUnverifiableUnitDespiteASuccessfulStopReply) {
+    start();
+    ASSERT_TRUE(outcome);
+    ASSERT_EQ(outcome->second.failure, ServiceFailure::none);
+    stop_behavior = StopBehavior::unknown_state;
+
+    EXPECT_FALSE(activation->stop());
+    ASSERT_EQ(stopped.size(), portals.size());
+    EXPECT_EQ(units.back().stop_polls, 1U);
+}
+
+TEST_F(PortalActivationTest, ReportsAUnitStillActiveAtTheShutdownDeadline) {
+    start();
+    ASSERT_TRUE(outcome);
+    ASSERT_EQ(outcome->second.failure, ServiceFailure::none);
+    stop_behavior = StopBehavior::stays_active;
+
+    EXPECT_FALSE(activation->stop());
+    ASSERT_EQ(stopped.size(), portals.size());
+    EXPECT_GE(units.back().stop_polls, 2U);
 }
 
 TEST_F(PortalActivationTest, RollsBackOnlyItsOwnUnitWhenTheNextPortalAlreadyExists) {

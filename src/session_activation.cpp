@@ -377,6 +377,7 @@ struct PortalActivation::Impl final : std::enable_shared_from_this<Impl> {
     }
 
     bool confirm_stop(const Unit &unit, Clock::time_point limit) {
+        std::array<char, 32> last_state{};
         while (Clock::now() < limit) {
             sd_bus_message *raw = nullptr;
             int error = sd_bus_message_new_method_call(bus->native_handle(), &raw, manager_name,
@@ -391,6 +392,8 @@ struct PortalActivation::Impl final : std::enable_shared_from_this<Impl> {
                                               "ActiveState");
             }
             if (error < 0) {
+                std::fprintf(stderr, "seaside: portal %s could not build ActiveState query (%d)\n",
+                             unit.name.c_str(), error);
                 return false;
             }
             unsigned remaining = 1;
@@ -398,23 +401,42 @@ struct PortalActivation::Impl final : std::enable_shared_from_this<Impl> {
             bool pending_stop = false;
             const auto duration =
                 std::chrono::duration_cast<std::chrono::microseconds>(limit - Clock::now());
+            if (duration.count() <= 0) {
+                break;
+            }
             auto call = bus->call(raw, duration, [&](const BusReply &reply) {
-                const char *state = nullptr;
+                remaining = 0;
+                // systemd may collect the unit as soon as its stop job completes.
                 inactive = unit_is_gone(reply);
-                if (reply.error == BusError::none && reply.message &&
-                    sd_bus_message_read(reply.message, "v", "s", &state) > 0) {
+                if (inactive) {
+                    return;
+                }
+                const char *state = nullptr;
+                if (reply.error != BusError::none) {
+                    const auto *remote =
+                        reply.message ? sd_bus_message_get_error(reply.message) : nullptr;
+                    std::fprintf(stderr, "seaside: portal %s ActiveState query failed (%s, %d)\n",
+                                 unit.name.c_str(), remote && remote->name ? remote->name : "D-Bus",
+                                 reply.native_error);
+                } else if (reply.message &&
+                           sd_bus_message_read(reply.message, "v", "s", &state) > 0) {
                     const std::string_view value(state);
+                    std::snprintf(last_state.data(), last_state.size(), "%s", state);
                     inactive = value == "inactive" || value == "failed";
                     pending_stop = !inactive;
+                } else {
+                    std::fprintf(stderr, "seaside: portal %s returned malformed ActiveState\n",
+                                 unit.name.c_str());
                 }
-                remaining = 0;
             });
             if (!call) {
+                std::fprintf(stderr, "seaside: portal %s could not queue ActiveState query (%d)\n",
+                             unit.name.c_str(), static_cast<int>(call.error()));
                 return false;
             }
             if (!drain(limit, remaining)) {
                 (void)bus->cancel(*call);
-                return false;
+                break;
             }
             if (inactive || !pending_stop) {
                 return inactive;
@@ -422,9 +444,13 @@ struct PortalActivation::Impl final : std::enable_shared_from_this<Impl> {
             // A StopUnit reply admits the job. Inspect the unit itself before
             // releasing the display and returning to the TTY.
             if (wl_event_loop_dispatch(bus->event_loop(), 25) < 0 && errno != EINTR) {
+                std::fprintf(stderr, "seaside: portal %s could not poll ActiveState (%d)\n",
+                             unit.name.c_str(), errno);
                 return false;
             }
         }
+        std::fprintf(stderr, "seaside: portal %s could not confirm stop (last ActiveState=%s)\n",
+                     unit.name.c_str(), last_state[0] == '\0' ? "unknown" : last_state.data());
         return false;
     }
 
@@ -439,7 +465,6 @@ struct PortalActivation::Impl final : std::enable_shared_from_this<Impl> {
         }
         std::array<SessionBus::CallId, services.size()> calls{};
         unsigned remaining = 0;
-        bool ok = true;
         const auto limit = Clock::now() + 2s;
         for (std::size_t index = units.size(); index-- > 0;) {
             if (!units[index].requested) {
@@ -453,35 +478,35 @@ struct PortalActivation::Impl final : std::enable_shared_from_this<Impl> {
                                                   "replace");
                 }
                 if (error < 0) {
-                    ok = false;
                     continue;
                 }
-                auto call =
-                    bus->call(message.get(), 1500ms, [&remaining, &ok](const BusReply &reply) {
-                        ok &= reply.error == BusError::none || unit_is_gone(reply);
-                        --remaining;
-                    });
+                auto call = bus->call(message.get(), 1500ms,
+                                      [&remaining](const BusReply &) { --remaining; });
                 if (!call) {
-                    ok = false;
                     continue;
                 }
                 calls[index] = *call;
                 ++remaining;
             } catch (...) {
-                ok = false;
+                // Still verify every unit after sending all possible stop requests.
             }
         }
-        ok &= drain(limit, remaining);
+        (void)drain(limit, remaining);
         for (const auto id : calls) {
             if (id) {
                 (void)bus->cancel(id);
             }
         }
+        // StopUnit can race with unit collection or lose its reply. Only the
+        // resulting state of each unit proves whether it is still running.
+        bool ok = true;
         for (const auto &unit : units) {
             if (unit.requested) {
                 try {
                     ok &= confirm_stop(unit, limit);
                 } catch (...) {
+                    std::fprintf(stderr, "seaside: portal %s could not verify shutdown\n",
+                                 unit.name.c_str());
                     ok = false;
                 }
             }
