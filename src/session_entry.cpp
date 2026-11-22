@@ -222,7 +222,9 @@ class Session {
         : server_(server), scene_(scene), drm_(drm), socket_(socket),
           loop_(wl_display_get_event_loop(server.display())), paths_(paths),
           desktop_(scene, seaside::default_config()), outputs_(drm, desktop_),
-          control_(scene, desktop_, outputs_) {}
+          control_(scene, desktop_, outputs_) {
+        desktop_.enable_frame_paced_resize();
+    }
 
     ~Session() noexcept {
         scene_.set_frame_observer(nullptr, nullptr);

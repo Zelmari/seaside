@@ -799,13 +799,13 @@ bool map_tiled(const Fixture &fixture, Connection &connection, Client &client, W
                int width, int height, int minimum_width = 0, std::uint32_t rgb = 0) {
     REQUIRE(connection.connect(client));
     REQUIRE(connection.open(client, minimum_width));
-    REQUIRE(client.configured.width == 0 && client.configured.height == 0);
-    REQUIRE(!client.configured.tiled_edges);
-    REQUIRE(connection.attach(client, std::max(ordinary_width, minimum_width), ordinary_height));
+    REQUIRE(client.configured.width == width && client.configured.height == height);
+    REQUIRE(client.configured.tiled_edges == all_tiled_edges && !client.configured.activated);
+    REQUIRE(connection.attach_configured(client, rgb));
     id = fixture.desktop.windows().focused_window().value_or(0);
     REQUIRE(id);
+    REQUIRE(connection.wait(client, [&] { return client.configured.activated; }));
     REQUIRE(wait_tiled(connection, client, width, height));
-    REQUIRE(client.configured.activated);
     REQUIRE(connection.attach_configured(client, rgb));
     return true;
 }
@@ -829,6 +829,60 @@ bool wait_pixel(Connection &connection, Client &client, part3_output *output, un
                      expected, pixel.rgb, pixel.frames);
     }
     return ready;
+}
+
+bool run_opening_transaction(const Fixture &fixture) {
+    auto &desktop = fixture.desktop;
+    auto output = fixture.output();
+    REQUIRE(output);
+    REQUIRE(desktop.add_output(part3_output_handle(output.get()), "main", "main", output_bounds));
+    Connection connection(fixture.display);
+    Client first, second;
+    WindowId left{};
+    REQUIRE(map_tiled(fixture, connection, first, left, 160, 90, 0, red));
+    REQUIRE(connection.connect(second) && connection.open(second));
+    REQUIRE(second.configured.width == 80 && second.configured.height == 90 &&
+            second.configured.tiled_edges == all_tiled_edges);
+    REQUIRE(connection.attach_configured(second, green));
+    REQUIRE(wait_tiled(connection, first, 80, 90));
+    REQUIRE(!second.configured.activated);
+    // Keep the previous layout until the existing client submits its
+    // response. The new client already has a buffer at the right size.
+    REQUIRE(wait_pixel(connection, first, output.get(), 110, 55, red));
+    REQUIRE(connection.attach_configured(first, red));
+    REQUIRE(connection.wait(second, [&] { return second.configured.activated; }));
+    REQUIRE(wait_pixel(connection, second, output.get(), 110, 55, green));
+    REQUIRE(wait_pixel(connection, first, output.get(), 40, 55, red));
+    const auto right = desktop.windows().focused_window();
+    REQUIRE(right && right != left);
+
+    desktop.enable_frame_paced_resize();
+    REQUIRE(begin_drag(fixture, *right, BTN_RIGHT, 110, 45));
+    desktop.motion(115, 45);
+    desktop.motion(130, 45);
+    REQUIRE(desktop.windows().view(left).geometry.width == 80);
+    REQUIRE(
+        connection.wait(first, [&] { return desktop.windows().view(left).geometry.width == 100; }));
+    REQUIRE(wait_pixel(connection, first, output.get(), 98, 45, red));
+    REQUIRE(wait_pixel(connection, first, output.get(), 102, 45, green));
+
+    desktop.motion(135, 45);
+    desktop.button(0, BTN_RIGHT, false, super, 135, 45);
+    REQUIRE(desktop.windows().view(left).geometry.width == 105);
+    REQUIRE(wait_pixel(connection, first, output.get(), 103, 45, red));
+    REQUIRE(wait_pixel(connection, first, output.get(), 107, 45, green));
+
+    Client third;
+    REQUIRE(connection.connect(third) && connection.open(third));
+    REQUIRE(third.configured.tiled_edges == all_tiled_edges);
+    REQUIRE(connection.attach_configured(third, blue));
+    REQUIRE(desktop.action(action(ActionKind::toggle_window_tiling)));
+    REQUIRE(connection.wait(third, [&] {
+        return !third.configured.tiled_edges && !third.configured.width && !third.configured.height;
+    }));
+    REQUIRE(connection.attach(third, ordinary_width, ordinary_height, true, blue));
+    REQUIRE(!desktop.failed() && !fixture.scene.snapshot().failed);
+    return true;
 }
 
 bool run_floating_borders(const Fixture &fixture) {
@@ -1334,6 +1388,12 @@ bool run_dwindle(const Fixture &fixture) {
     REQUIRE(wait_tiled(connection, first, resized_a.width, 78));
     REQUIRE(wait_tiled(connection, second, resized_b.width, 78));
     REQUIRE(second.configured.resizing);
+    // Both clients still have their earlier sized buffers. The new split
+    // must already be fully covered up to its configured gap.
+    const auto left_edge = static_cast<unsigned>(resized_a.x + resized_a.width - 1);
+    const auto right_edge = static_cast<unsigned>(resized_b.x);
+    REQUIRE(wait_pixel(connection, first, output.get(), left_edge, 45, red));
+    REQUIRE(wait_pixel(connection, first, output.get(), right_edge, 45, green));
     REQUIRE(connection.attach_configured(first) && connection.attach_configured(second));
     desktop.button(0, BTN_RIGHT, false, super, 131, 45);
     REQUIRE(connection.wait(second, [&] { return !second.configured.resizing; }));
@@ -1375,11 +1435,11 @@ bool run_dwindle(const Fixture &fixture) {
 
     REQUIRE(desktop.action(action(ActionKind::toggle_window_tiling)));
     REQUIRE(connection.wait(first, [&] { return !first.configured.tiled_edges; }));
-    REQUIRE(first.configured.width == ordinary_width && first.configured.height == ordinary_height);
+    REQUIRE(first.configured.width == 0 && first.configured.height == 0);
     REQUIRE(connection.attach(first, full.width, full.height, false));
-    REQUIRE(windows.view(a).geometry.width == ordinary_width);
-    REQUIRE(windows.view(a).geometry.height == ordinary_height);
-    REQUIRE(connection.attach_configured(first));
+    REQUIRE(windows.view(a).geometry.width == 0 && windows.view(a).geometry.height == 0);
+    REQUIRE(hit(fixture.scene, full, a));
+    REQUIRE(connection.attach(first, ordinary_width, ordinary_height));
     REQUIRE(hit(fixture.scene, windows.view(a).geometry, a));
     REQUIRE(!desktop.failed() && !fixture.scene.snapshot().failed);
     return true;
@@ -1626,9 +1686,15 @@ int main(int argc, char **argv) {
         return run_fixture(config, run_binding_reload) ? EXIT_SUCCESS : EXIT_FAILURE;
     }
     if (argc == 2 && scenario == "dwindle") {
+        auto transaction = config;
+        transaction.window.gaps_outer = 0;
+        transaction.window.gaps_inner = 0;
+        transaction.window.border_width = 0;
         config.window.gaps_outer = 4;
         config.window.gaps_inner = 6;
-        return run_fixture(config, run_dwindle) ? EXIT_SUCCESS : EXIT_FAILURE;
+        return run_fixture(config, run_dwindle) && run_fixture(transaction, run_opening_transaction)
+                   ? EXIT_SUCCESS
+                   : EXIT_FAILURE;
     }
     if (argc == 2 && scenario == "scrolling") {
         config.window.layout = seaside::Layout::scrolling;

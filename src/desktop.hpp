@@ -8,6 +8,7 @@
 #include <set>
 
 struct seaside_tty_input;
+struct wl_event_source;
 
 namespace seaside {
 
@@ -22,6 +23,7 @@ class Desktop final {
     Desktop &operator=(const Desktop &) = delete;
 
     void set_input(seaside_tty_input *input) noexcept;
+    void enable_frame_paced_resize() noexcept;
     bool add_output(wlr_output *output, std::string_view connector, std::string_view identity,
                     WindowRect bounds, std::string_view id = {}) noexcept;
     void remove_output(wlr_output *output, std::string_view ranked_fallback = {}) noexcept;
@@ -56,6 +58,9 @@ class Desktop final {
         std::string id, connector, identity;
         WindowRect work;
     };
+    struct PointerPosition {
+        double x, y;
+    };
     struct Drag {
         WindowId window;
         std::uint32_t button;
@@ -65,12 +70,24 @@ class Desktop final {
         bool client = false;
         std::uint32_t resize_edges = 0;
         WindowRect initial_geometry{};
+        std::optional<PointerPosition> pending{};
+    };
+    struct OpeningWindow {
+        WindowRect geometry;
+        std::uint32_t serial;
     };
 
     static std::uint64_t on_window(void *self, const seaside_scene_window_event *event) noexcept;
     static void on_layer_changed(void *self) noexcept;
+    static int on_opening_deadline(void *self) noexcept;
+    static void before_output_frame(void *self, wlr_output *output) noexcept;
     std::uint64_t window_event(const seaside_scene_window_event &event);
     void project(WindowId resize = 0);
+    bool stage_opening(WindowId id);
+    bool opening_ready() const;
+    void project_if_opening_ready();
+    void apply_drag_motion(double x, double y);
+    wlr_output *window_output_handle(WindowId id) const noexcept;
     bool update_size_limits(WindowId id);
     void discard_drag();
     bool begin_client_drag(const seaside_scene_window_event &event);
@@ -85,13 +102,15 @@ class Desktop final {
     FullscreenAspect fullscreen_aspect_ = FullscreenAspect::preserve;
     std::map<wlr_output *, Output> outputs_;
     std::set<WindowId> views_;
+    std::map<WindowId, WindowRect> presented_;
+    std::map<WindowId, OpeningWindow> opening_;
+    std::set<WindowId> fitting_;
+    wl_event_source *opening_deadline_ = nullptr;
     seaside_tty_input *input_ = nullptr;
     std::optional<Drag> drag_;
-    struct PointerPosition {
-        double x, y;
-    };
     std::optional<PointerPosition> pointer_;
     std::uint8_t cycle_modifiers_ = 0;
+    bool frame_paced_resize_ = false;
     bool failed_ = false;
     bool layer_has_focus_ = false;
 };

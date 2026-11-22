@@ -6,9 +6,12 @@
 #include <limits>
 #include <linux/input-event-codes.h>
 #include <utility>
+#include <wayland-server-core.h>
 
 namespace seaside {
 namespace {
+constexpr int opening_timeout_ms = 90;
+
 seaside_scene_rect to_scene(WindowRect rect) noexcept {
     return {rect.x, rect.y, rect.width, rect.height};
 }
@@ -31,6 +34,18 @@ int resize_delta(int size, int delta, int minimum, int maximum) noexcept {
     const auto desired = std::clamp<std::int64_t>(std::int64_t{size} + delta, lower, upper);
     return static_cast<int>(desired - size);
 }
+
+bool same_size(WindowRect first, WindowRect second) noexcept {
+    return first.width == second.width && first.height == second.height;
+}
+
+bool valid_size(WindowRect rect) noexcept {
+    return rect.width > 0 && rect.height > 0;
+}
+
+bool includes_serial(std::uint32_t committed, std::uint32_t requested) noexcept {
+    return requested == 0 || (committed && committed - requested < 0x80000000U);
+}
 } // namespace
 
 Desktop::Desktop(Scene &scene, const Config &config)
@@ -47,12 +62,30 @@ Desktop::Desktop(Scene &scene, const Config &config)
 }
 
 Desktop::~Desktop() noexcept {
+    if (opening_deadline_) {
+        wl_event_source_remove(opening_deadline_);
+    }
+    if (frame_paced_resize_) {
+        scene_.set_before_frame(nullptr, nullptr);
+    }
     scene_.set_window_handler(nullptr, nullptr);
     scene_.set_layer_handler(nullptr, nullptr, nullptr, nullptr);
 }
 
 void Desktop::set_input(seaside_tty_input *input) noexcept {
     input_ = input;
+}
+
+void Desktop::enable_frame_paced_resize() noexcept {
+    frame_paced_resize_ = true;
+    scene_.set_before_frame(before_output_frame, this);
+}
+
+wlr_output *Desktop::window_output_handle(WindowId id) const noexcept {
+    const auto output = windows_.window_output(id);
+    const auto found = std::ranges::find_if(
+        outputs_, [&](const auto &entry) { return entry.second.id == output; });
+    return found == outputs_.end() ? nullptr : found->first;
 }
 
 bool Desktop::add_output(wlr_output *output, std::string_view connector, std::string_view identity,
@@ -168,6 +201,10 @@ void Desktop::on_layer_changed(void *self) noexcept {
 }
 
 void Desktop::project(WindowId resize) {
+    if (!opening_.empty()) {
+        opening_.clear();
+        wl_event_source_timer_update(opening_deadline_, 0);
+    }
     if (drag_) {
         const auto view = windows_.view(drag_->window);
         if (!view.visible || (drag_->client && view.tiled)) {
@@ -191,15 +228,49 @@ void Desktop::project(WindowId resize) {
         }
     }
     const WindowId focused = windows_.focused_window().value_or(0);
+    const auto *resized = windows_.state().window(resize);
+    const auto *dragged =
+        drag_ && drag_->started && drag_->resize ? windows_.state().window(drag_->window) : nullptr;
     auto *layer_focus = scene_.layer_keyboard_focus(focused_output_handle());
     layer_has_focus_ = layer_focus != nullptr;
     for (const auto id : views_) {
         const auto view = windows_.view(id);
         const auto output = windows_.window_output(id);
+        auto geometry = view.geometry;
+        const auto shown = presented_.find(id);
+        // On its first transition out of tiling the client may have no saved
+        // ordinary size. Keep it in place while asking it for that size.
+        const bool choose_floating_size =
+            view.visible && !view.tile_layout && !valid_size(geometry);
+        if (choose_floating_size) {
+            if (shown != presented_.end()) {
+                geometry = shown->second;
+            } else {
+                // A fullscreen shortcut or tiling toggle can arrive before
+                // the first tile placement has been presented.
+                const auto content = scene_.window_content_geometry(id);
+                geometry.x = motion_delta(static_cast<double>(geometry.x) - content.width / 2);
+                geometry.y = motion_delta(static_cast<double>(geometry.y) - content.height / 2);
+                geometry.width = content.width;
+                geometry.height = content.height;
+            }
+        }
+        if (resized && view.visible &&
+            (id == resize || (view.tile_layout && windows_.state().window(id)->home_workspace ==
+                                                      resized->home_workspace)) &&
+            (shown == presented_.end() || !same_size(geometry, shown->second))) {
+            fitting_.insert(id);
+        }
+        if (fitting_.contains(id) &&
+            (view.maximized || view.fullscreen ||
+             same_size(geometry, from_scene(scene_.window_content_geometry(id))))) {
+            fitting_.erase(id);
+        }
+        const bool fitted = view.visible && fitting_.contains(id);
         scene_.place_window(
             id,
             {
-                .geometry = to_scene(view.geometry),
+                .geometry = to_scene(geometry),
                 .output = output ? to_scene(windows_.output_bounds(*output).value_or(WindowRect{}))
                                  : seaside_scene_rect{},
                 .clip = to_scene(view.clip),
@@ -213,7 +284,19 @@ void Desktop::project(WindowId resize) {
                 .tiled = view.tile_layout,
                 .resize = id == resize,
                 .resizing = drag_ && drag_->started && drag_->resize && drag_->window == id,
+                .fit_resize_buffer = fitted,
+                .unconstrained_restore = choose_floating_size,
+                .interactive_resize = dragged && (drag_->window == id ||
+                                                  (fitted && view.tile_layout &&
+                                                   windows_.state().window(id)->home_workspace ==
+                                                       dragged->home_workspace)),
             });
+        if (view.visible) {
+            presented_[id] = geometry;
+        } else {
+            presented_.erase(id);
+            fitting_.erase(id);
+        }
     }
     if (input_) {
         seaside_tty_input_set_focus(input_,
@@ -223,6 +306,82 @@ void Desktop::project(WindowId resize) {
     if (projected_) {
         projected_();
     }
+}
+
+bool Desktop::stage_opening(WindowId id) {
+    const auto view = windows_.view(id);
+    if (!view.visible || !view.tile_layout || !valid_size(view.geometry)) {
+        return false;
+    }
+    const auto workspace = windows_.state().window(id)->home_workspace;
+    std::map<WindowId, OpeningWindow> pending;
+    bool has_previous_tile = false;
+    for (const auto candidate : views_) {
+        if (windows_.state().window(candidate)->home_workspace != workspace) {
+            continue;
+        }
+        const auto tile = windows_.view(candidate);
+        if (!tile.visible || !tile.tile_layout || !valid_size(tile.geometry)) {
+            continue;
+        }
+        if (const auto shown = presented_.find(candidate); shown != presented_.end()) {
+            has_previous_tile = true;
+            if (same_size(shown->second, tile.geometry)) {
+                continue;
+            }
+            // A fast neighbor might commit before a slower one. Continue
+            // painting it into the old tile until the new layout is ready.
+            scene_.set_fit_resize_buffer(candidate, true);
+        }
+        fitting_.insert(candidate);
+        if (!same_size(tile.geometry, from_scene(scene_.window_content_geometry(candidate)))) {
+            pending.emplace(candidate,
+                            OpeningWindow{tile.geometry, scene_.configure_tiled_window(
+                                                             candidate, to_scene(tile.geometry))});
+        }
+    }
+    if (pending.empty() || !has_previous_tile) {
+        return false;
+    }
+    if (!opening_deadline_) {
+        opening_deadline_ = wl_event_loop_add_timer(scene_.event_loop(), on_opening_deadline, this);
+        if (!opening_deadline_) {
+            return false;
+        }
+    }
+    // One stalled client must not delay a series of new windows indefinitely.
+    if (opening_.empty() &&
+        wl_event_source_timer_update(opening_deadline_, opening_timeout_ms) < 0) {
+        return false;
+    }
+    opening_ = std::move(pending);
+    return true;
+}
+
+bool Desktop::opening_ready() const {
+    return std::ranges::all_of(opening_, [&](const auto &entry) {
+        const auto &[id, target] = entry;
+        return includes_serial(scene_.window_commit_serial(id), target.serial) &&
+               same_size(from_scene(scene_.window_content_geometry(id)), target.geometry);
+    });
+}
+
+void Desktop::project_if_opening_ready() {
+    if (!opening_.empty() && opening_ready()) {
+        project();
+    }
+}
+
+int Desktop::on_opening_deadline(void *self) noexcept {
+    auto &desktop = *static_cast<Desktop *>(self);
+    try {
+        if (!desktop.opening_.empty()) {
+            desktop.project();
+        }
+    } catch (...) {
+        desktop.failed_ = true;
+    }
+    return 0;
 }
 
 bool Desktop::update_size_limits(WindowId id) {
@@ -274,10 +433,18 @@ std::uint64_t Desktop::window_event(const seaside_scene_window_event &event) {
     case SEASIDE_WINDOW_INITIAL_COMMIT:
         update_size_limits(event.id);
         windows_.initialize_window(event.id);
-        break;
+        if (const auto geometry = windows_.initial_tile_geometry(event.id)) {
+            scene_.configure_tiled_window(event.id, to_scene(*geometry));
+        } else if (opening_.empty()) {
+            project();
+        }
+        return 0;
     case SEASIDE_WINDOW_MAPPED:
         update_size_limits(event.id);
-        windows_.map_window(event.id, from_scene(event.geometry));
+        windows_.map_window(event.id, from_scene(event.geometry), event.ordinary_commit);
+        if (stage_opening(event.id)) {
+            return 0;
+        }
         break;
     case SEASIDE_WINDOW_UNMAPPED:
         if (drag_ && drag_->window == event.id) {
@@ -290,11 +457,25 @@ std::uint64_t Desktop::window_event(const seaside_scene_window_event &event) {
             discard_drag();
         }
         views_.erase(event.id);
+        presented_.erase(event.id);
+        fitting_.erase(event.id);
         windows_.destroy_window(event.id);
         break;
     case SEASIDE_WINDOW_COMMITTED: {
         const bool limits_changed = update_size_limits(event.id);
         const auto current = windows_.view(event.id);
+        if (!opening_.empty() && !limits_changed) {
+            project_if_opening_ready();
+            if (current.tile_layout) {
+                return 0;
+            }
+        }
+        if (const auto shown = presented_.find(event.id);
+            fitting_.contains(event.id) && shown != presented_.end() &&
+            same_size(shown->second, from_scene(event.geometry))) {
+            fitting_.erase(event.id);
+            scene_.set_fit_resize_buffer(event.id, false);
+        }
         if (!event.ordinary_commit || current.tile_layout || current.maximized ||
             current.fullscreen || (drag_ && drag_->window == event.id && drag_->resize_edges) ||
             (current.tiled && drag_ && drag_->started && !drag_->resize &&
@@ -303,7 +484,7 @@ std::uint64_t Desktop::window_event(const seaside_scene_window_event &event) {
              current.geometry.height == event.geometry.height)) {
             if (limits_changed) {
                 project();
-            } else if (input_ && current.fullscreen) {
+            } else if (input_ && (current.fullscreen || fitting_.contains(event.id))) {
                 seaside_tty_input_refresh_pointer(input_);
             }
             return 0;
@@ -589,6 +770,11 @@ bool Desktop::button(WindowId id, std::uint32_t button, bool pressed, std::uint8
     }
     if (!pressed) {
         if (drag_ && drag_->button == button) {
+            if (const auto last = std::exchange(drag_->pending, std::nullopt)) {
+                apply_drag_motion(last->x, last->y);
+            }
+        }
+        if (drag_ && drag_->button == button) {
             const auto drag = *drag_;
             drag_.reset();
             if (drag.started && !drag.resize) {
@@ -646,6 +832,32 @@ void Desktop::motion(double x, double y) noexcept try {
     if (!drag_) {
         return;
     }
+    if (frame_paced_resize_ && drag_->resize) {
+        if (auto *output = window_output_handle(drag_->window)) {
+            drag_->pending = PointerPosition{x, y};
+            scene_.schedule_frame(output);
+            return;
+        }
+    }
+    apply_drag_motion(x, y);
+} catch (...) {
+    failed_ = true;
+}
+
+void Desktop::before_output_frame(void *self, wlr_output *output) noexcept {
+    auto &desktop = *static_cast<Desktop *>(self);
+    try {
+        if (desktop.drag_ && desktop.drag_->pending &&
+            desktop.window_output_handle(desktop.drag_->window) == output) {
+            const auto latest = *std::exchange(desktop.drag_->pending, std::nullopt);
+            desktop.apply_drag_motion(latest.x, latest.y);
+        }
+    } catch (...) {
+        desktop.failed_ = true;
+    }
+}
+
+void Desktop::apply_drag_motion(double x, double y) {
     const auto dx = motion_delta(x - drag_->x);
     const auto dy = motion_delta(y - drag_->y);
     const WindowId id = drag_->window;
@@ -683,8 +895,6 @@ void Desktop::motion(double x, double y) noexcept try {
             project();
         }
     }
-} catch (...) {
-    failed_ = true;
 }
 
 } // namespace seaside

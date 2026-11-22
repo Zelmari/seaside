@@ -134,6 +134,8 @@ their own pointer shapes. Ordinary tiled and floating windows use
 navigation brings a selected tile in front of a maximized window that covers
 it and preserves that window's maximized state. To move or resize a floating
 window, drag its title bar or resize handles where the app provides them.
+During a resize, Seaside can briefly scale the app's last drawn frame to keep
+the window aligned with the pointer while the app redraws.
 
 ### Monitors and layouts
 
