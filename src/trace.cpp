@@ -89,10 +89,8 @@ IpcResult write_trace(const std::filesystem::path &state, const SampleBuffer &sa
     if (auto error = storage.check(StorageStep::open_directory)) {
         return export_error("could not open the private state directory", error);
     }
-    std::error_code directory_error;
-    std::filesystem::create_directories(state, directory_error);
-    if (directory_error) {
-        return export_error("could not create the state directory", directory_error);
+    if (auto prepared = prepare_storage_directory(state, storage); !prepared) {
+        return export_error("could not prepare the state directory", prepared.error().error);
     }
     const Fd parent(open(state.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
     struct stat state_status{};

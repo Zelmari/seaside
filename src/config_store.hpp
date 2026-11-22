@@ -52,6 +52,11 @@ class StorageIo {
     virtual ssize_t write(int fd, std::span<const char> bytes) noexcept;
 };
 
+// Create missing state directories with private permissions and persist their
+// directory entries. Existing directories retain their original permissions.
+std::expected<void, StorageError> prepare_storage_directory(const std::filesystem::path &directory,
+                                                            StorageIo &io);
+
 class ConfigStore {
   public:
     explicit ConfigStore(std::shared_ptr<StorageIo> io = std::make_shared<StorageIo>());

@@ -211,6 +211,7 @@ TEST_F(TraceFixture, RefusesSymlinkAndNonPrivateTraceDirectory) {
     const auto target = directory.path() / "other";
     ASSERT_TRUE(std::filesystem::create_directories(target));
     ASSERT_TRUE(std::filesystem::create_directories(state));
+    ASSERT_EQ(chmod(state.c_str(), 0700), 0);
     const auto traces = state / "traces";
     std::filesystem::create_directory_symlink(target, traces);
     ASSERT_TRUE(trace->start());
@@ -228,6 +229,45 @@ TEST_F(TraceFixture, RefusesSymlinkAndNonPrivateTraceDirectory) {
     ASSERT_NO_FATAL_FAILURE(wait_export());
     ASSERT_FALSE(*result);
     EXPECT_TRUE(std::filesystem::is_empty(traces));
+}
+
+TEST_F(TraceFixture, FirstExportCreatesPrivateStateUnderPermissiveUmasks) {
+    struct RestoreUmask {
+        mode_t previous;
+        ~RestoreUmask() { umask(previous); }
+    } restore{umask(0)};
+    ASSERT_TRUE(trace->start());
+    ASSERT_TRUE(trace->stop());
+    for (const mode_t mask : {0000, 0002, 0022}) {
+        SCOPED_TRACE(mask);
+        umask(mask);
+        ASSERT_FALSE(export_start());
+        ASSERT_NO_FATAL_FAILURE(wait_export());
+        ASSERT_TRUE(*result) << result->error().message;
+        for (const auto &path : {state.parent_path(), state, state / "traces"}) {
+            struct stat info{};
+            ASSERT_EQ(stat(path.c_str(), &info), 0);
+            EXPECT_EQ(info.st_mode & 07777, 0700);
+        }
+        struct stat file{};
+        ASSERT_EQ(stat((**result)["path"].get<std::string>().c_str(), &file), 0);
+        EXPECT_EQ(file.st_mode & 07777, 0600);
+        std::filesystem::remove_all(state.parent_path());
+    }
+}
+
+TEST_F(TraceFixture, RejectsAnExistingWritableStateDirectoryWithoutChangingIt) {
+    ASSERT_TRUE(std::filesystem::create_directories(state));
+    ASSERT_EQ(chmod(state.c_str(), 0775), 0);
+    ASSERT_TRUE(trace->start());
+    ASSERT_TRUE(trace->stop());
+    ASSERT_FALSE(export_start());
+    ASSERT_NO_FATAL_FAILURE(wait_export());
+    ASSERT_FALSE(*result);
+    struct stat info{};
+    ASSERT_EQ(stat(state.c_str(), &info), 0);
+    EXPECT_EQ(info.st_mode & 07777, 0775);
+    EXPECT_TRUE(std::filesystem::is_empty(state));
 }
 
 TEST_F(TraceFixture, SlowExportKeepsDispatchResponsiveAndUsesOriginalCompletedSamples) {

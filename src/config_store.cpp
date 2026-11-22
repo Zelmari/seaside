@@ -47,8 +47,10 @@ bool same_inode(const struct stat &a, const struct stat &b) {
     return a.st_dev == b.st_dev && a.st_ino == b.st_ino;
 }
 
-std::expected<void, StorageError> prepare_directory(const std::filesystem::path &directory,
-                                                    StorageIo &io) {
+} // namespace
+
+std::expected<void, StorageError> prepare_storage_directory(const std::filesystem::path &directory,
+                                                            StorageIo &io) {
     // fsync of the final parent only persists entries inside that directory.
     // Publish each newly created directory in its own parent before relying on it.
     std::vector<std::filesystem::path> missing;
@@ -68,11 +70,9 @@ std::expected<void, StorageError> prepare_directory(const std::filesystem::path 
         current = current.has_parent_path() ? current.parent_path() : std::filesystem::path(".");
     }
     for (auto it = missing.rbegin(); it != missing.rend(); ++it) {
-        std::error_code error;
-        const bool created = std::filesystem::create_directory(*it, error);
-        if (error)
-            return std::unexpected(failure(StorageStep::open_directory, *it, error));
-        if (created && ::chmod(it->c_str(), 0700) < 0)
+        const bool created = ::mkdir(it->c_str(), 0700) == 0;
+        if ((!created && errno != EEXIST) ||
+            (created && ::fchmodat(AT_FDCWD, it->c_str(), 0700, AT_SYMLINK_NOFOLLOW) < 0))
             return std::unexpected(failure(StorageStep::open_directory, *it));
         const auto parent = it->has_parent_path() ? it->parent_path() : std::filesystem::path(".");
         // A concurrent creator can win mkdir; synchronize the same directory
@@ -91,8 +91,6 @@ std::expected<void, StorageError> prepare_directory(const std::filesystem::path 
     return {};
 }
 std::atomic<std::uint64_t> next_temporary{1};
-} // namespace
-
 ssize_t StorageIo::read(int fd, std::span<char> bytes) noexcept {
     return ::read(fd, bytes.data(), bytes.size());
 }
@@ -185,7 +183,7 @@ ConfigStore::publish(const std::filesystem::path &path, std::string_view text, P
     const auto parent = path.has_parent_path() ? path.parent_path() : std::filesystem::path(".");
     if (auto error = io_->check(StorageStep::open_directory))
         return std::unexpected(failure(StorageStep::open_directory, path, error));
-    if (auto prepared = prepare_directory(parent, *io_); !prepared)
+    if (auto prepared = prepare_storage_directory(parent, *io_); !prepared)
         return std::unexpected(std::move(prepared.error()));
     Fd directory(::open(parent.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC));
     if (directory.get() < 0)
