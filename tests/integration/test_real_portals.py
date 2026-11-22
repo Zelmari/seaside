@@ -131,32 +131,44 @@ context.modules = [
                 wait_for(lambda: log_has("native", f"color {color} 264 176"), native,
                          description=f"native client commit {color}")
 
-            def start_damaged_stream(label, source, lifetime, colors):
-                child = start(label, [receiver, source, lifetime])
-                wait_for(lambda: log_has(label, "PipeWire stream state streaming"), child,
-                         description=f"the {source} PipeWire stream", timeout=6)
-                # A still desktop may only produce the initial Wayland frame.
-                # Supply real damage while the new PipeWire link starts.
-                for color in colors:
-                    paint(color)
-                return child
-
             def frame_present(label, size, color):
                 expected = f"frame {size} " + " ".join([color] * 5)
                 return log_has(label, expected)
 
-            monitor = start_damaged_stream("monitor", "monitor", "frame", ("119966", "7755bb"))
-            if monitor.wait(timeout=8) or not any(
-                    frame_present("monitor", "160 90", color)
-                    for color in ("2244cc", "119966", "7755bb")):
-                raise RuntimeError("The monitor receiver did not read a 160 by 90 marker frame")
+            def start_damaged_stream(label, lifetime, size, warmup_color):
+                child = start(label, [receiver, label, lifetime])
+                wait_for(lambda: log_has(label, "PipeWire stream state streaming"), child,
+                         description=f"the {label} PipeWire stream", timeout=6)
+                # A streaming state can precede the first buffer available to
+                # the consumer. Keep the static source producing real damage
+                # until the receiver has sampled the warmup image.
+                next_damage = 0
 
-            window = start_damaged_stream("window", "window", "closed", ("4422cc", "33bb55"))
+                def received():
+                    nonlocal next_damage
+                    if frame_present(label, size, warmup_color):
+                        return True
+                    now = time.monotonic()
+                    if now >= next_damage:
+                        send(native, f"{warmup_color}\n".encode("ascii"))
+                        next_damage = now + 0.1
+                    return False
+
+                wait_for(received, child, native, description=f"the first {label} marker frame",
+                         timeout=6)
+                return child
+
+            monitor = start_damaged_stream("monitor", "frame", "160 90", "2244cc")
+            if monitor.wait(timeout=8):
+                raise RuntimeError("The monitor receiver failed after reading its marker")
+
+            window = start_damaged_stream("window", "closed", "264 176", "4422cc")
 
             def expect_color(color):
                 wait_for(lambda: frame_present("window", "264 176", color), window, native,
                          description=f"selected-window frame {color}", timeout=6)
 
+            paint("33bb55")
             expect_color("33bb55")
             overlap = start("overlap", [native_client, "Overlapping window", "aa5533"],
                             handshake=True)
