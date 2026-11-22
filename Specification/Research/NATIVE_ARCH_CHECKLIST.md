@@ -4,7 +4,7 @@ Use this checklist when Seaside becomes the main desktop on the native Arch
 installation. Start with the first-login checks, then exercise the apps,
 devices, and workflows used day to day. Run each item once its implementation
 is available. Record results here as the native trial progresses.
-[Seaside design](../SEASIDE_SPEC.md) · [Part 7 handoff](../Parts/Part-07/HANDOFF.md) · [Part 8 handoff](../Parts/Part-08/HANDOFF.md) · [Performance investigations](PERFORMANCE.md)
+[Seaside design](../SEASIDE_SPEC.md) · [Part 7 handoff](../Parts/Part-07/HANDOFF.md) · [Part 8 handoff](../Parts/Part-08/HANDOFF.md) · [Part 9 handoff](../Parts/Part-09/HANDOFF.md) · [Performance investigations](PERFORMANCE.md)
 
 ## First login
 
@@ -97,6 +97,26 @@ python3 tests/hardware/part8_display.py 'fullscreen before sharing' --seconds 5
   a VT switch, modeset and resume, and on mixed-capability outputs. Observe
   direct scanout with and without the LUT. An unsupported monitor should stay
   available with its prior colors.
+
+## Part 9 checks on the Framework Desktop
+
+- [ ] With multiple physical monitors attached, let an unfocused monitor sleep
+  while a visible fullscreen client keeps its own monitor awake. Repeat with
+  an idle-inhibiting Wayland client. Move it between outputs and hide, unmap,
+  or close it, then check that the affected idle timer resumes. Wake each
+  monitor separately with its relevant keyboard or pointer input.
+- [ ] On AMD, verify visible display sleep, input wake, the restored mode and
+  hardware cursor, and continuity of focus and workspace assignment. Include
+  different refresh rates and scales, an active share when sleep is requested,
+  and live idle or display configuration edits while a monitor sleeps.
+- [ ] Suspend and resume with several clients open. Repeat with one display
+  asleep, across a VT switch, and after a connector or input device changes.
+  Check display power, cursor readback, pointer and keyboard focus, workspaces,
+  layer reservations and active capture behavior. Try a fresh share after
+  resume when the session services return.
+- [ ] Use the intended external panel or launcher on the actual multi-monitor
+  layout. Check work-area changes, keyboard and pointer focus, and panel
+  visibility on each monitor when a game enters and exits fullscreen.
 
 ## Main desktop use
 
