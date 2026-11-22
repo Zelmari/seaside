@@ -94,16 +94,17 @@ def load_runner():
 
 
 def run(args, revision, bundle, *, scenario="part5", captures=None, send_input=route,
-        settings=""):
+        settings="", scenario_source=None):
     runner = load_runner()
     if captures is None:
         captures = CAPTURES | {"dwindle.log", "scrolling.log"}
     runner.ARTIFACTS.update(captures)
     standard_worker = COUNCIL.with_name("guest_trial.py").read_text()
-    scenarios = Path(__file__).with_name(f"{scenario}_vm_guest.py").read_text()
+    if scenario_source is None:
+        scenario_source = Path(__file__).with_name(f"{scenario}_vm_guest.py").read_text()
     worker = ("standard = {'__name__': 'seaside_vm_guest'}\n"
               f"exec(compile({standard_worker!r}, 'guest_trial.py', 'exec'), standard)\n"
-              + settings + scenarios).encode()
+              + settings + scenario_source).encode()
     parent = runner.RunBridge
 
     class ScenarioBridge(parent):

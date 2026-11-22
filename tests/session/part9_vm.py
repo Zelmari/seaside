@@ -3,8 +3,9 @@
 
 import argparse
 from pathlib import Path
+import subprocess
 
-from part5_vm import revision_bundle, run
+from part5_vm import ROOT, revision_bundle, run
 
 
 ARTIFACTS = {
@@ -25,6 +26,11 @@ def send_input(runner, vm, message):
         raise RuntimeError(f"Unexpected Part 9 input request {key!r}")
 
 
+def guest_source(revision, filename):
+    return subprocess.check_output(["git", "show", f"{revision}:tests/session/{filename}"],
+                                   cwd=ROOT, text=True, timeout=5)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--console-ready", required=True, action="store_true",
@@ -39,18 +45,19 @@ def main():
     for path in (args.pkg_config_path, args.runtime_prefix):
         if path is not None and not path.is_absolute():
             parser.error("package and runtime paths must be absolute guest paths")
-    shared = Path(__file__).with_name("part8_vm_guest.py").read_text()
-    settings = (
-        f"part9_artifacts = {tuple(sorted(ARTIFACTS))!r}\n"
-        "helpers = {'__name__': 'seaside_guest_helpers', 'standard': standard, "
-        f"'part8_pkg_config_path': {str(args.pkg_config_path or '')!r}, "
-        f"'part8_runtime_prefix': {str(args.runtime_prefix or '')!r}, "
-        f"'part8_renderer': {args.renderer!r}}}\n"
-        f"exec(compile({shared!r}, 'part8_vm_guest.py', 'exec'), helpers)\n"
-    )
     with revision_bundle() as (revision, bundle):
+        shared = guest_source(revision, "part8_vm_guest.py")
+        settings = (
+            f"part9_artifacts = {tuple(sorted(ARTIFACTS))!r}\n"
+            "helpers = {'__name__': 'seaside_guest_helpers', 'standard': standard, "
+            f"'part8_pkg_config_path': {str(args.pkg_config_path or '')!r}, "
+            f"'part8_runtime_prefix': {str(args.runtime_prefix or '')!r}, "
+            f"'part8_renderer': {args.renderer!r}}}\n"
+            f"exec(compile({shared!r}, 'part8_vm_guest.py', 'exec'), helpers)\n"
+        )
         return run(args, revision, bundle, scenario="part9", captures=ARTIFACTS,
-                   send_input=send_input, settings=settings)
+                   send_input=send_input, settings=settings,
+                   scenario_source=guest_source(revision, "part9_vm_guest.py"))
 
 
 if __name__ == "__main__":
