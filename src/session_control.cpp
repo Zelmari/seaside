@@ -396,7 +396,6 @@ void SessionControl::publish(IpcServer &ipc) {
     for (const auto &[id, output] : outputs_.outputs()) {
         const auto &state = output.status.settings;
         const OutputState next{
-            .connector = output.connector,
             .geometry = {state.x, state.y, state.width, state.height},
             .refresh_millihz = state.refresh_millihz,
             .rotation = state.rotation,
@@ -405,12 +404,14 @@ void SessionControl::publish(IpcServer &ipc) {
             .enabled = output.enabled,
             .adaptive_sync = output.status.adaptive_sync,
         };
-        auto [previous, inserted] = published_outputs_.try_emplace(output.id, next);
-        if (inserted || previous->second != next) {
+        auto [previous, inserted] = published_outputs_.try_emplace(id);
+        auto &published = previous->second;
+        if (inserted || published.state != next || published.connector != output.connector) {
             ipc.event("output.changed", {{"output_id", output.id},
                                          {"connected", next.connected},
                                          {"enabled", next.enabled}});
-            previous->second = next;
+            published.state = next;
+            published.connector = output.connector;
         }
     }
     for (const auto &[id, workspace] : desktop.state().workspaces()) {

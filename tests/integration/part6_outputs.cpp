@@ -348,6 +348,22 @@ TEST_F(OutputTrial, ReportsNoUsableOutputsAndRecoversTheSameOutputAndWorkspace) 
     EXPECT_EQ(query("query.outputs")["outputs"].at(0), first);
     EXPECT_EQ(query("query.focus")["workspace_id"], workspace);
     EXPECT_GT(watermark, detached_watermark);
+
+    // Both hardware notifications can arrive between two IPC publications.
+    const auto before_rename = watermark;
+    detach(output, "monitor");
+    output = make_output();
+    ASSERT_TRUE(output);
+    const std::string connector = "DisplayPort-Remapped-Connector-0123456789";
+    ASSERT_NO_FATAL_FAILURE(attach(output.get(), connector, 0));
+    control.publish(**ipc_server);
+    const auto renamed = query("query.outputs")["outputs"].at(0);
+    EXPECT_EQ(renamed["id"], first["id"]);
+    EXPECT_EQ(renamed["connector"], connector);
+    EXPECT_EQ(watermark, before_rename + 1);
+    control.publish(**ipc_server);
+    EXPECT_EQ(query("query.outputs")["outputs"].at(0), renamed);
+    EXPECT_EQ(watermark, before_rename + 1);
 }
 
 TEST_F(OutputTrial, ReportsOnlyActiveConfigAndShortcutsAcrossReloads) {

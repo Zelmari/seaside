@@ -48,7 +48,6 @@ class SessionControl {
     };
 
     struct OutputState {
-        std::string connector;
         WindowRect geometry;
         int refresh_millihz;
         int rotation;
@@ -58,6 +57,10 @@ class SessionControl {
         bool adaptive_sync;
 
         bool operator==(const OutputState &) const = default;
+    };
+    struct PublishedOutput {
+        std::string connector;
+        OutputState state{};
     };
 
     IpcJson focus() const;
@@ -75,7 +78,7 @@ class SessionControl {
     const char *renderer_ = nullptr;
     std::map<WindowId, std::pair<WorkspaceId, bool>> published_windows_;
     std::map<WorkspaceId, WorkspaceState> published_workspaces_;
-    std::map<OutputId, OutputState> published_outputs_;
+    std::map<OutputId, PublishedOutput> published_outputs_;
     FocusState published_focus_;
 };
 
