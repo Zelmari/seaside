@@ -7,6 +7,7 @@
 #include <expected>
 #include <functional>
 #include <memory>
+#include <string_view>
 #include <sys/types.h>
 
 namespace seaside {
@@ -28,7 +29,7 @@ class PortalProbe final {
     static std::expected<std::unique_ptr<PortalProbe>, ServiceReport>
     start(SessionBus &bus, uid_t expected_uid, BindingCheck bound, Completion completion,
           std::chrono::milliseconds timeout, Completion runtime_fault = {},
-          Sources sources = Sources::monitor_and_window) noexcept;
+          Sources sources = Sources::monitor_and_window, std::string_view gtk_owner = {}) noexcept;
     ~PortalProbe() noexcept;
     PortalProbe(const PortalProbe &) = delete;
     PortalProbe &operator=(const PortalProbe &) = delete;

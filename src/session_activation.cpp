@@ -38,7 +38,7 @@ constexpr std::array services{
     Service{"wlr", "/usr/lib/xdg-desktop-portal-wlr", "org.freedesktop.impl.portal.desktop.wlr",
             StartupService::capture_backend},
     Service{"gtk", "/usr/lib/xdg-desktop-portal-gtk", "org.freedesktop.impl.portal.desktop.gtk",
-            StartupService::capture_backend},
+            StartupService::gtk_backend},
     Service{"frontend", "/usr/lib/xdg-desktop-portal", "org.freedesktop.portal.Desktop",
             StartupService::portal_frontend},
 };
@@ -95,6 +95,7 @@ struct PortalActivation::Impl final : std::enable_shared_from_this<Impl> {
         std::string name;
         std::string path;
         bool requested = false;
+        std::string owner;
     };
 
     SessionBus *bus;
@@ -257,6 +258,9 @@ struct PortalActivation::Impl final : std::enable_shared_from_this<Impl> {
                 return call_error(call.error());
             }
             pending = *call;
+            if (step == Step::pid) {
+                units[stage].owner = owner;
+            }
             if (step == Step::launch) {
                 units[stage].requested = true;
             }
@@ -641,6 +645,10 @@ PortalActivation::recover(SessionBus &bus, Completion completion,
         return std::unexpected(result);
     }
     return {};
+}
+
+std::string_view PortalActivation::gtk_owner() const noexcept {
+    return impl_->units[1].owner;
 }
 
 void PortalActivation::replace_bus(SessionBus &replacement) noexcept {

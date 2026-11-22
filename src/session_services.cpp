@@ -78,6 +78,8 @@ const char *startup_service_name(StartupService service) noexcept {
         return "pipewire";
     case StartupService::portal_frontend:
         return "portal-frontend";
+    case StartupService::gtk_backend:
+        return "gtk-backend";
     case StartupService::capture_backend:
         return "capture-backend";
     }

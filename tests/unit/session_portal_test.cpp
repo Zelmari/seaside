@@ -163,7 +163,7 @@ class PortalProbeTest : public testing::Test {
     }
 
     void start(std::chrono::milliseconds timeout = 2s, uid_t expected_uid = geteuid(),
-               bool monitor = false) {
+               bool monitor = false, std::string_view gtk_owner = {}) {
         ASSERT_TRUE(connect(client, false));
         PortalProbe::Completion fault;
         if (monitor) {
@@ -182,7 +182,7 @@ class PortalProbeTest : public testing::Test {
             [this](StartupService service, ServiceReport report) {
                 reports.emplace_back(service, report.failure);
             },
-            timeout, std::move(fault));
+            timeout, std::move(fault), PortalProbe::Sources::monitor_and_window, gtk_owner);
         ASSERT_TRUE(started);
         probe = std::move(*started);
     }
@@ -441,6 +441,22 @@ TEST_F(PortalProbeTest, ReportsPinnedOwnersDisappearingWithoutEndingLoopOrRestar
               (std::vector{Report{StartupService::capture_backend, ServiceFailure::disconnected},
                            Report{StartupService::portal_frontend, ServiceFailure::disconnected}}));
     EXPECT_TRUE(client->ready());
+}
+
+TEST_F(PortalProbeTest, ReportsLossOfTheVerifiedGtkOwner) {
+    ASSERT_TRUE(setup_services());
+    std::unique_ptr<SessionBus> gtk;
+    ASSERT_TRUE(connect(gtk));
+    ASSERT_TRUE(claim(*gtk, "org.freedesktop.impl.portal.desktop.gtk"));
+    const char *owner = nullptr;
+    ASSERT_GE(sd_bus_get_unique_name(gtk->native_handle(), &owner), 0);
+    start(2s, geteuid(), true, owner);
+    ASSERT_TRUE(pump_until([&] { return !reports.empty(); }));
+    ASSERT_EQ(reports.size(), 2U);
+    gtk.reset();
+    ASSERT_TRUE(pump_until([&] { return !runtime_reports.empty(); }));
+    EXPECT_EQ(runtime_reports,
+              (std::vector{Report{StartupService::gtk_backend, ServiceFailure::disconnected}}));
 }
 
 TEST_F(PortalProbeTest, ReportsBothPinnedOwnersLostWhenLoginBusDisconnects) {

@@ -882,6 +882,7 @@ class Session {
             mark_integration_recovered(StartupService::systemd_user);
             mark_integration_recovered(StartupService::portal_frontend);
             mark_integration_recovered(StartupService::capture_backend);
+            mark_integration_recovered(StartupService::gtk_backend);
             portal_retry_ = {};
         }
     }
@@ -899,7 +900,8 @@ class Session {
             complete, probe_timeout,
             [this](StartupService service, ServiceReport detail) {
                 report_external_fault(service, detail);
-            });
+            },
+            seaside::PortalProbe::Sources::monitor_and_window, activation_->gtk_owner());
         if (!portal) {
             complete(StartupService::portal_frontend, portal.error());
         } else {
@@ -1003,6 +1005,7 @@ class Session {
             report_external_fault(StartupService::systemd_user, disconnected);
             report_external_fault(StartupService::portal_frontend, disconnected);
             report_external_fault(StartupService::capture_backend, disconnected);
+            report_external_fault(StartupService::gtk_backend, disconnected);
         }
         const auto now = Clock::now();
         if (portal_retry_.begin(now)) {
@@ -1174,7 +1177,7 @@ class Session {
     std::unique_ptr<seaside::PipeWireProbe> pipewire_;
     std::unique_ptr<seaside::PortalActivation> activation_;
     std::unique_ptr<seaside::PortalProbe> portal_;
-    std::array<std::optional<ServiceReport>, 4> integrations_{};
+    std::array<std::optional<ServiceReport>, 5> integrations_{};
     RecoveryRetry portal_retry_, pipewire_retry_;
     std::optional<Clock::time_point> appearance_deadline_;
     Outcome outcome_;

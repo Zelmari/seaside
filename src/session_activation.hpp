@@ -25,6 +25,8 @@ class PortalActivation final {
     PortalActivation(const PortalActivation &) = delete;
     PortalActivation &operator=(const PortalActivation &) = delete;
 
+    std::string_view gtk_owner() const noexcept;
+
     // Recheck ownership and asynchronously restart missing owned units.
     // A replacement bus must outlive this object even if admission fails.
     std::expected<void, ServiceReport> recover(SessionBus &bus, Completion completion,

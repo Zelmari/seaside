@@ -12,7 +12,7 @@ struct wl_event_loop;
 
 namespace seaside {
 
-enum class StartupService { systemd_user, pipewire, portal_frontend, capture_backend };
+enum class StartupService { systemd_user, pipewire, portal_frontend, capture_backend, gtk_backend };
 enum class ServiceFailure {
     none,
     missing,

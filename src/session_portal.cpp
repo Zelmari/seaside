@@ -52,9 +52,13 @@ enum class Step {
     close,
     frontend_owner,
     backend_owner,
+    gtk_owner,
 };
 
 StartupService service_for(Step step) noexcept {
+    if (step == Step::gtk_owner) {
+        return StartupService::gtk_backend;
+    }
     return step == Step::frontend_cast || step == Step::frontend_shot || step == Step::create ||
                    step == Step::frontend_owner
                ? StartupService::portal_frontend
@@ -170,6 +174,7 @@ struct PortalProbe::Impl final : std::enable_shared_from_this<Impl> {
     struct Watch {
         Impl *probe;
         StartupService service;
+        Step owner_check;
         const char *name;
         const std::string &owner;
         sd_bus_slot *slot = nullptr;
@@ -197,9 +202,13 @@ struct PortalProbe::Impl final : std::enable_shared_from_this<Impl> {
     wl_event_source *timer = nullptr;
     sd_bus_slot *response_filter = nullptr;
     std::string frontend_owner, backend_owner, request_path, session_path, token;
-    std::array<Watch, 2> watches{{
-        {this, StartupService::portal_frontend, frontend_name, frontend_owner},
-        {this, StartupService::capture_backend, backend_name, backend_owner},
+    std::string gtk_owner;
+    std::array<Watch, 3> watches{{
+        {this, StartupService::portal_frontend, Step::frontend_owner, frontend_name,
+         frontend_owner},
+        {this, StartupService::capture_backend, Step::backend_owner, backend_name, backend_owner},
+        {this, StartupService::gtk_backend, Step::gtk_owner,
+         "org.freedesktop.impl.portal.desktop.gtk", gtk_owner},
     }};
     pid_t backend_pid = 0;
     std::optional<ServiceReport> response;
@@ -236,6 +245,7 @@ struct PortalProbe::Impl final : std::enable_shared_from_this<Impl> {
             break;
         case Step::frontend_owner:
         case Step::backend_owner:
+        case Step::gtk_owner:
             result = sd_bus_message_new_method_call(connection, &raw, bus_name, bus_path, bus_name,
                                                     "GetNameOwner");
             break;
@@ -284,8 +294,10 @@ struct PortalProbe::Impl final : std::enable_shared_from_this<Impl> {
                 break;
             case Step::frontend_owner:
             case Step::backend_owner:
+            case Step::gtk_owner:
                 result = sd_bus_message_append(
-                    raw, "s", next == Step::frontend_owner ? frontend_name : backend_name);
+                    raw, "s",
+                    watches[static_cast<int>(next) - static_cast<int>(Step::frontend_owner)].name);
                 break;
             case Step::create:
                 result = sd_bus_message_open_container(raw, SD_BUS_TYPE_ARRAY, "{sv}");
@@ -515,6 +527,9 @@ struct PortalProbe::Impl final : std::enable_shared_from_this<Impl> {
             return;
         }
         for (auto &watch : watches) {
+            if (watch.owner.empty()) {
+                continue;
+            }
             const auto rule =
                 std::string("type='signal',sender='org.freedesktop.DBus',"
                             "interface='org.freedesktop.DBus',path='/org/freedesktop/DBus',"
@@ -539,7 +554,7 @@ struct PortalProbe::Impl final : std::enable_shared_from_this<Impl> {
         if (self.monitoring && matches_sender(message, local) &&
             sd_bus_message_is_signal(message, local, "Disconnected") > 0) {
             for (auto &watch : self.watches) {
-                watch.lost = true;
+                watch.lost = !watch.owner.empty();
             }
             self.schedule_faults();
             return 0;
@@ -744,25 +759,32 @@ struct PortalProbe::Impl final : std::enable_shared_from_this<Impl> {
             }
             break;
         case Step::frontend_owner:
-        case Step::backend_owner: {
+        case Step::backend_owner:
+        case Step::gtk_owner: {
             const char *owner = nullptr;
             if (!matches_sender(message, bus_name) ||
                 sd_bus_message_has_signature(message, "s") <= 0 ||
                 sd_bus_message_read(message, "s", &owner) <= 0) {
                 break;
             }
-            const bool frontend = step == Step::frontend_owner;
-            const auto &watch = watches[frontend ? 0 : 1];
+            const auto &watch =
+                watches[static_cast<int>(step) - static_cast<int>(Step::frontend_owner)];
             if (!watch.installed) {
                 finish({ServiceFailure::internal_error, -EIO});
             } else if (watch.lost || watch.owner != owner) {
                 finish({ServiceFailure::disconnected, -ENOTCONN});
-            } else if (frontend) {
+            } else if (step == Step::frontend_owner) {
                 advance(Step::backend_owner);
-            } else if (watches[0].lost) {
-                step = Step::frontend_owner;
-                finish({ServiceFailure::disconnected, -ENOTCONN});
+            } else if (step == Step::backend_owner && !gtk_owner.empty()) {
+                advance(Step::gtk_owner);
             } else {
+                for (const auto &checked : watches) {
+                    if (checked.lost) {
+                        step = checked.owner_check;
+                        finish({ServiceFailure::disconnected, -ENOTCONN});
+                        return;
+                    }
+                }
                 monitoring = true;
                 finish({});
             }
@@ -788,8 +810,8 @@ PortalProbe::PortalProbe(std::shared_ptr<Impl> impl) noexcept : impl_(std::move(
 
 std::expected<std::unique_ptr<PortalProbe>, ServiceReport>
 PortalProbe::start(SessionBus &bus, uid_t expected_uid, BindingCheck bound, Completion completion,
-                   std::chrono::milliseconds timeout, Completion runtime_fault,
-                   Sources sources) noexcept {
+                   std::chrono::milliseconds timeout, Completion runtime_fault, Sources sources,
+                   std::string_view gtk_owner) noexcept {
     if (!bound || !completion || expected_uid == static_cast<uid_t>(-1) || timeout <= 0ms ||
         timeout > 60s) {
         return std::unexpected(ServiceReport{ServiceFailure::internal_error, -EINVAL});
@@ -798,6 +820,7 @@ PortalProbe::start(SessionBus &bus, uid_t expected_uid, BindingCheck bound, Comp
         auto impl =
             std::make_shared<Impl>(bus, expected_uid, std::move(bound), std::move(completion),
                                    Clock::now() + timeout, std::move(runtime_fault), sources);
+        impl->gtk_owner = gtk_owner;
         auto probe = std::unique_ptr<PortalProbe>(new PortalProbe(impl));
         const auto result = impl->request(Step::frontend_cast);
         if (result.failure != ServiceFailure::none) {
