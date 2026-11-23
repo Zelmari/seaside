@@ -38,3 +38,4 @@ still needs verification.
 | 8 | Display and GPU behavior | [Plan](Parts/Part-08/PLAN.md) | [Handoff](Parts/Part-08/HANDOFF.md) |
 | 9 | Idle, layer-shell, diagnostics, and recovery | [Plan](Parts/Part-09/PLAN.md) | [Handoff](Parts/Part-09/HANDOFF.md) |
 | 10 | Packaging and release qualification | [Plan](Parts/Part-10/PLAN.md) | [Handoff](Parts/Part-10/HANDOFF.md) |
+| 11 | Desktop behavior and session preferences | [Plan](Parts/Part-11/PLAN.md) | |
