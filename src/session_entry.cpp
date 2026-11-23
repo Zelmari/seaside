@@ -411,6 +411,10 @@ class Session {
             outcome_.cleanup_failed = !activation_->stop();
             activation_.reset();
         }
+        // Disconnect Wayland clients while the seat and surface owners still exist.
+        // Destroying the seat first would send data-control device events to
+        // clients whose session is already ending.
+        wl_display_destroy_clients(server_.display());
         seaside_tty_drm_set_output_callbacks(drm_, nullptr, nullptr);
         desktop_.set_input(nullptr);
         commands_->reap();
