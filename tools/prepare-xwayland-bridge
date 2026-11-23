@@ -1,0 +1,147 @@
+#!/usr/bin/env python3
+"""Prepare the private X11 bridge from the pinned upstream release and Seaside backport."""
+
+import argparse
+import fcntl
+import hashlib
+import os
+from pathlib import Path
+import platform
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+import urllib.request
+
+
+VERSION = "0.8.3"
+REVISION = "b83eab900644e4c7c77982ce3d44cb490f0c5e1d"
+URL = f"https://codeload.github.com/Supreeeme/xwayland-satellite/tar.gz/{REVISION}"
+SHA256 = "45f06d0c7017d793fa20c85a6fa7e8b26ad3c681c579d455f697faddf3c57bdf"
+PATCH = Path(__file__).resolve().parents[1] / "packaging/xwayland-bridge/data-control.patch"
+BINARY = "seaside-xwayland-satellite"
+
+
+def digest(path):
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def run(command, **kwargs):
+    subprocess.run(command, check=True, stdout=sys.stderr, **kwargs)
+
+
+def prepare(directory, archive, environment):
+    source = directory / "source"
+    with tempfile.TemporaryDirectory(dir=directory) as temporary:
+        stage = Path(temporary)
+        tarball = stage / "upstream.tar.gz"
+        if archive is not None:
+            shutil.copyfile(archive, tarball)
+        elif not source.exists():
+            with urllib.request.urlopen(URL, timeout=60) as response, tarball.open("wb") as output:
+                shutil.copyfileobj(response, output)
+        if tarball.exists() and digest(tarball) != SHA256:
+            raise ValueError(f"upstream archive SHA-256 mismatch (expected {SHA256})")
+
+        checkout = source
+        if not source.exists():
+            with tarfile.open(tarball, "r:gz") as upstream:
+                upstream.extractall(stage, filter="data")
+            checkout = stage / f"xwayland-satellite-{REVISION}"
+            run(["patch", "--batch", "--fuzz=0", "-p1", "--input", PATCH], cwd=checkout)
+
+        # Use the same work directory during makepkg prepare() and build().
+        run(["cargo", "fetch", "--locked"], cwd=checkout, env=environment)
+        if checkout != source:
+            checkout.rename(source)
+
+
+def matches_version(binary, version, environment=None):
+    if not binary.is_file() or not os.access(binary, os.X_OK):
+        return False
+    try:
+        result = subprocess.run([binary, "-version"], env=environment, stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0 and result.stdout.strip() == version.encode()
+
+
+def build(directory, destination, environment, version):
+    source = directory / "source"
+    if not source.is_dir():
+        raise ValueError(f"run --prepare --work-dir {directory.parent} before --build")
+    run(["cargo", "build", "--frozen", "--release", "--features", "systemd",
+         "--bin", "xwayland-satellite"], cwd=source, env=environment)
+    binary = directory / "target/release/xwayland-satellite"
+    if not matches_version(binary, version, environment):
+        raise ValueError(f"built bridge could not report the expected version {version!r}")
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=destination.parent, delete=False) as temporary:
+        staged = Path(temporary.name)
+    try:
+        shutil.copyfile(binary, staged)
+        staged.chmod(0o755)
+        staged.replace(destination)
+    finally:
+        staged.unlink(missing_ok=True)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--locate", action="store_true",
+                      help="print the cached executable path, without preparing or building")
+    mode.add_argument("--prepare", action="store_true",
+                      help="verify and patch the source, then fetch locked Cargo dependencies")
+    mode.add_argument("--build", action="store_true", help="build the prepared source offline")
+    parser.add_argument("--archive", type=Path, help="use a local copy of the pinned release archive")
+    parser.add_argument("--work-dir", type=Path, help="directory for the source, crate cache and builds")
+    parser.add_argument("--output", type=Path, help="atomically install the --build result at this path")
+    args = parser.parse_args()
+    if args.archive and (args.locate or args.build):
+        parser.error("--archive applies only to preparation")
+    if args.output and not args.build:
+        parser.error("--output requires --build")
+
+    cache = Path(os.environ.get("XDG_CACHE_HOME", ""))
+    if not cache.is_absolute():
+        cache = Path.home() / ".cache"
+    work = (args.work_dir or cache / "seaside/xwayland-bridge").resolve()
+    patch_hash = digest(PATCH)[:12]
+    version = f"{VERSION}+seaside.{patch_hash}"
+    directory = work / f"{VERSION}-{patch_hash}-{platform.machine()}"
+    binary = directory / BINARY
+    if args.locate:
+        if not matches_version(binary, version):
+            return 1
+        print(binary)
+        return 0
+
+    directory.mkdir(parents=True, exist_ok=True)
+    with (directory / "build.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        environment = dict(os.environ, CARGO_HOME=str(work / "cargo"),
+                           CARGO_TARGET_DIR=str(directory / "target"), VERGEN_GIT_DESCRIBE=version)
+        if args.prepare:
+            prepare(directory, args.archive, environment)
+        elif args.build:
+            output = args.output.absolute() if args.output else binary
+            build(directory, output, environment, version)
+            print(output)
+        else:
+            if args.archive or not matches_version(binary, version):
+                prepare(directory, args.archive, environment)
+                build(directory, binary, environment, version)
+            print(binary)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except (OSError, ValueError, tarfile.TarError, subprocess.CalledProcessError) as error:
+        sys.exit(f"prepare-xwayland-bridge: {error}")
