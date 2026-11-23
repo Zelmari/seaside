@@ -60,6 +60,7 @@ struct Config {
     } wallpaper;
     struct Window {
         bool tiling = true;
+        bool titlebars = true;
         Layout layout = Layout::dwindle;
         std::int32_t gaps_outer = 10;
         std::int32_t gaps_inner = 5;

@@ -245,6 +245,10 @@ void Scene::set_linux_dmabuf(wlr_linux_dmabuf_v1 *dmabuf) noexcept {
     seaside_scene_set_linux_dmabuf(bridge_, dmabuf);
 }
 
+void Scene::set_titlebars(bool visible) noexcept {
+    seaside_scene_set_titlebars(bridge_, visible);
+}
+
 void Scene::set_render_policy(bool direct_scanout, bool allow_tearing, bool night_light,
                               int temperature_kelvin) noexcept {
     seaside_scene_set_render_policy(bridge_, direct_scanout, allow_tearing, night_light,

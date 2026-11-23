@@ -87,7 +87,8 @@ idle_inhibit_code = custom_target(
 )
 display_protocols = {}
 foreach protocol : ['stable/presentation-time/presentation-time', 'staging/fractional-scale/fractional-scale-v1',
-                    'staging/tearing-control/tearing-control-v1', 'stable/viewporter/viewporter']
+                    'staging/tearing-control/tearing-control-v1', 'stable/viewporter/viewporter',
+                    'unstable/xdg-decoration/xdg-decoration-unstable-v1']
   name = protocol.split('/')[-1]
   xml = wayland_protocols.get_variable(pkgconfig: 'pkgdatadir') / (protocol + '.xml')
   header = custom_target(
@@ -691,13 +692,17 @@ part4_fixture = executable(
   'seaside-part4-fixture',
   ['tests/integration/part4.cpp', 'tests/integration/part3_bridge.c',
    xdg_shell_client_header, xdg_shell_private_code, activation_client_header, activation_private_code,
-   layer_client, layer_client_code],
+   layer_client, layer_client_code, display_protocols['xdg-decoration-unstable-v1']],
   include_directories: include_directories('src', 'tests/integration', 'tests/unit'),
   dependencies: [wlroots, wayland_server, wayland_client, pixman, libdrm, xkbcommon, threads, gtest],
   link_with: [desktop_foundation, core, tty_foundation, config_foundation], install: false,
 )
 test('part4-headless-desktop', part4_fixture, suite: ['integration', 'part4'], timeout: 30,
   env: {'SEASIDE_TEST_PART': '4', 'SEASIDE_REQUIREMENTS': '2.2,4,5,12.2b'},
+)
+test('part4-application-titlebars', part4_fixture, args: ['titlebars'],
+  suite: ['integration', 'part4'], timeout: 20,
+  env: {'SEASIDE_TEST_PART': '4', 'SEASIDE_REQUIREMENTS': '4,8.1,12.2b'},
 )
 test('part5-headless-dwindle', part4_fixture, args: ['dwindle'], suite: ['integration', 'part5'],
   timeout: 30, env: {'SEASIDE_TEST_PART': '5', 'SEASIDE_REQUIREMENTS': '4.1,4.2,4.5,6.2,12.2b'},

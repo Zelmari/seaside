@@ -27,6 +27,7 @@ TEST_F(ConfigTest, CompiledDefaultsMatchApprovedValues) {
     EXPECT_EQ(value.window.gaps_outer, 10);
     EXPECT_EQ(value.window.gaps_inner, 5);
     EXPECT_EQ(value.window.border_width, 2);
+    EXPECT_TRUE(value.window.titlebars);
     EXPECT_EQ(value.workspaces.mode, seaside::WorkspaceMode::global);
     EXPECT_FALSE(value.monitors.primary);
     EXPECT_FALSE(value.monitors.defaults.resolution);
@@ -98,6 +99,7 @@ commands=['foot','echo hello']
 path='/tmp/壁紙.webp'
 [window]
 tiling=false
+titlebars=false
 layout='scrolling'
 gaps_outer=21
 gaps_inner=22
@@ -137,6 +139,7 @@ temperature_kelvin=6000
     EXPECT_EQ(c.autostart.commands, (std::vector<std::string>{"foot", "echo hello"}));
     EXPECT_EQ(c.wallpaper.path, "/tmp/壁紙.webp");
     EXPECT_FALSE(c.window.tiling);
+    EXPECT_FALSE(c.window.titlebars);
     EXPECT_EQ(c.window.layout, seaside::Layout::scrolling);
     EXPECT_EQ(c.window.gaps_outer, 21);
     EXPECT_EQ(c.window.gaps_inner, 22);
@@ -233,6 +236,7 @@ TEST_F(ConfigTest, WrongTypesUnknownFieldsAndInvalidEnumsAreRejected) {
         "[wallpaper]\npath='relative.png'",
         "[wallpaper]\nfit='contain'",
         "[window]\ntiling=1",
+        "[window]\ntitlebars='false'",
         "[window]\ngaps_outer=true",
         "[window]\ngaps_inner=1.0",
         "[window]\nborder_width='2'",

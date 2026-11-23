@@ -23,6 +23,8 @@ layout = "dwindle"
 gaps_outer = 10
 gaps_inner = 5
 border_width = 2
+# false hides title bars in apps that support Wayland decoration negotiation.
+titlebars = true
 
 [workspaces]
 # "global" (default) or "per-monitor". THIS KEY NEEDS A RESTART.

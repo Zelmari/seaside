@@ -24,6 +24,7 @@
 #include <wlr/types/wlr_scene.h>
 #include <wlr/types/wlr_tearing_control_v1.h>
 #include <wlr/types/wlr_xdg_activation_v1.h>
+#include <wlr/types/wlr_xdg_decoration_v1.h>
 #include <wlr/types/wlr_xdg_shell.h>
 #include <wlr/util/edges.h>
 #include <wlr/util/transform.h>
@@ -36,6 +37,7 @@ struct seaside_scene_bridge {
     struct wlr_buffer *wallpaper;
     struct wlr_xdg_shell *shell;
     struct wlr_xdg_activation_v1 *activation;
+    struct wl_listener new_decoration;
     struct wlr_tearing_control_manager_v1 *tearing;
     struct seaside_window_capture *capture;
     struct seaside_layer_scene *layers;
@@ -59,6 +61,7 @@ struct seaside_scene_bridge {
     seaside_scene_focus_fn focus;
     void *focus_data;
     bool attached;
+    bool titlebars;
     bool direct_scanout, allow_tearing, night_light;
     int temperature_kelvin;
     seaside_scene_frame_fn frame_observer;
@@ -75,6 +78,8 @@ struct window_projection {
 struct scene_view {
     struct seaside_scene_bridge *owner;
     struct wlr_xdg_toplevel *toplevel;
+    struct wlr_xdg_toplevel_decoration_v1 *decoration;
+    struct wl_listener request_decoration, decoration_destroy;
     struct seaside_window_source *capture;
     struct wlr_scene_tree *tree;
     struct wlr_scene_tree *xdg_tree, *popup_tree;
@@ -783,9 +788,63 @@ static void view_unmap(struct wl_listener *listener, void *data) {
     }
 }
 
+static void configure_decoration(struct scene_view *view) {
+    struct wlr_xdg_toplevel_decoration_v1 *decoration = view->decoration;
+    if (!decoration || !view->toplevel->base->initialized) {
+        return;
+    }
+    const enum wlr_xdg_toplevel_decoration_v1_mode mode =
+        view->owner->titlebars ? WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE
+                               : WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE;
+    // Wait for the previous mode to be acknowledged before reversing it. wlroots
+    // omits a mode from a configure if it matches the last acknowledged mode.
+    if (decoration->scheduled_mode != mode &&
+        (view->toplevel->base->initial_commit ||
+         decoration->scheduled_mode == WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_NONE ||
+         decoration->pending.mode == decoration->scheduled_mode)) {
+        wlr_xdg_toplevel_decoration_v1_set_mode(decoration, mode);
+    }
+}
+
+static void request_decoration(struct wl_listener *listener, void *data) {
+    (void)data;
+    struct scene_view *view = wl_container_of(listener, view, request_decoration);
+    configure_decoration(view);
+}
+
+static void detach_decoration(struct scene_view *view) {
+    if (view->decoration) {
+        wl_list_remove(&view->request_decoration.link);
+        wl_list_remove(&view->decoration_destroy.link);
+        view->decoration = NULL;
+    }
+}
+
+static void decoration_destroy(struct wl_listener *listener, void *data) {
+    (void)data;
+    struct scene_view *view = wl_container_of(listener, view, decoration_destroy);
+    detach_decoration(view);
+}
+
+static void new_decoration(struct wl_listener *listener, void *data) {
+    struct seaside_scene_bridge *scene = wl_container_of(listener, scene, new_decoration);
+    struct wlr_xdg_toplevel_decoration_v1 *decoration = data;
+    struct scene_view *view = toplevel_view(scene, decoration->toplevel);
+    if (!view) {
+        return;
+    }
+    view->decoration = decoration;
+    view->request_decoration.notify = request_decoration;
+    view->decoration_destroy.notify = decoration_destroy;
+    wl_signal_add(&decoration->events.request_mode, &view->request_decoration);
+    wl_signal_add(&decoration->events.destroy, &view->decoration_destroy);
+    configure_decoration(view);
+}
+
 static void view_commit(struct wl_listener *listener, void *data) {
     (void)data;
     struct scene_view *view = wl_container_of(listener, view, commit);
+    configure_decoration(view);
     if (view->toplevel->base->initial_commit) {
         uint32_t capabilities = view->id ? WLR_XDG_TOPLEVEL_WM_CAPABILITIES_MAXIMIZE |
                                                WLR_XDG_TOPLEVEL_WM_CAPABILITIES_FULLSCREEN
@@ -871,6 +930,7 @@ static void view_set_parent(struct wl_listener *listener, void *data) {
 }
 
 static void destroy_view(struct scene_view *view) {
+    detach_decoration(view);
     seaside_window_capture_unmap(view->capture);
     if (view->owner->focused_view == view) {
         end_focus(view->owner, false);
@@ -1507,6 +1567,7 @@ static void detach(struct seaside_scene_bridge *scene) {
     scene->focus_data = NULL;
     wl_list_remove(&scene->new_toplevel.link);
     wl_list_remove(&scene->new_popup.link);
+    wl_list_remove(&scene->new_decoration.link);
     wl_list_remove(&scene->shell_destroy.link);
     if (scene->activation) {
         wl_list_remove(&scene->request_activation.link);
@@ -1568,6 +1629,7 @@ struct seaside_scene_bridge *seaside_scene_create(struct wl_display *display) {
     }
     scene->display = display;
     scene->direct_scanout = true;
+    scene->titlebars = true;
     scene->temperature_kelvin = 4500;
     wl_list_init(&scene->views);
     wl_list_init(&scene->popups);
@@ -1593,9 +1655,11 @@ struct seaside_scene_bridge *seaside_scene_create(struct wl_display *display) {
         return NULL;
     }
     scene->activation = wlr_xdg_activation_v1_create(display);
+    struct wlr_xdg_decoration_manager_v1 *decoration_manager =
+        wlr_xdg_decoration_manager_v1_create(display);
     scene->tearing = wlr_tearing_control_manager_v1_create(display, 1);
     scene->layers = seaside_layer_scene_create(display, scene->windows, scene->drag_icons);
-    if (!scene->activation || !scene->tearing || !scene->layers) {
+    if (!scene->activation || !decoration_manager || !scene->tearing || !scene->layers) {
         seaside_layer_scene_destroy(scene->layers);
         wlr_scene_node_destroy(&scene->scene->tree.node);
         free(scene);
@@ -1604,11 +1668,13 @@ struct seaside_scene_bridge *seaside_scene_create(struct wl_display *display) {
     scene->views_by_id = g_hash_table_new(g_int64_hash, g_int64_equal);
     scene->new_toplevel.notify = new_toplevel;
     scene->new_popup.notify = new_popup;
+    scene->new_decoration.notify = new_decoration;
     scene->shell_destroy.notify = shell_destroy;
     scene->activation_destroy.notify = activation_destroy;
     scene->request_activation.notify = request_activation;
     wl_signal_add(&scene->shell->events.new_toplevel, &scene->new_toplevel);
     wl_signal_add(&scene->shell->events.new_popup, &scene->new_popup);
+    wl_signal_add(&decoration_manager->events.new_toplevel_decoration, &scene->new_decoration);
     wl_signal_add(&scene->shell->events.destroy, &scene->shell_destroy);
     wl_signal_add(&scene->activation->events.destroy, &scene->activation_destroy);
     wl_signal_add(&scene->activation->events.request_activate, &scene->request_activation);
@@ -1620,6 +1686,17 @@ void seaside_scene_set_linux_dmabuf(struct seaside_scene_bridge *scene,
                                     struct wlr_linux_dmabuf_v1 *dmabuf) {
     if (dmabuf) {
         wlr_scene_set_linux_dmabuf_v1(scene->scene, dmabuf);
+    }
+}
+
+void seaside_scene_set_titlebars(struct seaside_scene_bridge *scene, bool visible) {
+    if (!scene || !scene->attached || scene->titlebars == visible) {
+        return;
+    }
+    scene->titlebars = visible;
+    struct scene_view *view;
+    wl_list_for_each(view, &scene->views, link) {
+        configure_decoration(view);
     }
 }
 

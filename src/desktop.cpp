@@ -41,6 +41,7 @@ bool includes_serial(std::uint32_t committed, std::uint32_t requested) noexcept 
 Desktop::Desktop(Scene &scene, const Config &config)
     : scene_(scene), windows_(config), bindings_(config.keybinds),
       fullscreen_aspect_(config.render.fullscreen_aspect) {
+    scene_.set_titlebars(config.window.titlebars);
     scene_.set_window_handler(on_window, this);
     scene_.set_layer_handler(
         [](void *self) { return static_cast<Desktop *>(self)->focused_output_handle(); },
@@ -157,6 +158,7 @@ void Desktop::apply_config(const Config &config) noexcept try {
         bindings_.swap(bindings);
     }
     fullscreen_aspect_ = config.render.fullscreen_aspect;
+    scene_.set_titlebars(config.window.titlebars);
     windows_.apply_layout_config(config);
     project();
 } catch (...) {

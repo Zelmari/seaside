@@ -174,6 +174,12 @@ window, drag its title bar or resize handles where the app provides them.
 During a resize, Seaside can briefly scale the app's last drawn frame to keep
 the window aligned with the pointer while the app redraws.
 
+Set `titlebars = false` in the existing `[window]` table to hide app-drawn
+title bars in Foot and other Wayland apps that support decoration negotiation.
+The setting updates open windows when you save the file. Set it to `true`
+to restore app-drawn title bars. Seaside's focus border is controlled by
+`border_width`. Apps that draw a header as part of their content can keep it.
+
 ### Monitors and layouts
 
 Use `seasidectl outputs` to find the identity or connector selector reported

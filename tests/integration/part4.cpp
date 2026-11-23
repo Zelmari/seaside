@@ -6,6 +6,7 @@
 #include "tty_input.h"
 #include "wlroots_bridge.h"
 #include "xdg-activation-v1-client-protocol.h"
+#include "xdg-decoration-unstable-v1-client-protocol.h"
 #include "xdg-shell-client-protocol.h"
 
 // The generated C function names an argument namespace.
@@ -98,6 +99,9 @@ struct Client {
         if (activation) {
             xdg_activation_v1_destroy(activation);
         }
+        if (decorations) {
+            zxdg_decoration_manager_v1_destroy(decorations);
+        }
         if (shm) {
             wl_shm_destroy(shm);
         }
@@ -116,6 +120,10 @@ struct Client {
     }
 
     void destroy_window() {
+        if (decoration) {
+            zxdg_toplevel_decoration_v1_destroy(decoration);
+            decoration = nullptr;
+        }
         if (toplevel) {
             xdg_toplevel_destroy(toplevel);
             toplevel = nullptr;
@@ -138,6 +146,9 @@ struct Client {
     wl_shm *shm = nullptr;
     xdg_wm_base *shell = nullptr;
     xdg_activation_v1 *activation = nullptr;
+    zxdg_decoration_manager_v1 *decorations = nullptr;
+    zxdg_toplevel_decoration_v1 *decoration = nullptr;
+    std::uint32_t decoration_mode = 0;
     zwlr_layer_shell_v1 *layers = nullptr;
     wl_data_device_manager *data_devices = nullptr;
     wl_seat *seat = nullptr;
@@ -343,6 +354,9 @@ void global(void *data, wl_registry *registry, std::uint32_t name, const char *i
     } else if (std::strcmp(interface, xdg_activation_v1_interface.name) == 0) {
         client.activation = static_cast<xdg_activation_v1 *>(
             wl_registry_bind(registry, name, &xdg_activation_v1_interface, 1));
+    } else if (std::strcmp(interface, zxdg_decoration_manager_v1_interface.name) == 0) {
+        client.decorations = static_cast<zxdg_decoration_manager_v1 *>(
+            wl_registry_bind(registry, name, &zxdg_decoration_manager_v1_interface, 1));
     } else if (std::strcmp(interface, zwlr_layer_shell_v1_interface.name) == 0) {
         client.layers = static_cast<zwlr_layer_shell_v1 *>(wl_registry_bind(
             registry, name, &zwlr_layer_shell_v1_interface, std::min(version, 5u)));
@@ -500,12 +514,28 @@ class Connection {
         return complete;
     }
 
-    bool open(Client &client, int minimum_width = 0) {
+    bool open(Client &client, int minimum_width = 0, bool negotiate_decoration = false) {
         client.surface = wl_compositor_create_surface(client.compositor);
         client.xdg = xdg_wm_base_get_xdg_surface(client.shell, client.surface);
         xdg_surface_add_listener(client.xdg, &surface_listener, &client);
         client.toplevel = xdg_surface_get_toplevel(client.xdg);
         xdg_toplevel_add_listener(client.toplevel, &toplevel_listener, &client);
+        if (negotiate_decoration) {
+            if (!client.decorations) {
+                return false;
+            }
+            client.decoration = zxdg_decoration_manager_v1_get_toplevel_decoration(
+                client.decorations, client.toplevel);
+            static const zxdg_toplevel_decoration_v1_listener listener{
+                .configure =
+                    [](void *data, zxdg_toplevel_decoration_v1 *, std::uint32_t mode) {
+                        static_cast<Client *>(data)->decoration_mode = mode;
+                    },
+            };
+            zxdg_toplevel_decoration_v1_add_listener(client.decoration, &listener, &client);
+            zxdg_toplevel_decoration_v1_set_mode(client.decoration,
+                                                 ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
+        }
         if (minimum_width) {
             xdg_toplevel_set_min_size(client.toplevel, minimum_width, 0);
         }
@@ -666,6 +696,45 @@ bool run_fixture(const seaside::Config &config, bool (*scenario)(const Fixture &
     REQUIRE((*server)->start(backend, renderer));
     seaside::Desktop desktop(**scene, config);
     return scenario({display, **scene, desktop, backend, (*server)->allocator(), renderer});
+}
+
+bool run_titlebars(const Fixture &fixture) {
+    constexpr auto client_side = ZXDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE;
+    constexpr auto server_side = ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE;
+    Connection connection(fixture.display);
+    Client first;
+    REQUIRE(connection.connect(first) && connection.open(first, 0, true));
+    REQUIRE(first.decoration_mode == client_side);
+    REQUIRE(connection.attach(first, ordinary_width, ordinary_height));
+
+    auto config = seaside::default_config();
+    config.window.titlebars = false;
+    fixture.desktop.apply_config(config);
+    REQUIRE(connection.wait(first, [&] { return first.decoration_mode == server_side; }));
+
+    // Reverse the policy while the client still owes an acknowledgement.
+    config.window.titlebars = true;
+    fixture.desktop.apply_config(config);
+    REQUIRE(connection.attach(first, ordinary_width, ordinary_height));
+    REQUIRE(connection.wait(first, [&] { return first.decoration_mode == client_side; }));
+    REQUIRE(connection.attach(first, ordinary_width, ordinary_height));
+
+    config.window.titlebars = false;
+    fixture.desktop.apply_config(config);
+    Client second;
+    REQUIRE(connection.connect(second) && connection.open(second, 0, true));
+    REQUIRE(second.decoration_mode == server_side);
+    zxdg_toplevel_decoration_v1_set_mode(second.decoration, client_side);
+    REQUIRE(connection.attach(second, ordinary_width, ordinary_height));
+    REQUIRE(second.decoration_mode == server_side);
+    REQUIRE(connection.wait(first, [&] { return first.decoration_mode == server_side; }));
+    REQUIRE(connection.attach(first, ordinary_width, ordinary_height));
+
+    config.window.titlebars = true;
+    fixture.desktop.apply_config(config);
+    REQUIRE(connection.wait(first, [&] { return first.decoration_mode == client_side; }));
+    REQUIRE(connection.wait(second, [&] { return second.decoration_mode == client_side; }));
+    return !fixture.desktop.failed();
 }
 
 bool run_sparse_view_ids(const Fixture &fixture) {
@@ -2293,6 +2362,9 @@ int main(int argc, char **argv) {
                    : EXIT_FAILURE;
     }
     const std::string_view scenario = argv[1];
+    if (argc == 2 && scenario == "titlebars") {
+        return run_fixture(config, run_titlebars) ? EXIT_SUCCESS : EXIT_FAILURE;
+    }
     if (argc == 2 && scenario == "layer-shell") {
         config.window.gaps_outer = 0;
         config.window.gaps_inner = 0;

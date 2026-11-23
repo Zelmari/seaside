@@ -430,9 +430,11 @@ std::expected<Config, Diagnostic> parse_config(std::string_view text, std::strin
             }
         }
         if (auto *table = v.table(parsed, "window", "window")) {
-            v.keys(*table, {"tiling", "layout", "gaps_outer", "gaps_inner", "border_width"},
+            v.keys(*table,
+                   {"tiling", "titlebars", "layout", "gaps_outer", "gaps_inner", "border_width"},
                    "window");
             v.boolean(*table, "tiling", "window.tiling", config.window.tiling);
+            v.boolean(*table, "titlebars", "window.titlebars", config.window.titlebars);
             v.enumeration<Layout>(*table, "layout", "window.layout", config.window.layout,
                                   {{"dwindle", Layout::dwindle}, {"scrolling", Layout::scrolling}});
             v.integer(*table, "gaps_outer", "window.gaps_outer", config.window.gaps_outer, 0, 512);

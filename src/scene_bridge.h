@@ -140,6 +140,7 @@ extern "C" {
 
 void seaside_scene_set_linux_dmabuf(struct seaside_scene_bridge *scene,
                                     struct wlr_linux_dmabuf_v1 *dmabuf);
+void seaside_scene_set_titlebars(struct seaside_scene_bridge *scene, bool visible);
 void seaside_scene_set_render_policy(struct seaside_scene_bridge *scene, bool direct_scanout,
                                      bool allow_tearing, bool night_light, int temperature_kelvin);
 void seaside_scene_set_frame_observer(struct seaside_scene_bridge *scene,

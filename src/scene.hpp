@@ -30,6 +30,7 @@ class Scene final {
     bool place_output(wlr_output *output, int x, int y) noexcept;
     void remove_output(wlr_output *output) noexcept;
     void set_linux_dmabuf(wlr_linux_dmabuf_v1 *dmabuf) noexcept;
+    void set_titlebars(bool visible) noexcept;
     void set_render_policy(bool direct_scanout, bool allow_tearing, bool night_light,
                            int temperature_kelvin) noexcept;
     void set_frame_observer(seaside_scene_frame_fn callback, void *data) noexcept;
