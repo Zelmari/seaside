@@ -419,7 +419,7 @@ def run_fullscreen(session, state, output):
         session.wait(lambda: session.window(TITLE)["fullscreen"] and session.pixel(*center) == PIXEL and
                      session.pixel(*edge) == (0, 0, 0), "fullscreen content and black bars")
         require(session.grab(output, "preserve") == (width, height), "Preserve changed the capture dimensions")
-        session.edit('[render]\nfullscreen_aspect = "stretch"\nallow_tearing = true\n')
+        session.edit('[render]\nfullscreen_aspect = "stretch"\n')
         session.wait(lambda: session.pixel(*edge) == PIXEL and session.pixel(*center) == PIXEL,
                      "fullscreen stretched pixels")
         require(session.grab(output, "stretch") == (width, height), "Stretch changed the capture dimensions")

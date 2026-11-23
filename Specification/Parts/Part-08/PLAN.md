@@ -62,9 +62,9 @@ or resume returns the seat and outputs to the running session. [Seaside design](
   for actual mode, scanout, capability and frame counters. Keep unknown fields
   honest when the backend cannot establish a result.
 - Exercise VRR `off`, `fullscreen` and `always`, including fullscreen entry and
-  exit on one of two outputs. Check tearing defaults to off and requires the
-  setting, an eligible fullscreen client hint and backend support. Test either
-  setting independently, rejection of async presentation and synchronized
+  exit on one of two outputs. Check tearing defaults to allowed for eligible
+  fullscreen clients that request it on a supported backend. Test the
+  tearing opt-out, rejection of async presentation and synchronized
   fallback. With a mismatched client surface, sample bars versus stretch and
   verify output mode, pointer mapping, popup placement and window restoration.
   Check an output-sized client surface, fullscreen shortcuts and uncapped

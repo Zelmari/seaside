@@ -44,7 +44,7 @@ TEST_F(ConfigTest, CompiledDefaultsMatchApprovedValues) {
     EXPECT_EQ(value.idle.display_off_after_minutes, 15);
     EXPECT_TRUE(value.render.direct_scanout);
     EXPECT_EQ(value.render.adaptive_sync, seaside::AdaptiveSync::off);
-    EXPECT_FALSE(value.render.allow_tearing);
+    EXPECT_TRUE(value.render.allow_tearing);
     EXPECT_EQ(value.render.fullscreen_aspect, seaside::FullscreenAspect::preserve);
     EXPECT_FALSE(value.night_light.enabled);
     EXPECT_EQ(value.night_light.temperature_kelvin, 4500);
@@ -126,7 +126,7 @@ display_off_after_minutes=42
 [render]
 direct_scanout=false
 adaptive_sync='always'
-allow_tearing=true
+allow_tearing=false
 fullscreen_aspect='stretch'
 [night_light]
 enabled=true
@@ -161,7 +161,7 @@ temperature_kelvin=6000
     EXPECT_EQ(c.idle.display_off_after_minutes, 42);
     EXPECT_FALSE(c.render.direct_scanout);
     EXPECT_EQ(c.render.adaptive_sync, seaside::AdaptiveSync::always);
-    EXPECT_TRUE(c.render.allow_tearing);
+    EXPECT_FALSE(c.render.allow_tearing);
     EXPECT_EQ(c.render.fullscreen_aspect, seaside::FullscreenAspect::stretch);
     EXPECT_TRUE(c.night_light.enabled);
     EXPECT_EQ(c.night_light.temperature_kelvin, 6000);

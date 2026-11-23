@@ -88,8 +88,9 @@ display_off_after_minutes = 15
 direct_scanout = true
 # "off" (default), "fullscreen", "always".
 adaptive_sync = "off"
-# false (default) or true: allow client-requested tearing in fullscreen only.
-allow_tearing = false
+# true (default) allows client-requested tearing in fullscreen only.
+# false keeps presentation synchronized.
+allow_tearing = true
 # "preserve" (default) for aspect ratio / bars, or "stretch" to fill.
 fullscreen_aspect = "preserve"
 

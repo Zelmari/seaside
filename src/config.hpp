@@ -101,7 +101,7 @@ struct Config {
     struct Render {
         bool direct_scanout = true;
         AdaptiveSync adaptive_sync = AdaptiveSync::off;
-        bool allow_tearing = false;
+        bool allow_tearing = true;
         FullscreenAspect fullscreen_aspect = FullscreenAspect::preserve;
         bool operator==(const Render &) const = default;
     } render;
