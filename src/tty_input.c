@@ -52,6 +52,7 @@ struct seaside_tty_input {
     bool consumed[KEY_CNT];
     uint8_t modifiers;
     double sensitivity;
+    bool inverse_scroll;
     struct tty_device *gesture_device;
     uint32_t gesture_button;
     bool gesture_released;
@@ -96,6 +97,7 @@ struct tty_device {
     struct wl_listener frame;
     struct wlr_keyboard *keyboard;
     struct libinput_device *pointer_device;
+    bool invert_axis;
     bool consumed_buttons[KEY_CNT];
     bool suppressed_drag_buttons[KEY_CNT];
     bool drag_release_pending;
@@ -814,9 +816,18 @@ static void handle_pointer_axis(struct wl_listener *listener, void *data) {
     }
     if (input->seat && input->consumed_button_count == 0) {
         update_pointer_target(input, event->time_msec);
-        wlr_seat_pointer_notify_axis(input->seat, event->time_msec, event->orientation,
-                                     event->delta, event->delta_discrete, event->source,
-                                     event->relative_direction);
+        double delta = event->delta;
+        int32_t discrete = event->delta_discrete;
+        enum wl_pointer_axis_relative_direction direction = event->relative_direction;
+        if (device->invert_axis) {
+            delta = -delta;
+            discrete = discrete == INT32_MIN ? INT32_MAX : -discrete;
+            direction = direction == WL_POINTER_AXIS_RELATIVE_DIRECTION_INVERTED
+                            ? WL_POINTER_AXIS_RELATIVE_DIRECTION_IDENTICAL
+                            : WL_POINTER_AXIS_RELATIVE_DIRECTION_INVERTED;
+        }
+        wlr_seat_pointer_notify_axis(input->seat, event->time_msec, event->orientation, delta,
+                                     discrete, event->source, direction);
     }
 }
 
@@ -1081,6 +1092,27 @@ void seaside_tty_input_set_sensitivity(struct seaside_tty_input *input, double s
     }
 }
 
+static void configure_scroll(struct tty_device *device, bool inverse) {
+    struct libinput_device *pointer = device->pointer_device;
+    const bool configured = pointer && libinput_device_config_scroll_has_natural_scroll(pointer) &&
+                            libinput_device_config_scroll_set_natural_scroll_enabled(
+                                pointer, inverse) == LIBINPUT_CONFIG_STATUS_SUCCESS;
+    device->invert_axis = inverse && !configured;
+}
+
+void seaside_tty_input_set_inverse_scroll(struct seaside_tty_input *input, bool inverse) {
+    if (!input || input->inverse_scroll == inverse) {
+        return;
+    }
+    input->inverse_scroll = inverse;
+    struct tty_device *device;
+    wl_list_for_each(device, &input->devices, link) {
+        if (!device->keyboard) {
+            configure_scroll(device, inverse);
+        }
+    }
+}
+
 static void handle_new_input(struct wl_listener *listener, void *data) {
     struct seaside_tty_input *input = wl_container_of(listener, input, new_input);
     struct wlr_input_device *base = data;
@@ -1112,6 +1144,7 @@ static void handle_new_input(struct wl_listener *listener, void *data) {
             device->pointer_device = wlr_libinput_get_device_handle(base);
             configure_pointer(device->pointer_device, input->sensitivity);
         }
+        configure_scroll(device, input->inverse_scroll);
         device->event.notify = handle_relative_motion;
         device->absolute_motion.notify = handle_absolute_motion;
         device->button.notify = handle_pointer_button;

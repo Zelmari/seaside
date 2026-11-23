@@ -1,4 +1,5 @@
 #include "session_bus.hpp"
+#include "session_preferences.hpp"
 #include "session_systemd.hpp"
 #include "test_dbus_daemon.hpp"
 #include "test_directory.hpp"
@@ -8,6 +9,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
 #include <functional>
@@ -163,6 +165,281 @@ class SessionBusTest : public testing::Test {
         held.clear();
     }
 };
+
+TEST_F(SessionBusTest, SettingsPortalPublishesAndChangesAppearancePreference) {
+    ASSERT_TRUE(connect());
+    ASSERT_TRUE(start_service());
+    constexpr auto name = "org.freedesktop.impl.portal.desktop.seaside";
+    constexpr auto gtk_name = "org.freedesktop.impl.portal.desktop.gtk";
+    constexpr auto path = "/org/freedesktop/portal/desktop";
+    constexpr auto interface = "org.freedesktop.impl.portal.Settings";
+    constexpr auto appearance = "org.freedesktop.appearance";
+    auto gtk = SessionBus::connect(loop, address);
+    ASSERT_TRUE(gtk);
+    ASSERT_TRUE(pump_until([&] { return (*gtk)->ready(); }));
+    auto *gtk_bus = (*gtk)->native_handle();
+    ASSERT_GE(sd_bus_request_name(gtk_bus, gtk_name, 0), 0);
+    static const sd_bus_vtable gtk_vtable[]{
+        SD_BUS_VTABLE_START(0),
+        SD_BUS_METHOD("Read", "ss", "v",
+                      [](sd_bus_message *message, void *, sd_bus_error *) {
+                          const char *space = nullptr;
+                          const char *key = nullptr;
+                          if (sd_bus_message_read(message, "ss", &space, &key) <= 0) {
+                              return -EINVAL;
+                          }
+                          EXPECT_STREQ(space, "org.gnome.desktop.interface");
+                          EXPECT_STREQ(key, "gtk-theme");
+                          return sd_bus_reply_method_return(message, "v", "s", "mock GTK theme");
+                      },
+                      SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_METHOD("ReadAll", "as", "a{sa{sv}}",
+                      [](sd_bus_message *message, void *, sd_bus_error *) {
+                          if (sd_bus_message_enter_container(message, 'a', "s") <= 0) {
+                              return -EINVAL;
+                          }
+                          const char *pattern = nullptr;
+                          EXPECT_GT(sd_bus_message_read(message, "s", &pattern), 0);
+                          EXPECT_STREQ(pattern, "org.freedesktop.*");
+                          EXPECT_GT(sd_bus_message_read(message, "s", &pattern), 0);
+                          EXPECT_STREQ(pattern, "org.gnome.desktop.interface");
+                          return sd_bus_reply_method_return(
+                              message, "a{sa{sv}}", 2, "org.freedesktop.appearance", 2,
+                              "color-scheme", "u", 2U, "contrast", "u", 1U,
+                              "org.gnome.desktop.interface", 1, "gtk-theme", "s", "mock GTK theme");
+                      },
+                      SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_VTABLE_END};
+    sd_bus_slot *backend = nullptr;
+    ASSERT_GE(sd_bus_add_object_vtable(gtk_bus, &backend, path, interface, gtk_vtable, nullptr), 0);
+    const std::unique_ptr<sd_bus_slot, decltype(&sd_bus_slot_unref)> backend_slot(backend,
+                                                                                 sd_bus_slot_unref);
+    auto settings = seaside::SettingsPortal::start(*service, seaside::ColorScheme::dark);
+    ASSERT_TRUE(settings);
+    ASSERT_TRUE(pump_until([&] { return service->pending() == 0; }));
+    const auto read = [&](unsigned expected) {
+        sd_bus_message *message = nullptr;
+        ASSERT_GE(sd_bus_message_new_method_call(bus->native_handle(), &message, name, path,
+                                                 interface, "Read"),
+                  0);
+        const std::unique_ptr<sd_bus_message, decltype(&sd_bus_message_unref)> request(
+            message, sd_bus_message_unref);
+        ASSERT_GE(sd_bus_message_append(message, "ss", appearance, "color-scheme"), 0);
+        bool received = false;
+        ASSERT_TRUE(bus->call(message, 1s, [&](const BusReply &reply) {
+            received = true;
+            EXPECT_EQ(reply.error, BusError::none);
+            unsigned color = 0;
+            EXPECT_GT(sd_bus_message_read(reply.message, "v", "u", &color), 0);
+            EXPECT_EQ(color, expected);
+        }));
+        ASSERT_TRUE(pump_until([&] { return received; }));
+    };
+    read(1);
+
+    sd_bus_message *theme = nullptr;
+    ASSERT_GE(sd_bus_message_new_method_call(bus->native_handle(), &theme, name, path, interface,
+                                             "Read"),
+              0);
+    const std::unique_ptr<sd_bus_message, decltype(&sd_bus_message_unref)> theme_request(
+        theme, sd_bus_message_unref);
+    ASSERT_GE(sd_bus_message_append(theme, "ss", "org.gnome.desktop.interface", "gtk-theme"), 0);
+    bool theme_received = false;
+    ASSERT_TRUE(bus->call(theme, 1s, [&](const BusReply &reply) {
+        theme_received = true;
+        ASSERT_EQ(reply.error, BusError::none);
+        const char *value = nullptr;
+        ASSERT_GT(sd_bus_message_read(reply.message, "v", "s", &value), 0);
+        EXPECT_STREQ(value, "mock GTK theme");
+    }));
+    ASSERT_TRUE(pump_until([&] { return theme_received; }));
+
+    sd_bus_message *all = nullptr;
+    ASSERT_GE(sd_bus_message_new_method_call(bus->native_handle(), &all, name, path, interface,
+                                             "ReadAll"),
+              0);
+    const std::unique_ptr<sd_bus_message, decltype(&sd_bus_message_unref)> all_request(
+        all, sd_bus_message_unref);
+    ASSERT_GE(sd_bus_message_append(all, "as", 2, "org.freedesktop.*",
+                                    "org.gnome.desktop.interface"),
+              0);
+    bool received = false;
+    ASSERT_TRUE(bus->call(all, 1s, [&](const BusReply &reply) {
+        received = true;
+        ASSERT_EQ(reply.error, BusError::none);
+        ASSERT_GT(sd_bus_message_enter_container(reply.message, 'a', "{sa{sv}}"), 0);
+        ASSERT_GT(sd_bus_message_enter_container(reply.message, 'e', "sa{sv}"), 0);
+        const char *space = nullptr;
+        ASSERT_GT(sd_bus_message_read(reply.message, "s", &space), 0);
+        EXPECT_STREQ(space, appearance);
+        ASSERT_GT(sd_bus_message_enter_container(reply.message, 'a', "{sv}"), 0);
+        ASSERT_GT(sd_bus_message_enter_container(reply.message, 'e', "sv"), 0);
+        const char *key = nullptr;
+        unsigned color = 0;
+        ASSERT_GT(sd_bus_message_read(reply.message, "sv", &key, "u", &color), 0);
+        EXPECT_STREQ(key, "color-scheme");
+        EXPECT_EQ(color, 1U);
+        ASSERT_GE(sd_bus_message_exit_container(reply.message), 0);
+        ASSERT_GT(sd_bus_message_enter_container(reply.message, 'e', "sv"), 0);
+        unsigned contrast = 0;
+        ASSERT_GT(sd_bus_message_read(reply.message, "sv", &key, "u", &contrast), 0);
+        EXPECT_STREQ(key, "contrast");
+        EXPECT_EQ(contrast, 1U);
+        ASSERT_GE(sd_bus_message_exit_container(reply.message), 0);
+        EXPECT_EQ(sd_bus_message_enter_container(reply.message, 'e', "sv"), 0);
+        ASSERT_GE(sd_bus_message_exit_container(reply.message), 0);
+        ASSERT_GE(sd_bus_message_exit_container(reply.message), 0);
+        ASSERT_GT(sd_bus_message_enter_container(reply.message, 'e', "sa{sv}"), 0);
+        ASSERT_GT(sd_bus_message_read(reply.message, "s", &space), 0);
+        EXPECT_STREQ(space, "org.gnome.desktop.interface");
+        ASSERT_GT(sd_bus_message_enter_container(reply.message, 'a', "{sv}"), 0);
+        ASSERT_GT(sd_bus_message_enter_container(reply.message, 'e', "sv"), 0);
+        const char *value = nullptr;
+        ASSERT_GT(sd_bus_message_read(reply.message, "sv", &key, "s", &value), 0);
+        EXPECT_STREQ(key, "gtk-theme");
+        EXPECT_STREQ(value, "mock GTK theme");
+    }));
+    ASSERT_TRUE(pump_until([&] { return received; }));
+
+    struct Changes {
+        unsigned scheme = 0;
+        unsigned contrast = 0;
+        unsigned count = 0;
+    } changed;
+    sd_bus_slot *match = nullptr;
+    ASSERT_GE(sd_bus_add_match(
+                  bus->native_handle(), &match,
+                  "type='signal',sender='org.freedesktop.impl.portal.desktop.seaside',"
+                  "interface='org.freedesktop.impl.portal.Settings',"
+                  "member='SettingChanged'",
+                  [](sd_bus_message *message, void *data, sd_bus_error *) {
+                      const char *space = nullptr;
+                      const char *key = nullptr;
+                      unsigned value = 0;
+                      auto &changes = *static_cast<Changes *>(data);
+                      if (sd_bus_message_read(message, "ssv", &space, &key, "u", &value) > 0) {
+                          EXPECT_STREQ(space, "org.freedesktop.appearance");
+                          ++changes.count;
+                          if (std::string_view(key) == "color-scheme") {
+                              changes.scheme = value;
+                          } else {
+                              EXPECT_STREQ(key, "contrast");
+                              changes.contrast = value;
+                          }
+                      }
+                      return 0;
+                  },
+                  &changed),
+              0);
+    const std::unique_ptr<sd_bus_slot, decltype(&sd_bus_slot_unref)> signal(match,
+                                                                            sd_bus_slot_unref);
+    ASSERT_GE(sd_bus_emit_signal(gtk_bus, path, interface, "SettingChanged", "ssv", appearance,
+                                  "color-scheme", "u", 2U),
+              0);
+    ASSERT_GE(sd_bus_emit_signal(gtk_bus, path, interface, "SettingChanged", "ssv", appearance,
+                                  "contrast", "u", 1U),
+              0);
+    ASSERT_TRUE((*gtk)->refresh_events());
+    ASSERT_TRUE(pump_until([&] { return changed.contrast == 1; }));
+    EXPECT_EQ(changed.count, 1U);
+    EXPECT_EQ(changed.scheme, 0U);
+
+    settings->set(seaside::ColorScheme::light);
+    ASSERT_TRUE(pump_until([&] { return changed.scheme != 0; }));
+    EXPECT_EQ(changed.scheme, 2U);
+    EXPECT_EQ(changed.count, 2U);
+    read(2);
+}
+
+TEST_F(SessionBusTest, PowerProfilesRespectAvailabilityAndExplicitPolicy) {
+    ASSERT_TRUE(start_service());
+    struct Daemon {
+        std::string effective = "balanced";
+        unsigned writes = 0;
+    } power;
+    sd_bus_slot *filter = nullptr;
+    ASSERT_GE(
+        sd_bus_add_filter(
+            service->native_handle(), &filter,
+            [](sd_bus_message *message, void *data, sd_bus_error *) {
+                auto &daemon = *static_cast<Daemon *>(data);
+                constexpr auto properties = "org.freedesktop.DBus.Properties";
+                if (sd_bus_message_is_method_call(message, properties, "GetAll") > 0) {
+                    return sd_bus_reply_method_return(message, "a{sv}", 2, "ActiveProfile", "s",
+                                                      daemon.effective.c_str(), "Profiles",
+                                                      "aa{sv}", 2, 1, "Profile", "s", "power-saver",
+                                                      1, "Profile", "s", "balanced");
+                }
+                if (sd_bus_message_is_method_call(message, properties, "Set") > 0) {
+                    const char *interface = nullptr;
+                    const char *key = nullptr;
+                    const char *value = nullptr;
+                    if (sd_bus_message_read(message, "ssv", &interface, &key, "s", &value) <= 0) {
+                        return -EINVAL;
+                    }
+                    EXPECT_STREQ(interface, "org.freedesktop.UPower.PowerProfiles");
+                    EXPECT_STREQ(key, "ActiveProfile");
+                    EXPECT_EQ(sd_bus_message_get_allow_interactive_authorization(message), 0);
+                    daemon.effective = value;
+                    ++daemon.writes;
+                    return sd_bus_reply_method_return(message, "");
+                }
+                return 0;
+            },
+            &power),
+        0);
+    const std::unique_ptr<sd_bus_slot, decltype(&sd_bus_slot_unref)> keep_filter(filter,
+                                                                                 sd_bus_slot_unref);
+    bool owned = false;
+    ASSERT_GE(sd_bus_request_name_async(
+                  service->native_handle(), nullptr, "org.freedesktop.UPower.PowerProfiles", 0,
+                  [](sd_bus_message *message, void *data, sd_bus_error *) {
+                      unsigned result = 0;
+                      *static_cast<bool *>(data) =
+                          sd_bus_message_read(message, "u", &result) > 0 && result == 1;
+                      return 1;
+                  },
+                  &owned),
+              0);
+    ASSERT_TRUE(service->refresh_events());
+    ASSERT_TRUE(pump_until([&] { return owned; }));
+
+    struct RestoreAddress {
+        const char *name = "DBUS_SYSTEM_BUS_ADDRESS";
+        std::optional<std::string> saved;
+        RestoreAddress() {
+            if (const auto *value = getenv(name)) {
+                saved = value;
+            }
+        }
+        ~RestoreAddress() { saved ? setenv(name, saved->c_str(), 1) : unsetenv(name); }
+    } restore;
+    ASSERT_EQ(setenv(restore.name, address.c_str(), 1), 0);
+    seaside::PowerProfiles profiles(loop);
+    const auto reports = [&](const char *state, bool active = true) {
+        return pump_until([&] {
+            profiles.tick(active);
+            return std::string_view(profiles.status().state) == state;
+        });
+    };
+    ASSERT_TRUE(reports("system"));
+    EXPECT_EQ(profiles.status().effective, "balanced");
+    EXPECT_EQ(power.writes, 0U);
+    profiles.configure(seaside::PowerProfile::performance);
+    ASSERT_TRUE(reports("unsupported"));
+    EXPECT_EQ(profiles.status().effective, "balanced");
+    EXPECT_EQ(power.writes, 0U);
+
+    profiles.configure(seaside::PowerProfile::saver);
+    ASSERT_TRUE(reports("applied"));
+    EXPECT_EQ(profiles.status().effective, "saver");
+    EXPECT_EQ(power.effective, "power-saver");
+    EXPECT_EQ(power.writes, 1U);
+    profiles.configure(std::nullopt);
+    ASSERT_TRUE(reports("system", false));
+    EXPECT_EQ(profiles.status().effective, "saver");
+    EXPECT_EQ(power.writes, 1U);
+}
 
 class SystemdUserProbeTest : public SessionBusTest {
   protected:

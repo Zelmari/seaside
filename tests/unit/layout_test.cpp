@@ -108,6 +108,27 @@ TEST(DwindleLayout, KeyboardResizeMovesTheNearestDividerInEitherDirection) {
     }
 }
 
+TEST(DwindleLayout, DraggingASelectedSideMovesOnlyItsSharedDivider) {
+    WorkspaceLayout layout(no_gaps());
+    layout.set_area({0, 0, 1000, 600});
+    ASSERT_TRUE(layout.add({1, 1}));
+    ASSERT_TRUE(layout.add({2, 2}, 1));
+    ASSERT_TRUE(layout.add({3, 3}, 1));
+    EXPECT_TRUE(layout.has_resize_edge(1, Direction::right));
+    EXPECT_TRUE(layout.has_resize_edge(1, Direction::down));
+    EXPECT_FALSE(layout.has_resize_edge(1, Direction::left));
+    EXPECT_FALSE(layout.has_resize_edge(1, Direction::up));
+    EXPECT_FALSE(layout.resize_edge(1, Direction::left, 20));
+    ASSERT_TRUE(layout.resize_edge(1, Direction::right, 20));
+    EXPECT_EQ(layout.geometry(1), (WindowRect{0, 0, 520, 300}));
+    EXPECT_EQ(layout.geometry(3), (WindowRect{0, 300, 520, 300}));
+    ASSERT_TRUE(layout.resize_edge(1, Direction::right, -20));
+    ASSERT_TRUE(layout.resize_edge(1, Direction::down, -25));
+    EXPECT_EQ(layout.geometry(1), (WindowRect{0, 0, 500, 275}));
+    EXPECT_EQ(layout.geometry(2), (WindowRect{500, 0, 500, 600}));
+    EXPECT_EQ(layout.geometry(3), (WindowRect{0, 275, 500, 325}));
+}
+
 TEST(DwindleLayout, ShrinksInnerGapsAndSquareBordersToFitFeasibleClientMinima) {
     WorkspaceLayout layout({.outer_gap = 0, .inner_gap = 10, .border_width = 1});
     layout.set_area({0, 0, 20, 10});
@@ -229,6 +250,26 @@ TEST(ScrollingLayout, PreservesColumnWidthsAndOffsetsAcrossResizeDragAndOutputLo
     ASSERT_TRUE(layout.move(2, Direction::right));
     EXPECT_EQ(layout.geometry(2)->x, 210);
     EXPECT_FALSE(layout.move(2, Direction::down));
+}
+
+TEST(ScrollingLayout, DividerRedistributesSpaceBetweenColumns) {
+    auto settings = no_gaps(Layout::scrolling);
+    settings.default_column_width = 0.3;
+    settings.inner_gap = 10;
+    WorkspaceLayout layout(settings);
+    layout.set_area({0, 0, 1000, 600});
+    ASSERT_TRUE(layout.add({1, 1, {.max_width = 350}}));
+    ASSERT_TRUE(layout.add({2, 2, {.min_width = 270}}, 1));
+    ASSERT_TRUE(layout.add({3, 3}, 2));
+    EXPECT_FALSE(layout.resize_edge(1, Direction::left, 45));
+    EXPECT_FALSE(layout.resize_edge(2, Direction::up, 45));
+    ASSERT_TRUE(layout.resize_edge(2, Direction::left, 45));
+    EXPECT_EQ(layout.geometry(1), (WindowRect{0, 0, 330, 600}));
+    EXPECT_EQ(layout.geometry(2), (WindowRect{340, 0, 270, 600}));
+    EXPECT_EQ(layout.geometry(3), (WindowRect{620, 0, 300, 600}));
+    ASSERT_TRUE(layout.resize_edge(2, Direction::left, -30));
+    EXPECT_EQ(layout.geometry(1)->width, 300);
+    EXPECT_EQ(layout.geometry(2)->width, 300);
 }
 
 TEST(ScrollingLayout, ExposesTheApproachedEdgeOfAColumnWiderThanTheViewport) {

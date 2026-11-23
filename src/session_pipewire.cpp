@@ -1,10 +1,15 @@
 #include "session_pipewire.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cerrno>
 #include <climits>
 #include <cstdlib>
+#include <cstring>
+#include <map>
 #include <mutex>
+#include <nlohmann/json.hpp>
+#include <pipewire/extensions/metadata.h>
 #include <pipewire/extensions/protocol-native.h>
 #include <pipewire/pipewire.h>
 #include <string_view>
@@ -20,17 +25,57 @@ void initialize_pipewire() {
     // it when a connection probe finishes.
     std::call_once(initialized, [] { pw_init(nullptr, nullptr); });
 }
+
+constexpr std::array configured_keys{"default.configured.audio.sink",
+                                     "default.configured.audio.source"};
+constexpr std::array effective_keys{"default.audio.sink", "default.audio.source"};
+constexpr char metadata_type[] = "Spa:String:JSON";
+
+std::optional<std::string> metadata_node(const std::optional<std::string> &value) {
+    if (value) {
+        const auto parsed = nlohmann::json::parse(*value, nullptr, false);
+        const auto name = parsed.find("name");
+        if (name != parsed.end() && name->is_string()) {
+            return name->get<std::string>();
+        }
+    }
+    return {};
+}
 } // namespace
 
 struct PipeWireProbe::Impl : std::enable_shared_from_this<Impl> {
     using Source = std::unique_ptr<wl_event_source, decltype(&wl_event_source_remove)>;
+    using Clock = std::chrono::steady_clock;
     wl_event_loop *wayland_loop;
     const std::thread::id owner = std::this_thread::get_id();
     pw_loop *pipewire_loop = nullptr;
     pw_context *context = nullptr;
     pw_core *core = nullptr;
+    pw_registry *registry = nullptr;
+    pw_metadata *metadata = nullptr;
     spa_hook core_listener{};
+    spa_hook registry_listener{};
+    spa_hook metadata_listener{};
     bool listening = false;
+    bool listening_registry = false;
+    bool listening_metadata = false;
+    bool metadata_ready = false;
+    std::uint32_t metadata_id = SPA_ID_INVALID;
+    int metadata_sequence = -1;
+    struct AudioNode {
+        std::string name;
+        std::size_t route;
+    };
+    struct AudioRoute {
+        std::optional<std::string> requested;
+        std::optional<std::string> effective;
+        std::optional<std::string> configured;
+        Clock::time_point pending_until{};
+        bool apply = true;
+    };
+    std::map<std::uint32_t, AudioNode> audio_nodes;
+    std::array<AudioRoute, configured_keys.size()> audio;
+    std::shared_ptr<AudioRouteOwnership> audio_ownership;
     wl_event_source *io_source = nullptr;
     wl_event_source *deadline_source = nullptr;
     wl_event_source *completion_source = nullptr;
@@ -43,11 +88,41 @@ struct PipeWireProbe::Impl : std::enable_shared_from_this<Impl> {
     bool monitoring = false;
     bool delivery_failed = false;
 
-    Impl(wl_event_loop *loop, Completion callback, RuntimeFault fault)
-        : wayland_loop(loop), completion(std::move(callback)), runtime_fault(std::move(fault)) {}
+    Impl(wl_event_loop *loop, Completion callback, RuntimeFault fault,
+         std::shared_ptr<AudioRouteOwnership> ownership)
+        : wayland_loop(loop), audio_ownership(std::move(ownership)),
+          completion(std::move(callback)), runtime_fault(std::move(fault)) {}
     ~Impl() noexcept { shutdown(); }
 
+    void unbind_metadata() noexcept {
+        if (listening_metadata) {
+            spa_hook_remove(&metadata_listener);
+            listening_metadata = false;
+        }
+        if (auto *proxy = std::exchange(metadata, nullptr)) {
+            pw_proxy_destroy(reinterpret_cast<pw_proxy *>(proxy));
+        }
+        metadata_id = SPA_ID_INVALID;
+        metadata_sequence = -1;
+        metadata_ready = false;
+        for (auto &route : audio) {
+            route.configured.reset();
+            route.effective.reset();
+            route.pending_until = {};
+            route.apply = true;
+        }
+    }
+
     void disconnect() noexcept {
+        unbind_metadata();
+        if (listening_registry) {
+            spa_hook_remove(&registry_listener);
+            listening_registry = false;
+        }
+        if (auto *proxy = std::exchange(registry, nullptr)) {
+            pw_proxy_destroy(reinterpret_cast<pw_proxy *>(proxy));
+        }
+        audio_nodes.clear();
         if (listening) {
             spa_hook_remove(&core_listener);
             listening = false;
@@ -116,6 +191,7 @@ struct PipeWireProbe::Impl : std::enable_shared_from_this<Impl> {
         if (self->outcome.status == PipeWireStatus::ready && self->runtime_fault) {
             if (wl_event_source_fd_update(self->io_source, WL_EVENT_READABLE) == 0) {
                 self->monitoring = true;
+                self->observe_audio();
                 if (auto *deadline = std::exchange(self->deadline_source, nullptr)) {
                     wl_event_source_remove(deadline);
                 }
@@ -202,18 +278,204 @@ struct PipeWireProbe::Impl : std::enable_shared_from_this<Impl> {
             deliver_startup(data);
         } else if (self->runtime_error) {
             self->deliver_fault();
+        } else if (self->monitoring) {
+            self->apply_audio();
         }
         return 0;
     }
 
     static void done(void *data, std::uint32_t id, int received_sequence) noexcept {
         auto *self = static_cast<Impl *>(data);
+        if (id == PW_ID_CORE && received_sequence == self->metadata_sequence && self->metadata) {
+            self->metadata_ready = true;
+            for (std::size_t index = 0; index < self->audio.size(); ++index) {
+                self->observe_configured(index, true);
+            }
+        }
         if (id == PW_ID_CORE && received_sequence == self->sequence) {
             if (std::chrono::steady_clock::now() >= self->deadline) {
                 self->settle(PipeWireStatus::timed_out, -ETIMEDOUT);
             } else {
                 self->settle(PipeWireStatus::ready, 0);
             }
+        }
+    }
+
+    bool available(std::size_t index) const noexcept {
+        const auto &requested = audio[index].requested;
+        return requested && std::ranges::any_of(audio_nodes, [&](const auto &entry) {
+                   return entry.second.route == index && entry.second.name == *requested;
+               });
+    }
+
+    void observe_configured(std::size_t index, bool after_reconnect) noexcept {
+        auto &route = audio[index];
+        auto &ownership = audio_ownership->routes_[index];
+        if (ownership.pending) {
+            if (route.configured == ownership.pending->value) {
+                if (ownership.pending->restore) {
+                    ownership = {};
+                } else {
+                    ownership.written = std::move(ownership.pending->value);
+                    ownership.pending.reset();
+                }
+                route.pending_until = {};
+            } else if (after_reconnect || Clock::now() >= route.pending_until) {
+                ownership.pending.reset();
+                route.pending_until = {};
+            }
+        }
+        if (!ownership.pending && ownership.written != route.configured) {
+            // An external default selection supersedes our preceding write.
+            ownership = {};
+        }
+    }
+
+    void write_audio(std::size_t index, const std::optional<std::string> &value, bool restore) {
+        auto &route = audio[index];
+        auto &ownership = audio_ownership->routes_[index];
+        AudioRouteOwnership::Write write{value, restore};
+        auto previous = !restore && (!ownership.written || ownership.written != route.configured)
+                            ? route.configured
+                            : ownership.previous;
+        if (pw_metadata_set_property(metadata, PW_ID_CORE, configured_keys[index],
+                                     value ? metadata_type : nullptr,
+                                     value ? value->c_str() : nullptr) >= 0) {
+            ownership.previous = std::move(previous);
+            ownership.pending = std::move(write);
+            route.pending_until = Clock::now() + std::chrono::seconds(2);
+            route.apply = false;
+        }
+    }
+
+    void apply_audio() noexcept try {
+        if (!metadata_ready) {
+            return;
+        }
+        for (std::size_t index = 0; index < audio.size(); ++index) {
+            auto &route = audio[index];
+            auto &ownership = audio_ownership->routes_[index];
+            if (!route.apply || ownership.pending) {
+                continue;
+            }
+            if (available(index)) {
+                if (metadata_node(route.configured) == route.requested) {
+                    route.apply = false;
+                    continue;
+                }
+                const std::optional<std::string> value =
+                    nlohmann::json{{"name", *route.requested}}.dump();
+                write_audio(index, value, false);
+            } else if (ownership.written && route.configured == ownership.written &&
+                       route.requested != metadata_node(ownership.written)) {
+                write_audio(index, ownership.previous, true);
+            }
+        }
+    } catch (...) {
+        // A routing failure must not disrupt the PipeWire health probe.
+    }
+
+    static int metadata_property(void *data, std::uint32_t subject, const char *key,
+                                 const char *type, const char *value) noexcept try {
+        if (subject != PW_ID_CORE) {
+            return 0;
+        }
+        auto &self = *static_cast<Impl *>(data);
+        for (std::size_t index = 0; index < self.audio.size(); ++index) {
+            auto &route = self.audio[index];
+            const bool effective = !key || std::strcmp(key, effective_keys[index]) == 0;
+            const bool configured = !key || std::strcmp(key, configured_keys[index]) == 0;
+            if (!effective && !configured) {
+                continue;
+            }
+            const auto json = value && type && std::strcmp(type, metadata_type) == 0
+                                  ? std::optional<std::string>{value}
+                                  : std::nullopt;
+            if (effective) {
+                route.effective = metadata_node(json);
+            }
+            if (configured) {
+                route.configured = json;
+                if (self.metadata_ready) {
+                    self.observe_configured(index, false);
+                }
+            }
+        }
+        return 0;
+    } catch (...) {
+        return 0;
+    }
+
+    static void global(void *data, std::uint32_t id, std::uint32_t, const char *type,
+                       std::uint32_t version, const spa_dict *props) noexcept try {
+        auto &self = *static_cast<Impl *>(data);
+        if (!props) {
+            return;
+        }
+        if (!self.metadata && std::strcmp(type, PW_TYPE_INTERFACE_Metadata) == 0) {
+            const auto *name = spa_dict_lookup(props, PW_KEY_METADATA_NAME);
+            if (name && std::strcmp(name, "default") == 0) {
+                self.metadata = static_cast<pw_metadata *>(
+                    pw_registry_bind(self.registry, id, type,
+                                     std::min(version, std::uint32_t{PW_VERSION_METADATA}), 0));
+                if (self.metadata) {
+                    static const pw_metadata_events events{PW_VERSION_METADATA_EVENTS,
+                                                           metadata_property};
+                    self.metadata_id = id;
+                    self.listening_metadata =
+                        pw_metadata_add_listener(self.metadata, &self.metadata_listener, &events,
+                                                 &self) >= 0;
+                    self.metadata_sequence = pw_core_sync(self.core, PW_ID_CORE, 0);
+                    if (!self.listening_metadata || self.metadata_sequence < 0) {
+                        self.unbind_metadata();
+                    }
+                }
+            }
+        } else if (std::strcmp(type, PW_TYPE_INTERFACE_Node) == 0) {
+            const auto *name = spa_dict_lookup(props, PW_KEY_NODE_NAME);
+            const auto *media = spa_dict_lookup(props, PW_KEY_MEDIA_CLASS);
+            if (!name || !media) {
+                return;
+            }
+            if (const std::string_view kind(media);
+                kind == "Audio/Sink" || kind == "Audio/Source" || kind == "Audio/Source/Virtual") {
+                const std::size_t index = kind == "Audio/Sink" ? 0 : 1;
+                self.audio_nodes.insert_or_assign(id, AudioNode{name, index});
+                if (self.audio[index].requested == name) {
+                    self.audio[index].apply = true;
+                }
+            }
+        }
+    } catch (...) {
+    }
+
+    static void global_remove(void *data, std::uint32_t id) noexcept {
+        auto &self = *static_cast<Impl *>(data);
+        self.audio_nodes.erase(id);
+        if (id == self.metadata_id) {
+            self.unbind_metadata();
+        }
+    }
+
+    void observe_audio() noexcept {
+        registry = pw_core_get_registry(core, PW_VERSION_REGISTRY, 0);
+        if (registry) {
+            static const pw_registry_events events{PW_VERSION_REGISTRY_EVENTS, global,
+                                                   global_remove};
+            listening_registry =
+                pw_registry_add_listener(registry, &registry_listener, &events, this) >= 0;
+        }
+    }
+
+    void refresh_audio() noexcept {
+        if (metadata_ready) {
+            for (std::size_t index = 0; index < audio.size(); ++index) {
+                if (audio_ownership->routes_[index].pending &&
+                    Clock::now() >= audio[index].pending_until) {
+                    observe_configured(index, false);
+                }
+            }
+            apply_audio();
         }
     }
 
@@ -236,10 +498,10 @@ struct PipeWireProbe::Impl : std::enable_shared_from_this<Impl> {
         }
         // A control-only check does not need real-time scheduling or factories
         // for audio nodes/devices. Keep the standard native client protocol.
-        auto *properties = pw_properties_new("module.rt", "false", "module.client-node", "false",
-                                             "module.client-device", "false", "module.adapter",
-                                             "false", "module.metadata", "false",
-                                             "module.session-manager", "false", nullptr);
+        auto *properties = pw_properties_new(
+            "module.rt", "false", "module.client-node", "false", "module.client-device", "false",
+            "module.adapter", "false", "module.metadata", runtime_fault ? "true" : "false",
+            "module.session-manager", "false", nullptr);
         if (!properties) {
             return std::unexpected(PipeWireError{PipeWireFailure::allocation, -ENOMEM});
         }
@@ -312,7 +574,10 @@ PipeWireProbe::create(wl_event_loop *loop, Options options, Completion completio
     }
     try {
         initialize_pipewire();
-        auto impl = std::make_shared<Impl>(loop, std::move(completion), std::move(fault));
+        auto ownership = options.audio_ownership ? options.audio_ownership
+                                                 : std::make_shared<AudioRouteOwnership>();
+        auto impl = std::make_shared<Impl>(loop, std::move(completion), std::move(fault),
+                                           std::move(ownership));
         if (auto initialized = impl->initialize(options); !initialized) {
             return std::unexpected(initialized.error());
         }
@@ -347,6 +612,30 @@ PipeWireResult PipeWireProbe::result() const noexcept {
         return {PipeWireStatus::failed, -EPERM};
     }
     return impl_->outcome;
+}
+
+void PipeWireProbe::set_audio_routes(const std::optional<std::string> &output,
+                                     const std::optional<std::string> &input) noexcept try {
+    const std::array requests{&output, &input};
+    for (std::size_t index = 0; index < requests.size(); ++index) {
+        const auto *requested = requests[index];
+        auto &route = impl_->audio[index];
+        if (route.requested != *requested) {
+            route.requested = *requested;
+            route.apply = true;
+        }
+    }
+    impl_->apply_audio();
+} catch (...) {
+}
+
+AudioRouteStatus PipeWireProbe::audio_route_status(bool playback) const {
+    const std::size_t index = playback ? 0 : 1;
+    return {impl_->audio[index].effective, impl_->available(index), impl_->metadata_ready};
+}
+
+void PipeWireProbe::refresh_audio_routes() noexcept {
+    impl_->refresh_audio();
 }
 
 } // namespace seaside

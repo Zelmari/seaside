@@ -80,6 +80,10 @@ struct Scene::Appearance {
             return;
         }
         message = std::move(text);
+        refresh_banners();
+    }
+
+    void refresh_banners() {
         ++revision;
         for (auto &[output, viewport] : viewports) {
             viewport.revision = revision;
@@ -113,11 +117,12 @@ struct Scene::Appearance {
         viewport.pending = false;
         auto queued = rasterizer->submit(
             0, lifetime, max_config_banner_bytes,
-            [text = message, width = viewport.width, scale = viewport.scale](std::stop_token stop) {
+            [text = message, width = viewport.width, scale = viewport.scale,
+             dark = dark_appearance](std::stop_token stop) {
                 if (stop.stop_requested()) {
                     return WorkResult{.value = {}, .error = WorkError::cancelled};
                 }
-                auto image = render_config_banner(text, width, scale);
+                auto image = render_config_banner(text, width, scale, dark);
                 const auto bytes = image ? image->pixels.size() : 0;
                 return WorkResult{.value = std::move(image), .retained_bytes = bytes};
             },
@@ -154,6 +159,7 @@ struct Scene::Appearance {
     std::string message;
     std::uint64_t revision = 0;
     bool busy = false;
+    bool dark_appearance = true;
     std::shared_ptr<WorkLifetime> lifetime = std::make_shared<WorkLifetime>();
     std::unique_ptr<WorkQueue> rasterizer;
 };
@@ -164,7 +170,8 @@ void SceneImageRelease::operator()(wlr_buffer *buffer) const noexcept {
     seaside_scene_drop_image(buffer);
 }
 
-std::expected<std::unique_ptr<Scene>, SceneError> Scene::create(wl_display *display) noexcept {
+std::expected<std::unique_ptr<Scene>, SceneError> Scene::create(wl_display *display,
+                                                               wlr_compositor *compositor) noexcept {
     if (!display) {
         return std::unexpected(SceneError::invalid_arguments);
     }
@@ -183,6 +190,7 @@ std::expected<std::unique_ptr<Scene>, SceneError> Scene::create(wl_display *disp
     }
     seaside_scene_set_appearance_handler(owner->bridge_, Appearance::resize,
                                          owner->appearance_.get());
+    seaside_scene_watch_surfaces(owner->bridge_, compositor);
     return owner;
 }
 
@@ -249,10 +257,27 @@ void Scene::set_titlebars(bool visible) noexcept {
     seaside_scene_set_titlebars(bridge_, visible);
 }
 
+void Scene::set_border_colors(std::uint32_t active, std::uint32_t inactive) noexcept {
+    seaside_scene_set_border_colors(bridge_, active, inactive);
+}
+
+void Scene::set_dark_appearance(bool dark) noexcept try {
+    if (dark != appearance_->dark_appearance) {
+        appearance_->dark_appearance = dark;
+        appearance_->refresh_banners();
+    }
+} catch (...) {
+    std::fputs("seaside: could not update the config banner palette\n", stderr);
+}
+
 void Scene::set_render_policy(bool direct_scanout, bool allow_tearing, bool night_light,
                               int temperature_kelvin) noexcept {
     seaside_scene_set_render_policy(bridge_, direct_scanout, allow_tearing, night_light,
                                     temperature_kelvin);
+}
+
+void Scene::set_blur(bool enabled, double strength, int passes) noexcept {
+    seaside_scene_set_blur(bridge_, enabled, strength, passes);
 }
 
 void Scene::set_frame_observer(seaside_scene_frame_fn callback, void *data) noexcept {

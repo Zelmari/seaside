@@ -8,6 +8,7 @@
 #include "session_control.hpp"
 #include "session_environment.hpp"
 #include "session_portal.hpp"
+#include "session_preferences.hpp"
 #include "session_services.hpp"
 #include "session_systemd.hpp"
 #include "trace.hpp"
@@ -133,13 +134,20 @@ class Commands {
         environment_.push_back(nullptr);
     }
 
-    std::expected<pid_t, int> launch(const std::string &command) {
+    std::expected<pid_t, int> launch(const std::string &command, seaside::ColorScheme scheme) {
         // Reserve the reaper slot before a child can start. Launching the
         // default terminal with exec keeps its lifetime tied to that slot.
         children_.push_back(0);
+        const char *line = command.c_str();
+        if (command == "foot") {
+            line = "exec foot";
+        } else if (command == "wofi --show drun" && !std::getenv("GTK_THEME")) {
+            // The GTK3 launcher does not consume the standard appearance key.
+            line = scheme == seaside::ColorScheme::dark ? "GTK_THEME=Adwaita:dark wofi --show drun"
+                                                        : "GTK_THEME=Adwaita wofi --show drun";
+        }
         char *const argv[]{const_cast<char *>("sh"), const_cast<char *>("-c"),
-                           const_cast<char *>(command == "foot" ? "exec foot" : command.c_str()),
-                           nullptr};
+                           const_cast<char *>(line), nullptr};
         posix_spawn_file_actions_t actions;
         posix_spawnattr_t attr;
         const int attr_status = posix_spawnattr_init(&attr);
@@ -221,7 +229,7 @@ class Session {
         : server_(server), scene_(scene), drm_(drm), socket_(socket),
           loop_(wl_display_get_event_loop(server.display())), paths_(paths),
           desktop_(scene, seaside::default_config()), outputs_(drm, desktop_),
-          control_(scene, desktop_, outputs_) {
+          control_(scene, desktop_, outputs_), power_(loop_) {
         desktop_.enable_frame_paced_resize();
     }
 
@@ -286,6 +294,8 @@ class Session {
         startup_commands_ = config.config.autostart.commands;
         desktop_.apply_initial_config(config.config);
         seaside_tty_input_set_sensitivity(input_, config.config.input.mouse.sensitivity);
+        seaside_tty_input_set_inverse_scroll(input_, config.config.input.mouse.scroll_direction ==
+                                                         seaside::ScrollDirection::inverse);
         attaching_startup_ = false;
         const auto attach = [this](const seaside::OutputConfig::Output &output) {
             const auto &state = output.status;
@@ -340,6 +350,7 @@ class Session {
         config_ = std::move(*live);
         apply_render_policy();
         apply_idle_timeout();
+        apply_service_preferences();
         auto ipc = seaside::IpcServer::create(
             loop_, socket_,
             [this](std::string_view method, const IpcJson &params) {
@@ -404,6 +415,7 @@ class Session {
         portal_.reset();
         systemd_.reset();
         pipewire_.reset();
+        power_.stop();
         if (activation_) {
             // Waiting for the private units also dispatches the Wayland loop.
             // Read-only IPC and already registered callbacks still use the
@@ -411,6 +423,7 @@ class Session {
             outcome_.cleanup_failed = !activation_->stop();
             activation_.reset();
         }
+        settings_.reset();
         // Disconnect Wayland clients while the seat and surface owners still exist.
         // Destroying the seat first would send data-control device events to
         // clients whose session is already ending.
@@ -654,6 +667,7 @@ class Session {
                                   {"native_error", detail->native_error}};
                     }
                 }
+                append_preferences_status(*result);
             }
             return result;
         }
@@ -718,6 +732,8 @@ class Session {
             scene_.set_wallpaper(std::move(*wallpaper));
         }
         seaside_tty_input_set_sensitivity(input_, candidate.input.mouse.sensitivity);
+        seaside_tty_input_set_inverse_scroll(input_, candidate.input.mouse.scroll_direction ==
+                                                         seaside::ScrollDirection::inverse);
         return {};
     }
 
@@ -739,11 +755,52 @@ class Session {
         scene_.set_render_policy(config.render.direct_scanout, config.render.allow_tearing,
                                  transaction.runtime_night_light(),
                                  config.night_light.temperature_kelvin);
+        scene_.set_blur(config.render.blur.enabled, config.render.blur.strength,
+                        config.render.blur.passes);
     }
 
     void apply_idle_timeout() {
         idle_->set_timeout(
             std::chrono::minutes(config_->transaction().active().idle.display_off_after_minutes));
+    }
+
+    void apply_service_preferences() noexcept {
+        const auto &active = config_->transaction().active();
+        if (pipewire_) {
+            pipewire_->set_audio_routes(active.audio.default_output, active.audio.default_input);
+        }
+        if (settings_) {
+            settings_->set(active.appearance.color_scheme);
+        }
+        power_.configure(active.power.profile);
+    }
+
+    void append_preferences_status(IpcJson &result) const {
+        const auto &active = config_->transaction().active();
+        const auto route = [&](bool playback, const std::optional<std::string> &requested) {
+            const auto status =
+                pipewire_ ? pipewire_->audio_route_status(playback) : seaside::AudioRouteStatus{};
+            const char *state = !requested                      ? "auto"
+                                : !status.metadata_ready        ? "checking"
+                                : !status.available             ? "device-unavailable"
+                                : status.effective == requested ? "applied"
+                                                                : "pending";
+            return IpcJson{{"requested", requested ? IpcJson(*requested) : IpcJson("auto")},
+                           {"effective", status.effective ? IpcJson(*status.effective) : nullptr},
+                           {"state", state}};
+        };
+        result["audio"] = {{"output", route(true, active.audio.default_output)},
+                           {"input", route(false, active.audio.default_input)}};
+        result["appearance"] = {
+            {"color_scheme",
+             active.appearance.color_scheme == seaside::ColorScheme::dark ? "dark" : "light"}};
+        const auto &power = power_.status();
+        result["power"] = {{"requested", active.power.profile
+                                             ? seaside::power_profile_name(*active.power.profile)
+                                             : "system"},
+                           {"effective", power.effective ? IpcJson(*power.effective) : nullptr},
+                           {"available", power.available},
+                           {"state", power.state}};
     }
 
     void config_changed(LiveConfig::Change change) {
@@ -752,6 +809,7 @@ class Session {
             apply_render_policy();
             apply_idle_timeout();
             desktop_.apply_config(transaction.active());
+            apply_service_preferences();
             if (std::exchange(config_error_visible_, false)) {
                 scene_.set_config_error(std::nullopt);
             }
@@ -810,7 +868,8 @@ class Session {
 
     void launch(const std::string &command) noexcept {
         try {
-            const auto pid = commands_->launch(command);
+            const auto pid =
+                commands_->launch(command, config_->transaction().active().appearance.color_scheme);
             if (!pid) {
                 std::fprintf(stderr, "seaside: command launch failed: %s\n",
                              std::strerror(pid.error()));
@@ -996,7 +1055,12 @@ class Session {
             if (activation_) {
                 activation_->replace_bus(**replacement);
             }
+            settings_.reset();
             bus_ = std::move(*replacement);
+        }
+        if (!settings_) {
+            settings_ = seaside::SettingsPortal::start(
+                *bus_, config_->transaction().active().appearance.color_scheme);
         }
         auto systemd = seaside::SystemdUserProbe::start(
             *bus_, getuid(),
@@ -1033,7 +1097,7 @@ class Session {
             }
         };
         auto probe = seaside::PipeWireProbe::create(
-            loop_, {.timeout = probe_timeout},
+            loop_, {.timeout = probe_timeout, .audio_ownership = audio_ownership_},
             [complete](seaside::PipeWireResult result) {
                 complete(seaside::pipewire_service_report(result));
             },
@@ -1046,6 +1110,8 @@ class Session {
             complete(seaside::pipewire_service_report(probe.error()));
         } else {
             pipewire_ = std::move(*probe);
+            const auto &audio = config_->transaction().active().audio;
+            pipewire_->set_audio_routes(audio.default_output, audio.default_input);
         }
     }
 
@@ -1064,6 +1130,9 @@ class Session {
         if (pipewire_retry_.begin(now)) {
             pipewire_.reset();
             start_pipewire();
+        }
+        if (pipewire_) {
+            pipewire_->refresh_audio_routes();
         }
     }
 
@@ -1190,6 +1259,7 @@ class Session {
         }
         if (session.ready_) {
             session.recover_integrations();
+            session.power_.tick(display.active);
         }
         session.idle_->set_active(session.ready_ && display.active);
         session.commands_->reap();
@@ -1223,7 +1293,11 @@ class Session {
     std::unique_ptr<seaside_output_capture, decltype(&seaside_output_capture_destroy)> capture_{
         nullptr, seaside_output_capture_destroy};
     std::unique_ptr<seaside::SessionBus> bus_;
+    std::unique_ptr<seaside::SettingsPortal> settings_;
+    seaside::PowerProfiles power_;
     std::unique_ptr<seaside::SystemdUserProbe> systemd_;
+    std::shared_ptr<seaside::AudioRouteOwnership> audio_ownership_ =
+        std::make_shared<seaside::AudioRouteOwnership>();
     std::unique_ptr<seaside::PipeWireProbe> pipewire_;
     std::unique_ptr<seaside::PortalActivation> activation_;
     std::unique_ptr<seaside::PortalProbe> portal_;
@@ -1253,7 +1327,7 @@ run_session(seaside::LoadedConfig config, seaside::Wallpaper wallpaper, seaside:
     if (!server || !(*server)->install_shutdown_signals()) {
         return std::unexpected("display-or-signals");
     }
-    auto scene = seaside::Scene::create((*server)->display());
+    auto scene = seaside::Scene::create((*server)->display(), (*server)->compositor());
     const auto socket = (*server)->listen();
     if (!scene || !socket) {
         return std::unexpected("scene-or-wayland-socket");

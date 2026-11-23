@@ -26,6 +26,7 @@ struct seaside_layer_scene {
 struct layer_output {
     struct wlr_output *output;
     struct seaside_scene_rect bounds, work;
+    int top_reservation;
     bool fullscreen;
     struct wl_list link;
 };
@@ -225,6 +226,12 @@ static void configure_surface(struct layer_surface *surface, struct seaside_scen
 
 static void arrange_output(struct seaside_layer_scene *layers, struct layer_output *output) {
     struct seaside_scene_rect work = output->bounds;
+    if (!output->fullscreen && work.height > 1) {
+        const int height =
+            output->top_reservation < work.height ? output->top_reservation : work.height - 1;
+        work.y = coordinate((int64_t)work.y + height);
+        work.height -= height;
+    }
     struct layer_surface *surface;
     wl_list_for_each(surface, &layers->surfaces, link) {
         if (surface->output != output) {
@@ -466,6 +473,20 @@ void seaside_layer_scene_update_output(struct seaside_layer_scene *layers,
          record->bounds.width != bounds.width || record->bounds.height != bounds.height)) {
         record->bounds = bounds;
         arrange_output(layers, record);
+    }
+}
+
+void seaside_layer_scene_reserve_top(struct seaside_layer_scene *layers, struct wlr_output *output,
+                                     int height, bool project_now) {
+    struct layer_output *record = find_output(layers, output);
+    if (record && record->top_reservation != height) {
+        record->top_reservation = height;
+        arrange_output(layers, record);
+        if (project_now && layers->changed) {
+            layers->changed(layers->data);
+        } else {
+            schedule_update(layers);
+        }
     }
 }
 

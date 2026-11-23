@@ -35,6 +35,8 @@ def installed_payload(source, build, stage):
         destination("datadir", "seaside/wallpapers/black.png"): "packaging/black.png",
         destination("datadir", "xdg-desktop-portal/seaside-portals.conf"):
             "packaging/seaside-portals.conf",
+        destination("datadir", "xdg-desktop-portal/portals/seaside.portal"):
+            "packaging/seaside.portal",
         destination("sysconfdir", "xdg/xdg-desktop-portal-wlr/Seaside"):
             "packaging/xdg-desktop-portal-wlr/Seaside",
     }
@@ -75,6 +77,7 @@ def installed_payload(source, build, stage):
     route = configparser.ConfigParser()
     route.read(stage / destination("datadir", "xdg-desktop-portal/seaside-portals.conf"))
     assert route["preferred"]["default"] == "gtk"
+    assert route["preferred"]["org.freedesktop.impl.portal.Settings"] == "seaside"
     assert route["preferred"]["org.freedesktop.impl.portal.Screenshot"] == "wlr"
     assert route["preferred"]["org.freedesktop.impl.portal.ScreenCast"] == "wlr"
 

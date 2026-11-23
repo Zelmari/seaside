@@ -2,11 +2,14 @@
 #include "startup_gate.hpp"
 #include "test_directory.hpp"
 
+#include <array>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <csignal>
 #include <cstddef>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
 #include <fstream>
@@ -163,13 +166,17 @@ class PipeWireProbeTest : public testing::Test {
 
     std::string socket() const { return (directory.path() / "seaside-test").string(); }
 
-    bool write_client_config(std::string_view extra_properties = {}) {
+    bool write_client_config(std::string_view extra_properties = {}, bool audio = false) {
         std::ofstream config(directory.path() / "seaside-probe-client.conf");
         config << "context.properties = { support.dbus = false mem.allow-mlock = false "
                << extra_properties
                << " }\n"
                   "context.spa-libs = { support.* = support/libspa-support }\n"
-                  "context.modules = [ { name = libpipewire-module-protocol-native } ]\n";
+                  "context.modules = [ { name = libpipewire-module-protocol-native }";
+        if (audio) {
+            config << " { name = libpipewire-module-metadata }";
+        }
+        config << " ]\n";
         config.close();
         return static_cast<bool>(config);
     }
@@ -179,17 +186,34 @@ class PipeWireProbeTest : public testing::Test {
         return {std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>()};
     }
 
-    bool start_server() {
+    bool start_server(bool audio = false) {
         const auto config = (directory.path() / "server.conf").string();
         std::ofstream output(config);
-        // This server exists only in the private fixture runtime directory. It
-        // loads no audio/video devices and is not a packaged Seaside service.
+        // The fixture uses its own PipeWire daemon without access to the
+        // machine's actual audio or video devices.
         output << "context.properties = { core.daemon = true core.name = seaside-test "
                   "support.dbus = false mem.allow-mlock = false }\n"
-                  "context.spa-libs = { support.* = support/libspa-support }\n"
+                  "context.spa-libs = { support.* = support/libspa-support "
+                  "audio.convert.* = audioconvert/libspa-audioconvert }\n"
                   "context.modules = [ { name = libpipewire-module-protocol-native } "
                   "{ name = libpipewire-module-access args = { access.socket = { "
-                  "seaside-test = unrestricted } } } ]\n";
+                  "seaside-test = unrestricted } } }";
+        if (audio) {
+            output << " { name = libpipewire-module-metadata } "
+                      "{ name = libpipewire-module-spa-node-factory } "
+                      "{ name = libpipewire-module-adapter }";
+        }
+        output << " ]\n";
+        if (audio) {
+            output << "context.objects = [ { factory = metadata args = { metadata.name = default } "
+                      "}\n";
+            for (const auto *name : {"first", "second"}) {
+                output << "{ factory = adapter args = { factory.name = support.null-audio-sink "
+                          "media.class = Audio/Sink audio.position = [ FL FR ] node.name = "
+                       << name << " } }\n";
+            }
+            output << "]\n";
+        }
         output.close();
         if (!output) {
             return false;
@@ -386,6 +410,62 @@ TEST_F(PipeWireProbeTest, DefaultProbeUsesConfiguredNativeSocketWithoutPortal) {
     probe = std::move(*result);
     ASSERT_TRUE(dispatch_until([&] { return completions != 0; })) << server_log();
     EXPECT_EQ(completed.status, PipeWireStatus::ready);
+}
+
+TEST_F(PipeWireProbeTest, RapidAudioEditsAndReconnectRestoreTheOriginalRoute) {
+    ASSERT_TRUE(write_client_config({}, true));
+    ASSERT_TRUE(start_server(true)) << server_log();
+    constexpr auto tool =
+        "/usr/bin/timeout 1s /usr/bin/pw-metadata --remote seaside-test --name default "
+        "0 default.configured.audio.sink";
+    constexpr auto original = R"({"name":"prior-sink","stream":"rear"})";
+    const std::string seed = std::string(tool) + " '" + original + "' Spa:String:JSON >/dev/null";
+    ASSERT_EQ(std::system(seed.c_str()), 0);
+    const auto contains_selection = [&](std::string_view selection) {
+        auto *reader = popen(tool, "r");
+        if (!reader) {
+            return false;
+        }
+        std::string response;
+        std::array<char, 256> buffer{};
+        while (fgets(buffer.data(), buffer.size(), reader)) {
+            response += buffer.data();
+        }
+        return pclose(reader) == 0 && response.find(selection) != std::string::npos;
+    };
+    ASSERT_TRUE(contains_selection(original)) << server_log();
+    auto ownership = std::make_shared<seaside::AudioRouteOwnership>();
+    const auto connect_audio = [&] {
+        auto opened = PipeWireProbe::create(
+            loop, {.remote = socket(), .audio_ownership = ownership},
+            [&](auto outcome) { EXPECT_EQ(outcome.status, PipeWireStatus::ready); },
+            [](auto) { ADD_FAILURE() << "The private PipeWire daemon disconnected"; });
+        EXPECT_TRUE(opened);
+        if (!opened) {
+            return false;
+        }
+        probe = std::move(*opened);
+        return dispatch_until([&] { return probe->audio_route_status(true).metadata_ready; });
+    };
+    ASSERT_TRUE(connect_audio());
+    probe->set_audio_routes("first", std::nullopt);
+    ASSERT_TRUE(probe->audio_route_status(true).available) << server_log();
+    ASSERT_TRUE(dispatch_until([&] { return contains_selection(R"("name":"first")"); }))
+        << server_log();
+    // Exercise the edit while the earlier requests and their echoes are
+    // still being drained from the private PipeWire connection.
+    probe->set_audio_routes("second", std::nullopt);
+    ASSERT_GE(wl_event_loop_dispatch(loop, 0), 0);
+    probe->set_audio_routes(std::nullopt, std::nullopt);
+    ASSERT_TRUE(dispatch_until([&] { return contains_selection(original); }));
+    dispatch_quietly();
+    EXPECT_TRUE(contains_selection(original));
+
+    probe->set_audio_routes("second", std::nullopt);
+    ASSERT_TRUE(dispatch_until([&] { return contains_selection(R"("name":"second")"); }));
+    probe.reset();
+    ASSERT_TRUE(connect_audio());
+    ASSERT_TRUE(dispatch_until([&] { return contains_selection(original); }));
 }
 
 TEST_F(PipeWireProbeTest, PrivateRealServerCompletesCoreRoundtrip) {

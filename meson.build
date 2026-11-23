@@ -239,13 +239,21 @@ work_foundation = static_library(
 core = static_library(
   'seaside-core',
   ['src/server.cpp', 'src/server_c.cpp', 'src/wlroots_bridge.c',
-   'src/scene.cpp', 'src/scene_bridge.c', 'src/layer_scene.c', 'src/popup_grab.c', layer_server,
+   'src/scene.cpp', 'src/scene_bridge.c', 'src/scene_blur.c', 'src/layer_scene.c', 'src/popup_grab.c', layer_server,
    'src/window_capture.c', 'src/render_assets.cpp'],
   include_directories: include_directories('src'),
   dependencies: [wlroots, wayland_server, pixman, threads, libdrm, libpng, turbojpeg, libwebp, pangocairo, glib],
   link_with: work_foundation,
   install: false,
 )
+
+blur_test = executable(
+  'seaside-scene-blur-test', 'tests/integration/scene_blur.c',
+  include_directories: include_directories('src'),
+  dependencies: [wlroots, wayland_server, pixman, libdrm, glib, meson.get_compiler('c').find_library('m')],
+  link_with: core, install: false,
+)
+test('part11-backdrop-blur', blur_test, suite: ['integration', 'part11'], timeout: 10)
 
 capture_test = executable(
   'seaside-output-capture-test',
@@ -427,10 +435,10 @@ bridge_paths = configure_file(output: 'bridge_paths.hpp', configuration: bridge_
 session_foundation = static_library(
   'seaside-session-foundation',
   ['src/session_activation.cpp', 'src/session_bus.cpp', 'src/session_pipewire.cpp',
-   'src/session_portal.cpp', 'src/session_services.cpp', 'src/session_systemd.cpp',
+   'src/session_portal.cpp', 'src/session_preferences.cpp', 'src/session_services.cpp', 'src/session_systemd.cpp',
    'src/startup_gate.cpp', 'src/satellite.cpp', bridge_paths],
   include_directories: include_directories('src'),
-  dependencies: [systemd, pipewire, wayland_server, threads, xau],
+  dependencies: [systemd, pipewire, wayland_server, threads, xau, nlohmann_json],
   install: false,
 )
 
@@ -585,6 +593,7 @@ seaside = executable(
   install: true,
 )
 install_data('packaging/seaside-portals.conf', install_dir: get_option('datadir') / 'xdg-desktop-portal')
+install_data('packaging/seaside.portal', install_dir: get_option('datadir') / 'xdg-desktop-portal' / 'portals')
 install_data('packaging/black.png', install_dir: get_option('datadir') / 'seaside' / 'wallpapers')
 install_data('packaging/xdg-desktop-portal-wlr/Seaside',
   install_dir: get_option('sysconfdir') / 'xdg' / 'xdg-desktop-portal-wlr',

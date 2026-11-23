@@ -418,6 +418,20 @@ std::size_t SessionBus::callback_failures() const noexcept {
     return impl_->owns_thread() ? impl_->callback_errors : 0;
 }
 
+bool SessionBus::refresh_events() noexcept {
+    auto impl = impl_;
+    if (!native_handle()) {
+        return false;
+    }
+    if (impl->rearm()) {
+        return true;
+    }
+    if (!impl->defer()) {
+        impl->deliver_ready(impl->limits.max_pending_calls);
+    }
+    return false;
+}
+
 std::expected<SessionBus::CallId, BusError> SessionBus::call(sd_bus_message *message,
                                                              std::chrono::microseconds timeout,
                                                              Callback callback) noexcept {

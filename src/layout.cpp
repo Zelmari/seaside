@@ -39,12 +39,6 @@ int inset_amount(int size, int inset) noexcept {
     return std::min(inset, std::max(0, (size - 1) / 2));
 }
 
-WindowRect inset(WindowRect box, int margin) noexcept {
-    const auto x = inset_amount(box.width, margin);
-    const auto y = inset_amount(box.height, margin);
-    return {shift(box.x, x), shift(box.y, y), box.width - 2 * x, box.height - 2 * y};
-}
-
 bool contains_point(WindowRect box, double x, double y) noexcept {
     return x >= box.x && x < static_cast<double>(box.x) + box.width && y >= box.y &&
            y < static_cast<double>(box.y) + box.height;
@@ -87,6 +81,12 @@ LayoutSettings checked_settings(LayoutSettings settings) noexcept {
 
 } // namespace
 
+WindowRect inset_window_rect(WindowRect box, int margin) noexcept {
+    const auto x = inset_amount(box.width, margin);
+    const auto y = inset_amount(box.height, margin);
+    return {shift(box.x, x), shift(box.y, y), box.width - 2 * x, box.height - 2 * y};
+}
+
 WorkspaceLayout::WorkspaceLayout(LayoutSettings settings) : settings_(checked_settings(settings)) {}
 
 void WorkspaceLayout::set_settings(LayoutSettings settings) {
@@ -117,7 +117,7 @@ void WorkspaceLayout::set_area(WindowRect area) {
 }
 
 WindowRect WorkspaceLayout::tiling_area() const noexcept {
-    return inset(area_, settings_.outer_gap);
+    return inset_window_rect(area_, settings_.outer_gap);
 }
 
 bool WorkspaceLayout::contains(WindowId id) const noexcept {
@@ -301,7 +301,7 @@ std::optional<WindowRect> WorkspaceLayout::geometry(WindowId id) const noexcept 
         return {};
     }
     const auto &limits = tile->second.window.limits;
-    auto box = inset(tile->second.box, border_width(id));
+    auto box = inset_window_rect(tile->second.box, border_width(id));
     if (limits.max_width > 0) {
         box.width = std::min(box.width, std::max(limits.min_width, limits.max_width));
     }
@@ -747,37 +747,69 @@ bool WorkspaceLayout::resize_column(WindowId id, int delta) {
     return true;
 }
 
-bool WorkspaceLayout::resize_split(WindowId id, Direction direction, int distance) {
+WorkspaceLayout::NodeId WorkspaceLayout::split_for(WindowId id, Direction direction,
+                                                   bool shared_edge) const noexcept {
     const auto tile = tiles_.find(id);
-    if (tile == tiles_.end() || distance <= 0 || area_.width == 0 || area_.height == 0) {
-        return false;
+    if (tile == tiles_.end() || direction == Direction::none || area_.width == 0 ||
+        area_.height == 0) {
+        return 0;
     }
     const bool axis = horizontal(direction);
-    const int delta = before(direction) ? -distance : distance;
     auto child = tile->second.position;
     while (const auto parent = nodes_[child].parent) {
-        auto &split = nodes_[parent];
-        if (split.horizontal == axis) {
-            const auto &first = nodes_[split.first];
-            const auto &second = nodes_[split.second];
-            const int current = axis ? first.box.width : first.box.height;
-            const int available = current + (axis ? second.box.width : second.box.height);
-            const int requested = coordinate(std::int64_t{current} + delta);
-            const auto [first_min, second_min] = split_minima(split, available);
-            const int preferred = first_extent(available, requested, first_min, second_min);
-            const int next = first.first || second.first
-                                 ? fit_children(split, available, preferred).value_or(preferred)
-                                 : preferred;
-            if (next == current || available <= 1) {
-                return false;
-            }
-            split.ratio = static_cast<double>(next) / available;
-            reflow();
-            return true;
+        const auto &split = nodes_[parent];
+        if (split.horizontal == axis &&
+            (!shared_edge || child == (before(direction) ? split.second : split.first))) {
+            return parent;
         }
         child = parent;
     }
-    return false;
+    return 0;
+}
+
+bool WorkspaceLayout::resize_split(NodeId id, int delta) {
+    if (!id || !delta) {
+        return false;
+    }
+    auto &split = nodes_[id];
+    const auto &first = nodes_[split.first];
+    const auto &second = nodes_[split.second];
+    const int current = split.horizontal ? first.box.width : first.box.height;
+    const int available = current + (split.horizontal ? second.box.width : second.box.height);
+    const int requested = coordinate(std::int64_t{current} + delta);
+    const auto [first_min, second_min] = split_minima(split, available);
+    const int preferred = first_extent(available, requested, first_min, second_min);
+    const int next = first.first || second.first
+                         ? fit_children(split, available, preferred).value_or(preferred)
+                         : preferred;
+    if (next == current || available <= 1) {
+        return false;
+    }
+    split.ratio = static_cast<double>(next) / available;
+    reflow();
+    return true;
+}
+
+bool WorkspaceLayout::resize_column_divider(WindowId left, WindowId right, int delta) {
+    auto &first = tiles_.at(left);
+    auto &second = tiles_.at(right);
+    const auto limits = [&](const Tile &tile) {
+        const int min = outer_minimum(tile.window.limits.min_width, settings_.border_width);
+        return std::pair{min, std::max(min, outer_maximum(tile.window.limits.max_width,
+                                                          settings_.border_width))};
+    };
+    const auto [left_min, left_max] = limits(first);
+    const auto [right_min, right_max] = limits(second);
+    const int change =
+        std::clamp(delta, std::max(left_min - first.box.width, second.box.width - right_max),
+                   std::min(left_max - first.box.width, second.box.width - right_min));
+    if (!change) {
+        return false;
+    }
+    first.window.column_width = first.box.width + change;
+    second.window.column_width = second.box.width - change;
+    reflow();
+    return true;
 }
 
 bool WorkspaceLayout::resize(WindowId id, Direction direction, int distance) {
@@ -787,18 +819,38 @@ bool WorkspaceLayout::resize(WindowId id, Direction direction, int distance) {
     if (settings_.kind == Layout::scrolling) {
         return horizontal(direction) && resize_column(id, before(direction) ? -distance : distance);
     }
-    return resize_split(id, direction, distance);
+    return resize_split(split_for(id, direction, false), before(direction) ? -distance : distance);
 }
 
 bool WorkspaceLayout::resize_by(WindowId id, int dx, int dy) {
     if (settings_.kind == Layout::scrolling) {
         return resize_column(id, dx);
     }
-    const auto magnitude = [](int delta) { return coordinate(std::abs(std::int64_t{delta})); };
-    const bool x =
-        dx && resize_split(id, dx < 0 ? Direction::left : Direction::right, magnitude(dx));
-    const bool y = dy && resize_split(id, dy < 0 ? Direction::up : Direction::down, magnitude(dy));
+    const bool x = dx && resize_split(split_for(id, Direction::right, false), dx);
+    const bool y = dy && resize_split(split_for(id, Direction::down, false), dy);
     return x || y;
+}
+
+bool WorkspaceLayout::has_resize_edge(WindowId id, Direction edge) const noexcept {
+    if (area_.width == 0 || area_.height == 0) {
+        return false;
+    }
+    return settings_.kind == Layout::scrolling ? neighbor(id, edge).has_value()
+                                               : split_for(id, edge, true) != 0;
+}
+
+bool WorkspaceLayout::resize_edge(WindowId id, Direction edge, int delta) {
+    if (!delta || area_.width == 0 || area_.height == 0) {
+        return false;
+    }
+    if (settings_.kind == Layout::scrolling) {
+        if (const auto other = neighbor(id, edge)) {
+            return edge == Direction::left ? resize_column_divider(*other, id, delta)
+                                           : resize_column_divider(id, *other, delta);
+        }
+        return false;
+    }
+    return resize_split(split_for(id, edge, true), delta);
 }
 
 } // namespace seaside

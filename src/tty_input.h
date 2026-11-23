@@ -79,6 +79,7 @@ seaside_tty_input_create(struct wlr_backend *backend,
  * focus borrows the mapped surface until it is cleared or destroyed. */
 bool seaside_tty_input_enable_keyboard(struct seaside_tty_input *input, struct wl_display *display);
 void seaside_tty_input_set_sensitivity(struct seaside_tty_input *input, double sensitivity);
+void seaside_tty_input_set_inverse_scroll(struct seaside_tty_input *input, bool inverse);
 void seaside_tty_input_set_focus(struct seaside_tty_input *input, struct wlr_surface *surface);
 struct wlr_seat *seaside_tty_input_get_seat(const struct seaside_tty_input *input);
 /* Reevaluate hover after a scene change, even when the cursor has not moved. */

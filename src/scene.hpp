@@ -21,7 +21,8 @@ using SceneImage = std::unique_ptr<wlr_buffer, SceneImageRelease>;
 // shell global itself is display-owned. Destruction after display teardown is safe.
 class Scene final {
   public:
-    static std::expected<std::unique_ptr<Scene>, SceneError> create(wl_display *display) noexcept;
+    static std::expected<std::unique_ptr<Scene>, SceneError>
+    create(wl_display *display, wlr_compositor *compositor = nullptr) noexcept;
     ~Scene() noexcept;
     Scene(const Scene &) = delete;
     Scene &operator=(const Scene &) = delete;
@@ -31,8 +32,11 @@ class Scene final {
     void remove_output(wlr_output *output) noexcept;
     void set_linux_dmabuf(wlr_linux_dmabuf_v1 *dmabuf) noexcept;
     void set_titlebars(bool visible) noexcept;
+    void set_border_colors(std::uint32_t active, std::uint32_t inactive) noexcept;
+    void set_dark_appearance(bool dark) noexcept;
     void set_render_policy(bool direct_scanout, bool allow_tearing, bool night_light,
                            int temperature_kelvin) noexcept;
+    void set_blur(bool enabled, double strength, int passes) noexcept;
     void set_frame_observer(seaside_scene_frame_fn callback, void *data) noexcept;
     void set_before_frame(seaside_scene_before_frame_fn callback, void *data) noexcept;
     void schedule_frame(wlr_output *output) noexcept;

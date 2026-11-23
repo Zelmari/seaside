@@ -790,7 +790,7 @@ WindowRect WindowManager::geometry(WindowId id, const Window &window) const {
         return display.bounds;
     }
     if (window.maximized) {
-        return display.usable;
+        return inset_window_rect(display.usable, layout_settings_.outer_gap);
     }
     if (tile_move_ && tile_move_->tile.id == id) {
         return tile_move_->geometry;
@@ -1510,6 +1510,37 @@ ResizeResult WindowManager::resize_window_by(WindowId id, int dw, int dh) {
     rect.width = width;
     rect.height = height;
     return ResizeResult::changed;
+}
+
+bool WindowManager::has_tile_resize_edge(WindowId id, Direction edge) const noexcept {
+    const auto *window = state_.window(id);
+    return window && workspaces_.at(window->home_workspace).layout.has_resize_edge(id, edge);
+}
+
+bool WindowManager::resize_tile_edges(WindowId id, WindowRect start, Direction horizontal, int dx,
+                                      Direction vertical, int dy) {
+    const auto current = view(id);
+    if (!current.tile_layout || !current.visible || tile_move_) {
+        return false;
+    }
+    finish_focus_cycle();
+    const auto delta = [](int movement, int initial, int now, int initial_extent, int now_extent,
+                          bool trailing) {
+        auto distance = std::int64_t{initial} + movement - now;
+        if (trailing) {
+            distance += std::int64_t{initial_extent} - now_extent;
+        }
+        return coordinate(distance);
+    };
+    const auto box = current.geometry;
+    auto &layout = layout_for(id);
+    const bool x = layout.resize_edge(
+        id, horizontal,
+        delta(dx, start.x, box.x, start.width, box.width, horizontal == Direction::right));
+    const bool y = layout.resize_edge(
+        id, vertical,
+        delta(dy, start.y, box.y, start.height, box.height, vertical == Direction::down));
+    return x || y;
 }
 
 bool WindowManager::resize_floating(WindowId id, WindowRect start, std::optional<int> dx,

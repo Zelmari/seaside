@@ -2,6 +2,7 @@
 #include "scene_bridge.h"
 #include "layer_scene.h"
 #include "popup_grab.h"
+#include "scene_blur.h"
 #include "window_capture.h"
 
 #include <drm_fourcc.h>
@@ -62,8 +63,13 @@ struct seaside_scene_bridge {
     void *focus_data;
     bool attached;
     bool titlebars;
+    uint32_t active_border_color, inactive_border_color;
     bool direct_scanout, allow_tearing, night_light;
     int temperature_kelvin;
+    double blur_strength;
+    int blur_passes;
+    struct wl_list blur_surfaces;
+    struct wl_listener blur_new_surface, blur_compositor_destroy;
     seaside_scene_frame_fn frame_observer;
     void *frame_observer_data;
     seaside_scene_before_frame_fn before_frame;
@@ -83,6 +89,7 @@ struct scene_view {
     struct seaside_window_source *capture;
     struct wlr_scene_tree *tree;
     struct wlr_scene_tree *xdg_tree, *popup_tree;
+    struct seaside_scene_blur *blur;
     struct wlr_scene_rect *fullscreen_background;
     struct wlr_scene_rect *borders[4];
     struct wl_list link;
@@ -130,6 +137,7 @@ struct scene_output {
     struct wl_listener present;
     int width, height;
     int banner_width, banner_height, banner_logical_height;
+    bool banner_fullscreen;
     float scale;
     struct seaside_scene_render_status render_status;
     uint32_t pending_commit;
@@ -140,6 +148,7 @@ struct scene_output {
     uint64_t tearing_window;
     bool scanout_tearing_rejected, composed_tearing_rejected;
     bool retry_composed, retry_frame;
+    bool blur_active;
     enum { LUT_CLEAN, LUT_PENDING, LUT_RETRY } lut_request;
 };
 
@@ -149,6 +158,77 @@ struct scene_image {
     seaside_scene_image_release_fn release;
     void *owner;
 };
+
+struct blur_surface {
+    struct seaside_scene_bridge *scene;
+    struct wl_list link;
+    struct wl_listener commit, destroy;
+};
+
+static void invalidate_active_blur(struct seaside_scene_bridge *scene) {
+    if (scene->blur_strength > 0) {
+        struct scene_output *output;
+        wl_list_for_each(output, &scene->outputs, link) {
+            if (output->blur_active && output->viewport->output->enabled) {
+                // wlroots may cull pixels hidden directly by an opaque node,
+                // but they can still contribute to a neighboring blur sample.
+                wlr_output_schedule_frame(output->viewport->output);
+            }
+        }
+    }
+}
+
+static void blur_surface_commit(struct wl_listener *listener, void *data) {
+    (void)data;
+    struct blur_surface *surface = wl_container_of(listener, surface, commit);
+    invalidate_active_blur(surface->scene);
+}
+
+static void remove_blur_surface(struct blur_surface *surface) {
+    wl_list_remove(&surface->link);
+    wl_list_remove(&surface->commit.link);
+    wl_list_remove(&surface->destroy.link);
+    free(surface);
+}
+
+static void blur_surface_destroy(struct wl_listener *listener, void *data) {
+    (void)data;
+    struct blur_surface *surface = wl_container_of(listener, surface, destroy);
+    invalidate_active_blur(surface->scene);
+    remove_blur_surface(surface);
+}
+
+static void blur_new_surface(struct wl_listener *listener, void *data) {
+    struct seaside_scene_bridge *scene = wl_container_of(listener, scene, blur_new_surface);
+    struct wlr_surface *surface = data;
+    struct blur_surface *watched = calloc(1, sizeof(*watched));
+    if (!watched) {
+        return;
+    }
+    watched->scene = scene;
+    watched->commit.notify = blur_surface_commit;
+    watched->destroy.notify = blur_surface_destroy;
+    wl_list_insert(&scene->blur_surfaces, &watched->link);
+    wl_signal_add(&surface->events.commit, &watched->commit);
+    wl_signal_add(&surface->events.destroy, &watched->destroy);
+}
+
+static void remove_blur_watches(struct seaside_scene_bridge *scene) {
+    wl_list_remove(&scene->blur_new_surface.link);
+    wl_list_init(&scene->blur_new_surface.link);
+    wl_list_remove(&scene->blur_compositor_destroy.link);
+    wl_list_init(&scene->blur_compositor_destroy.link);
+    struct blur_surface *surface, *next;
+    wl_list_for_each_safe(surface, next, &scene->blur_surfaces, link) {
+        remove_blur_surface(surface);
+    }
+}
+
+static void blur_compositor_destroy(struct wl_listener *listener, void *data) {
+    (void)data;
+    struct seaside_scene_bridge *scene = wl_container_of(listener, scene, blur_compositor_destroy);
+    remove_blur_watches(scene);
+}
 
 static void destroy_scene_image(struct wlr_buffer *base) {
     struct scene_image *image = wl_container_of(base, image, base);
@@ -767,6 +847,7 @@ static void place_popup_tree(struct scene_view *view) {
 static void view_unmap(struct wl_listener *listener, void *data) {
     (void)data;
     struct scene_view *view = wl_container_of(listener, view, unmap);
+    seaside_scene_blur_destroy(&view->blur);
     seaside_window_capture_unmap(view->capture);
     view->capture = NULL;
     if (view->mapped) {
@@ -930,6 +1011,7 @@ static void view_set_parent(struct wl_listener *listener, void *data) {
 }
 
 static void destroy_view(struct scene_view *view) {
+    seaside_scene_blur_destroy(&view->blur);
     detach_decoration(view);
     seaside_window_capture_unmap(view->capture);
     if (view->owner->focused_view == view) {
@@ -1217,12 +1299,15 @@ static void fit_wallpaper(struct scene_output *view) {
     wlr_scene_node_set_enabled(&view->wallpaper->node, true);
 }
 
-static void fit_banner(struct scene_output *view) {
-    const bool visible = view->banner_logical_height > 0 && view->width > 0 && view->height > 0;
+static void fit_banner(struct scene_output *view, bool project_now) {
+    int height = 0;
+    if (view->banner_logical_height > 0 && view->width > 0 && view->height > 1) {
+        height = view->banner_logical_height < view->height ? view->banner_logical_height
+                                                           : view->height - 1;
+    }
+    const bool visible = height > 0 && !view->banner_fullscreen;
     wlr_scene_node_set_enabled(&view->banner->node, visible);
     if (visible) {
-        const int height =
-            view->banner_logical_height < view->height ? view->banner_logical_height : view->height;
         const struct wlr_fbox crop = {
             .width = view->banner_width,
             .height = (double)view->banner_height * height / view->banner_logical_height,
@@ -1230,6 +1315,8 @@ static void fit_banner(struct scene_output *view) {
         wlr_scene_buffer_set_source_box(view->banner, &crop);
         wlr_scene_buffer_set_dest_size(view->banner, view->width, height);
     }
+    seaside_layer_scene_reserve_top(view->owner->layers, view->viewport->output, height,
+                                    project_now);
 }
 
 static void update_output_appearance(struct scene_output *view) {
@@ -1257,7 +1344,17 @@ static void update_output_appearance(struct scene_output *view) {
             view->owner->appearance(view->owner->appearance_data, output, width, output->scale);
         }
     }
-    fit_banner(view);
+    fit_banner(view, false);
+}
+
+static void clear_output_blur(struct scene_output *output) {
+    if (output->blur_active) {
+        struct scene_view *view;
+        wl_list_for_each(view, &output->owner->views, link) {
+            seaside_scene_blur_remove_output(view->blur, output->viewport->output);
+        }
+        output->blur_active = false;
+    }
 }
 
 static void output_commit(struct wl_listener *listener, void *data) {
@@ -1270,6 +1367,7 @@ static void output_commit(struct wl_listener *listener, void *data) {
     }
     if (event->state->committed & (WLR_OUTPUT_STATE_ENABLED | WLR_OUTPUT_STATE_MODE |
                                    WLR_OUTPUT_STATE_SCALE | WLR_OUTPUT_STATE_TRANSFORM)) {
+        clear_output_blur(view);
         update_output_appearance(view);
         if (view->owner->night_light || view->render_status.night_light_applied) {
             view->lut_request = LUT_PENDING;
@@ -1411,6 +1509,33 @@ static bool prepare_night_light(struct scene_output *view, struct wlr_output_sta
     return true;
 }
 
+static bool prepare_blur(struct scene_output *output) {
+    struct seaside_scene_bridge *scene = output->owner;
+    if (scene->blur_strength <= 0) {
+        return false;
+    }
+    const struct wlr_box viewport = {output->viewport->x, output->viewport->y, output->width,
+                                     output->height};
+    bool applied = false;
+    struct wlr_scene_node *node;
+    // Render bottom to top so a stacked window samples lower blur layers.
+    wl_list_for_each(node, &scene->windows->children, link) {
+        struct scene_view *view = node->data;
+        if (!view || node != &view->tree->node) {
+            continue;
+        }
+        if ((view->id && !view->placement.visible) || view->placement.fullscreen ||
+            !view->mapped) {
+            seaside_scene_blur_remove_output(view->blur, output->viewport->output);
+            continue;
+        }
+        applied |= seaside_scene_blur_update(
+            &view->blur, &scene->scene->tree, view->tree, view->xdg_tree, output->viewport->output,
+            &viewport, scene->blur_strength, scene->blur_passes);
+    }
+    return applied;
+}
+
 static bool commit_frame(struct scene_output *view) {
     struct wlr_scene_output *scene_output = view->viewport;
     struct wlr_output *output = scene_output->output;
@@ -1418,10 +1543,11 @@ static bool commit_frame(struct scene_output *view) {
         return true;
     }
 
+    const bool blur = view->blur_active = prepare_blur(view);
     struct wlr_output_state state;
     wlr_output_state_init(&state);
     const bool retry_lut = view->lut_request == LUT_RETRY;
-    const bool compose = view->retry_composed || retry_lut;
+    const bool compose = view->retry_composed || retry_lut || blur;
     if (compose) {
         wlr_output_lock_attach_render(output, true);
     }
@@ -1436,7 +1562,7 @@ static bool commit_frame(struct scene_output *view) {
         scanout ? &view->scanout_tearing_rejected : &view->composed_tearing_rejected;
     bool async = false;
     if (built && state.buffer) {
-        const uint64_t candidate = tearing_candidate(view);
+        const uint64_t candidate = blur ? 0 : tearing_candidate(view);
         if (candidate != view->tearing_window) {
             view->tearing_window = candidate;
             view->scanout_tearing_rejected = view->composed_tearing_rejected = false;
@@ -1475,6 +1601,7 @@ static bool commit_frame(struct scene_output *view) {
             view->pending_tearing = async;
             view->pending_fallback = scanout                        ? NULL
                                      : view->retry_composed         ? "scanout commit rejected"
+                                     : blur                         ? "backdrop blur requires composition"
                                      : !view->owner->direct_scanout ? "direct scanout disabled"
                                      : !wlr_output_is_direct_scanout_allowed(output)
                                          ? "output requires composition"
@@ -1537,6 +1664,7 @@ static void output_destroy(struct wl_listener *listener, void *data) {
     (void)data;
     struct scene_output *output = wl_container_of(listener, output, destroy);
     struct seaside_scene_bridge *scene = output->owner;
+    clear_output_blur(output);
     if (scene->layers) {
         seaside_layer_scene_remove_output(scene->layers, output->viewport->output);
     }
@@ -1560,6 +1688,7 @@ static void detach(struct seaside_scene_bridge *scene) {
         return;
     }
     end_focus(scene, false);
+    remove_blur_watches(scene);
     scene->window = NULL;
     scene->window_data = NULL;
     scene->watched_pid = 0;
@@ -1630,10 +1759,15 @@ struct seaside_scene_bridge *seaside_scene_create(struct wl_display *display) {
     scene->display = display;
     scene->direct_scanout = true;
     scene->titlebars = true;
+    scene->active_border_color = 0xbfbfbf;
+    scene->inactive_border_color = 0x595959;
     scene->temperature_kelvin = 4500;
     wl_list_init(&scene->views);
     wl_list_init(&scene->popups);
     wl_list_init(&scene->outputs);
+    wl_list_init(&scene->blur_surfaces);
+    wl_list_init(&scene->blur_new_surface.link);
+    wl_list_init(&scene->blur_compositor_destroy.link);
     scene->scene = wlr_scene_create();
     if (!scene->scene) {
         free(scene);
@@ -1682,6 +1816,16 @@ struct seaside_scene_bridge *seaside_scene_create(struct wl_display *display) {
     return scene;
 }
 
+void seaside_scene_watch_surfaces(struct seaside_scene_bridge *scene,
+                                   struct wlr_compositor *compositor) {
+    if (compositor && wl_list_empty(&scene->blur_new_surface.link)) {
+        scene->blur_new_surface.notify = blur_new_surface;
+        scene->blur_compositor_destroy.notify = blur_compositor_destroy;
+        wl_signal_add(&compositor->events.new_surface, &scene->blur_new_surface);
+        wl_signal_add(&compositor->events.destroy, &scene->blur_compositor_destroy);
+    }
+}
+
 void seaside_scene_set_linux_dmabuf(struct seaside_scene_bridge *scene,
                                     struct wlr_linux_dmabuf_v1 *dmabuf) {
     if (dmabuf) {
@@ -1698,6 +1842,12 @@ void seaside_scene_set_titlebars(struct seaside_scene_bridge *scene, bool visibl
     wl_list_for_each(view, &scene->views, link) {
         configure_decoration(view);
     }
+}
+
+void seaside_scene_set_border_colors(struct seaside_scene_bridge *scene, uint32_t active,
+                                     uint32_t inactive) {
+    scene->active_border_color = active;
+    scene->inactive_border_color = inactive;
 }
 
 void seaside_scene_set_render_policy(struct seaside_scene_bridge *scene, bool direct_scanout,
@@ -1720,6 +1870,29 @@ void seaside_scene_set_render_policy(struct seaside_scene_bridge *scene, bool di
             view->render_status.tearing_reason = NULL;
             wlr_output_schedule_frame(view->viewport->output);
         }
+    }
+}
+
+void seaside_scene_set_blur(struct seaside_scene_bridge *scene, bool enabled, double strength,
+                             int passes) {
+    if (!scene || !scene->attached) {
+        return;
+    }
+    const double effective = enabled && isfinite(strength) ? fmin(1, fmax(0, strength)) : 0;
+    if (scene->blur_strength == effective && scene->blur_passes == passes) {
+        return;
+    }
+    scene->blur_strength = effective;
+    scene->blur_passes = passes;
+    if (effective == 0) {
+        struct scene_view *view;
+        wl_list_for_each(view, &scene->views, link) {
+            seaside_scene_blur_destroy(&view->blur);
+        }
+    }
+    struct scene_output *output;
+    wl_list_for_each(output, &scene->outputs, link) {
+        wlr_output_schedule_frame(output->viewport->output);
     }
 }
 
@@ -1852,6 +2025,9 @@ bool seaside_scene_place_output(struct seaside_scene_bridge *scene, struct wlr_o
     if (!view) {
         return false;
     }
+    if (view->viewport->x != x || view->viewport->y != y) {
+        clear_output_blur(view);
+    }
     wlr_scene_output_set_position(view->viewport, x, y);
     update_output_appearance(view);
     wlr_output_create_global(output, scene->display);
@@ -1882,7 +2058,7 @@ void seaside_scene_set_banner(struct seaside_scene_bridge *scene, struct wlr_out
             view->banner_height = buffer ? buffer->height : 0;
             view->banner_logical_height = buffer ? logical_height : 0;
             wlr_scene_buffer_set_buffer(view->banner, buffer);
-            fit_banner(view);
+            fit_banner(view, true);
         }
     }
     seaside_scene_drop_image(buffer);
@@ -1932,6 +2108,11 @@ struct seaside_scene_rect seaside_scene_layer_work_area(struct seaside_scene_bri
         return bounds;
     }
     seaside_layer_scene_update_output(scene->layers, output, bounds);
+    struct scene_output *view = find_output(scene, output);
+    if (view && view->banner_fullscreen != fullscreen) {
+        view->banner_fullscreen = fullscreen;
+        fit_banner(view, false);
+    }
     return seaside_layer_scene_work_area(scene->layers, output, fullscreen);
 }
 
@@ -2004,9 +2185,6 @@ static void restack_view(struct scene_view *view) {
 }
 
 static void project_border(struct scene_view *view, size_t side, struct wlr_box bounds) {
-    static const float inactive[4] = {0.35f, 0.35f, 0.35f, 1};
-    static const float active[4] = {0.75f, 0.75f, 0.75f, 1};
-    const float *color = view->placement.activated ? active : inactive;
     struct wlr_scene_rect *border = view->borders[side];
     if (bounds.width <= 0 || bounds.height <= 0) {
         if (border) {
@@ -2014,6 +2192,10 @@ static void project_border(struct scene_view *view, size_t side, struct wlr_box 
         }
         return;
     }
+    const uint32_t rgb = view->placement.activated ? view->owner->active_border_color
+                                                   : view->owner->inactive_border_color;
+    const float color[4] = {(float)((rgb >> 16) & 0xff) / 255.f,
+                            (float)((rgb >> 8) & 0xff) / 255.f, (float)(rgb & 0xff) / 255.f, 1};
     if (!border) {
         border = wlr_scene_rect_create(view->tree, bounds.width, bounds.height, color);
         if (!border) {
@@ -2064,6 +2246,13 @@ void seaside_scene_place_window(struct seaside_scene_bridge *scene, uint64_t id,
     struct seaside_scene_window_placement previous = view->placement;
     view->placement = *placement;
     const struct seaside_scene_rect box = placement->geometry;
+    if (previous.geometry.x != box.x || previous.geometry.y != box.y ||
+        previous.geometry.width != box.width || previous.geometry.height != box.height ||
+        previous.fullscreen != placement->fullscreen || previous.visible != placement->visible) {
+        // Patches are clipped to their output and positioned relative to this
+        // tree. Rebuild them before drawing at the new location.
+        seaside_scene_blur_destroy(&view->blur);
+    }
     wlr_scene_node_set_position(&view->tree->node, box.x, box.y);
     place_popup_tree(view);
     project_view_content(view);
@@ -2079,6 +2268,7 @@ void seaside_scene_place_window(struct seaside_scene_bridge *scene, uint64_t id,
         previous.fullscreen != placement->fullscreen ||
         previous.stretch_fullscreen != placement->stretch_fullscreen ||
         previous.fit_resize_buffer != placement->fit_resize_buffer) {
+        invalidate_active_blur(scene);
         seaside_window_capture_cursor_changed(scene->capture);
     }
     /* Keep the background opaque throughout the fullscreen transition and

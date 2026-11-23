@@ -817,10 +817,11 @@ bool run_part4(const Fixture &fixture) {
 
     xdg_toplevel_set_maximized(second.toplevel);
     REQUIRE(connection.wait(second, [&] { return second.configured.maximized; }));
-    REQUIRE(second.configured.width == output_bounds.width &&
-            second.configured.height == output_bounds.height);
+    const WindowRect maximized{10, 10, 140, 70};
+    REQUIRE(second.configured.width == maximized.width &&
+            second.configured.height == maximized.height);
     REQUIRE(connection.attach(second, second.configured.width, second.configured.height));
-    REQUIRE(windows.view(*b).geometry == output_bounds);
+    REQUIRE(windows.view(*b).geometry == maximized);
     xdg_toplevel_set_fullscreen(second.toplevel, nullptr);
     REQUIRE(connection.wait(second, [&] { return second.configured.fullscreen; }));
     REQUIRE(connection.attach(second, second.configured.width, second.configured.height));
@@ -830,7 +831,7 @@ bool run_part4(const Fixture &fixture) {
     REQUIRE(connection.attach(second, second.configured.width, second.configured.height));
     xdg_toplevel_unset_maximized(second.toplevel);
     // Submit one last old-size buffer before the new configure is acked.
-    REQUIRE(connection.attach(second, output_bounds.width, output_bounds.height, false));
+    REQUIRE(connection.attach(second, maximized.width, maximized.height, false));
     REQUIRE(connection.wait(second, [&] { return !second.configured.maximized; }));
     REQUIRE(second.configured.width == ordinary.width &&
             second.configured.height == ordinary.height);
@@ -1161,7 +1162,7 @@ bool run_floating_delayed_commits(const Fixture &fixture) {
     REQUIRE(connection.attach(client, ordinary_width, ordinary_height, true, red));
     const auto id = desktop.keyboard_window().value();
     const auto rect = desktop.windows().view(id).geometry;
-    const double x = rect.x + 4, y = rect.y + 4;
+    const double x = rect.x + rect.width - 4, y = rect.y + rect.height - 4;
     REQUIRE(begin_drag(fixture, id, BTN_RIGHT, x, y));
     desktop.motion(x + 6, y);
     REQUIRE(connection.wait(client, [&] { return client.configured.width == rect.width + 6; }));
@@ -1184,6 +1185,53 @@ bool run_floating_delayed_commits(const Fixture &fixture) {
     return true;
 }
 
+bool run_floating_resize_edges(const Fixture &fixture) {
+    auto &desktop = fixture.desktop;
+    auto output = fixture.output();
+    REQUIRE(output &&
+            desktop.add_output(part3_output_handle(output.get()), "main", "", output_bounds));
+    Connection connection(fixture.display);
+    Client client;
+    REQUIRE(connection.connect(client) && connection.open(client));
+    REQUIRE(connection.attach(client, ordinary_width, ordinary_height, true, red));
+    const auto id = desktop.keyboard_window().value_or(0);
+    REQUIRE(id);
+    const auto rect = desktop.windows().view(id).geometry;
+    for (int horizontal : {-1, 0, 1}) {
+        for (int vertical : {-1, 0, 1}) {
+            if (!horizontal && !vertical) {
+                continue;
+            }
+            const double x = rect.x +
+                             (horizontal < 0 ? 2 : horizontal > 0 ? rect.width - 2 : rect.width / 2);
+            const double y = rect.y +
+                             (vertical < 0 ? 2 : vertical > 0 ? rect.height - 2 : rect.height / 2);
+            REQUIRE(begin_drag(fixture, id, BTN_RIGHT, x, y));
+            desktop.motion(x + (horizontal ? horizontal * 5 : 7),
+                           y + (vertical ? vertical * 3 : 9));
+            const WindowRect expected{rect.x - (horizontal < 0 ? 5 : 0),
+                                      rect.y - (vertical < 0 ? 3 : 0),
+                                      rect.width + (horizontal ? 5 : 0),
+                                      rect.height + (vertical ? 3 : 0)};
+            REQUIRE(desktop.windows().view(id).geometry == expected);
+            desktop.motion(x, y);
+            REQUIRE(desktop.windows().view(id).geometry == rect);
+            desktop.button(0, BTN_RIGHT, false, super, x, y);
+        }
+    }
+    const double x = rect.x + rect.width / 2, y = rect.y + rect.height / 2;
+    REQUIRE(begin_drag(fixture, id, BTN_RIGHT, x, y));
+    desktop.motion(x + 8, y + 1);
+    REQUIRE(desktop.windows().view(id).geometry ==
+            (WindowRect{rect.x, rect.y, rect.width + 8, rect.height}));
+    desktop.motion(x - 4, y - 6);
+    REQUIRE(desktop.windows().view(id).geometry ==
+            (WindowRect{rect.x, rect.y, rect.width - 4, rect.height}));
+    desktop.button(0, BTN_RIGHT, false, super, x - 4, y - 6);
+    REQUIRE(!desktop.failed());
+    return true;
+}
+
 bool run_floating_resize_limits(const Fixture &fixture) {
     auto &desktop = fixture.desktop;
     auto output = fixture.output();
@@ -1198,7 +1246,7 @@ bool run_floating_resize_limits(const Fixture &fixture) {
     const auto id = desktop.keyboard_window();
     REQUIRE(id);
     const auto rect = desktop.windows().view(*id).geometry;
-    const double x = rect.x + 4, y = rect.y + 4;
+    const double x = rect.x + rect.width - 4, y = rect.y + rect.height - 4;
     REQUIRE(begin_drag(fixture, *id, BTN_RIGHT, x, y));
     const auto projections = std::make_shared<unsigned>(0);
     desktop.on_projection([projections] { ++*projections; });
@@ -1238,11 +1286,11 @@ bool run_floating_resize_limits(const Fixture &fixture) {
     *projections = 0;
     const auto maximum = desktop.dispatch(grow, 0, id);
     REQUIRE(maximum && !*maximum && *projections == 0);
-    REQUIRE(begin_drag(fixture, *id, BTN_RIGHT, 20, 20));
+    REQUIRE(begin_drag(fixture, *id, BTN_RIGHT, 140, 70));
     *projections = 0;
-    desktop.motion(40, 40);
+    desktop.motion(159, 89);
     REQUIRE(*projections == 0 && desktop.windows().view(*id).geometry == output_bounds);
-    desktop.button(0, BTN_RIGHT, false, super, 40, 40);
+    desktop.button(0, BTN_RIGHT, false, super, 159, 89);
     REQUIRE(desktop.dispatch(action(ActionKind::toggle_window_maximize)).value_or(false));
     const auto invalid = desktop.dispatch(grow);
     REQUIRE(!invalid && invalid.error() == seaside::DesktopActionError::invalid_state);
@@ -1324,6 +1372,12 @@ bool run_floating_borders(const Fixture &fixture) {
 
     auto config = seaside::default_config();
     config.window.tiling = false;
+    config.window.active_border_color = 0xe28437;
+    config.window.inactive_border_color = 0x3254a8;
+    desktop.apply_config(config);
+    REQUIRE(wait_pixel(connection, first, output.get(), x, y, 0x3254a8));
+    REQUIRE(desktop.action(action(ActionKind::cycle_focus_mru)));
+    REQUIRE(wait_pixel(connection, first, output.get(), x, y, 0xe28437));
     config.window.border_width = 0;
     desktop.apply_config(config);
     REQUIRE(wait_pixel(connection, first, output.get(), x, y, 0));
@@ -1904,6 +1958,45 @@ bool run_layer_shell(const Fixture &fixture) {
     seat.key(KEY_F8);
     REQUIRE(connection.wait(client, [&] { return !client.configured.fullscreen; }));
 
+    auto config = seaside::default_config();
+    config.window.gaps_outer = 4;
+    config.window.gaps_inner = 0;
+    config.window.border_width = 0;
+    desktop.apply_config(config);
+    const auto banner = seaside::render_config_banner("Configuration error\nInvalid value",
+                                                       output_bounds.width, 1);
+    REQUIRE(banner);
+    scene.set_config_error(seaside::Diagnostic{.path = {}, .field = {}, .message = "Invalid value"});
+    const auto banner_height = banner->logical_height;
+    const WindowRect below_banner{4, reserved.y + banner_height + 4, 152,
+                                  reserved.height - banner_height - 8};
+    REQUIRE(connection.wait(
+        client, [&] { return desktop.windows().view(id).geometry == below_banner; }));
+    REQUIRE(wait_pixel(connection, client, primary.get(), 4, banner_height + 5, green));
+    const auto &banner_pixel = banner->pixels;
+    const auto banner_color = static_cast<std::uint32_t>(banner_pixel[0] | banner_pixel[1] << 8 |
+                                                        banner_pixel[2] << 16);
+    REQUIRE(wait_pixel(connection, client, other.get(), 0, 0, banner_color));
+
+    REQUIRE(desktop.dispatch(action(ActionKind::toggle_window_maximize), 0, id).value_or(false));
+    REQUIRE(desktop.windows().view(id).geometry == below_banner);
+    REQUIRE(desktop.dispatch(action(ActionKind::toggle_window_fullscreen), 0, id).value_or(false));
+    REQUIRE(desktop.windows().view(id).geometry == output_bounds);
+    REQUIRE(connection.wait(client, [&] { return client.configured.fullscreen; }));
+    REQUIRE(connection.attach_configured(client, red));
+    REQUIRE(wait_pixel(connection, client, primary.get(), 0, 0, red));
+    REQUIRE(wait_pixel(connection, client, other.get(), 0, 0, banner_color));
+    REQUIRE(desktop.dispatch(action(ActionKind::toggle_window_fullscreen), 0, id).value_or(false));
+    REQUIRE(desktop.windows().view(id).geometry == below_banner);
+    REQUIRE(wait_pixel(connection, client, primary.get(), 0, 0, banner_color));
+    REQUIRE(desktop.dispatch(action(ActionKind::toggle_window_maximize), 0, id).value_or(false));
+    scene.set_config_error(std::nullopt);
+    config.window.gaps_outer = 0;
+    desktop.apply_config(config);
+    REQUIRE(connection.wait(
+        client, [&] { return desktop.windows().view(id).geometry == reserved; }));
+    REQUIRE(wait_pixel(connection, client, primary.get(), 4, 5, green));
+
     zwlr_layer_surface_v1_set_exclusive_zone(panel.role, 20);
     wl_surface_commit(panel.surface);
     REQUIRE(connection.wait(client, [&] { return desktop.windows().view(id).geometry.y == 24; }));
@@ -2267,10 +2360,6 @@ bool run_attention(const Fixture &fixture) {
     REQUIRE(connection.roundtrip(first) && attention->count == 1);
     desktop.on_attention({});
 
-    xdg_toplevel_set_fullscreen(second.toplevel, nullptr);
-    REQUIRE(connection.wait(second, [&] { return second.configured.fullscreen; }));
-    REQUIRE(connection.attach_configured(second, blue));
-    REQUIRE(wait_pixel(connection, second, output.get(), 0, 0, blue));
     const seaside::Diagnostic error{.path = "/tmp/café.toml",
                                     .line = 4,
                                     .column = 1,
@@ -2282,10 +2371,18 @@ bool run_attention(const Fixture &fixture) {
     const auto &pixel = banner->pixels;
     const auto color = static_cast<std::uint32_t>(pixel[0] | pixel[1] << 8 | pixel[2] << 16);
     REQUIRE(wait_pixel(connection, second, output.get(), 0, 0, color));
+    REQUIRE(windows.view(*second_id).geometry.y > 0);
+    xdg_toplevel_set_fullscreen(second.toplevel, nullptr);
+    REQUIRE(connection.wait(second, [&] { return second.configured.fullscreen; }));
+    REQUIRE(connection.attach_configured(second, blue));
+    REQUIRE(wait_pixel(connection, second, output.get(), 0, 0, blue));
     seaside_scene_target target{};
     REQUIRE(scene.window_at(1, 1, target) && target.id == *second_id);
+    xdg_toplevel_unset_fullscreen(second.toplevel);
+    REQUIRE(connection.wait(second, [&] { return !second.configured.fullscreen; }));
+    REQUIRE(wait_pixel(connection, second, output.get(), 0, 0, color));
     scene.set_config_error(std::nullopt);
-    REQUIRE(wait_pixel(connection, second, output.get(), 0, 0, blue));
+    REQUIRE(wait_pixel(connection, second, output.get(), 0, 0, 0));
     return true;
 }
 
@@ -2355,6 +2452,7 @@ int main(int argc, char **argv) {
                        run_fixture(config, run_floating_resize_dialogs) &&
                        run_fixture(config, run_floating_resize_limits) &&
                        run_fixture(config, run_floating_delayed_commits) &&
+                       run_fixture(config, run_floating_resize_edges) &&
                        run_fixture(config, run_client_gestures) &&
                        run_fixture(config, run_popup_shutdown<false>) &&
                        run_fixture(config, run_popup_shutdown<true>)

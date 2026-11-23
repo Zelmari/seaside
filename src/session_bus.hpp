@@ -68,6 +68,8 @@ class SessionBus final {
     BusError last_error() const noexcept;
     std::size_t pending() const noexcept;
     std::size_t callback_failures() const noexcept;
+    // Rearm write events after emitting a signal through the borrowed handle.
+    bool refresh_events() noexcept;
 
     // The caller retains its message reference; sd-bus takes any reference it
     // needs after successful admission. Timeout is finite and must be positive.

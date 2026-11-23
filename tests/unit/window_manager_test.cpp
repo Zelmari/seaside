@@ -9,6 +9,7 @@ constexpr WindowRect left = {0, 0, 1000, 700};
 constexpr WindowRect right = {1000, 0, 800, 600};
 constexpr WindowRect top = {0, -600, 800, 600};
 constexpr WindowRect usable = {8, 32, 984, 660};
+constexpr WindowRect maximized = {18, 42, 964, 640};
 constexpr WindowRect client = {0, 0, 320, 200};
 
 WindowId open_window(WindowManager &manager, std::optional<WindowId> parent = {},
@@ -196,7 +197,7 @@ TEST(WindowManager, FocusRevealsATileWithoutChangingMaximizedOrTiledGeometry) {
     EXPECT_EQ(manager.focused_window(), tile);
     EXPECT_GT(manager.view(tile).stacking, manager.view(browser).stacking);
     EXPECT_EQ(manager.view(tile).geometry, tile_geometry);
-    EXPECT_EQ(manager.view(browser).geometry, usable);
+    EXPECT_EQ(manager.view(browser).geometry, maximized);
     EXPECT_TRUE(manager.view(browser).maximized);
 
     ASSERT_TRUE(manager.cycle_focus(true));
@@ -280,14 +281,14 @@ TEST(WindowManager, FloatingRaiseAndLayeredGeometryRestore) {
     ASSERT_TRUE(manager.click(a));
     EXPECT_GT(manager.view(a).stacking, manager.view(b).stacking);
     ASSERT_TRUE(manager.set_maximized(a, true));
-    EXPECT_EQ(manager.view(a).geometry, usable);
-    ASSERT_TRUE(manager.commit_geometry(a, usable));
+    EXPECT_EQ(manager.view(a).geometry, maximized);
+    ASSERT_TRUE(manager.commit_geometry(a, maximized));
     ASSERT_TRUE(manager.set_fullscreen(a, true));
     EXPECT_EQ(manager.view(a).geometry, left);
     EXPECT_TRUE(manager.view(a).maximized);
     ASSERT_TRUE(manager.commit_geometry(a, left));
     ASSERT_TRUE(manager.set_fullscreen(a, false));
-    EXPECT_EQ(manager.view(a).geometry, usable);
+    EXPECT_EQ(manager.view(a).geometry, maximized);
     ASSERT_TRUE(manager.set_maximized(a, false));
     EXPECT_EQ(manager.view(a).geometry, original);
     EXPECT_FALSE(manager.view(a).fullscreen);

@@ -2,6 +2,7 @@
 #include "tty_input.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
 #include <linux/input-event-codes.h>
@@ -36,12 +37,45 @@ bool valid_size(WindowRect rect) noexcept {
 bool includes_serial(std::uint32_t committed, std::uint32_t requested) noexcept {
     return requested == 0 || (committed && committed - requested < 0x80000000U);
 }
+
+constexpr std::array resize_edges{std::pair{Direction::left, SEASIDE_RESIZE_LEFT},
+                                  std::pair{Direction::right, SEASIDE_RESIZE_RIGHT},
+                                  std::pair{Direction::up, SEASIDE_RESIZE_TOP},
+                                  std::pair{Direction::down, SEASIDE_RESIZE_BOTTOM}};
+
+std::uint32_t resize_edges_at(WindowRect box, double x, double y) noexcept {
+    const auto near_edge = [](double fraction, std::uint32_t near, std::uint32_t far) {
+        return fraction < 0.25 ? near : fraction > 0.75 ? far : 0U;
+    };
+    return near_edge((x - box.x) / box.width, SEASIDE_RESIZE_LEFT, SEASIDE_RESIZE_RIGHT) |
+           near_edge((y - box.y) / box.height, SEASIDE_RESIZE_TOP, SEASIDE_RESIZE_BOTTOM);
+}
+
+std::uint32_t resize_edges_toward(int dx, int dy, std::uint32_t available) noexcept {
+    const auto pick = [available](int delta, std::uint32_t near, std::uint32_t far) {
+        const auto preferred = delta < 0 ? near : far;
+        return available & preferred ? preferred : available & (near | far);
+    };
+    const auto horizontal = std::abs(std::int64_t{dx});
+    const auto vertical = std::abs(std::int64_t{dy});
+    std::uint32_t edges = 0;
+    if (dx && horizontal * 2 >= vertical) {
+        edges |= pick(dx, SEASIDE_RESIZE_LEFT, SEASIDE_RESIZE_RIGHT);
+    }
+    if (dy && vertical * 2 >= horizontal) {
+        edges |= pick(dy, SEASIDE_RESIZE_TOP, SEASIDE_RESIZE_BOTTOM);
+    }
+    return edges;
+}
 } // namespace
 
 Desktop::Desktop(Scene &scene, const Config &config)
     : scene_(scene), windows_(config), bindings_(config.keybinds),
       fullscreen_aspect_(config.render.fullscreen_aspect) {
     scene_.set_titlebars(config.window.titlebars);
+    scene_.set_border_colors(config.window.active_border_color,
+                             config.window.inactive_border_color);
+    scene_.set_dark_appearance(config.appearance.color_scheme == ColorScheme::dark);
     scene_.set_window_handler(on_window, this);
     scene_.set_layer_handler(
         [](void *self) { return static_cast<Desktop *>(self)->focused_output_handle(); },
@@ -159,6 +193,9 @@ void Desktop::apply_config(const Config &config) noexcept try {
     }
     fullscreen_aspect_ = config.render.fullscreen_aspect;
     scene_.set_titlebars(config.window.titlebars);
+    scene_.set_border_colors(config.window.active_border_color,
+                             config.window.inactive_border_color);
+    scene_.set_dark_appearance(config.appearance.color_scheme == ColorScheme::dark);
     windows_.apply_layout_config(config);
     project();
 } catch (...) {
@@ -204,7 +241,8 @@ void Desktop::project(WindowId resize, bool geometry_only) {
     }
     if (drag_) {
         const auto view = windows_.view(drag_->window);
-        if (!view.visible || (drag_->client && view.tiled)) {
+        if (!view.visible || view.maximized || view.fullscreen || (drag_->client && view.tiled) ||
+            (drag_->resize && drag_->tiled != view.tile_layout)) {
             geometry_only = false;
             discard_drag();
         }
@@ -588,6 +626,7 @@ bool Desktop::begin_client_drag(const seaside_scene_window_event &event) {
                  .y = pointer_->y,
                  .started = resize,
                  .client = true,
+                 .resize_edges_locked = resize,
                  .resize_edges = event.resize_edges,
                  .initial_geometry = view.geometry};
     return true;
@@ -845,7 +884,26 @@ bool Desktop::button(WindowId id, std::uint32_t button, bool pressed, std::uint8
         const auto binding = bindings_.find({modifiers, chord, 0});
         const auto view = windows_.view(id);
         if (binding != bindings_.end() && view.visible && !view.maximized && !view.fullscreen) {
-            drag_ = Drag{id, button, binding->second.kind == ActionKind::resize_window, x, y};
+            const bool resize = binding->second.kind == ActionKind::resize_window;
+            if (!resize || valid_size(view.geometry)) {
+                std::uint32_t available = 0;
+                for (const auto &[direction, edge] : resize_edges) {
+                    if (!view.tile_layout || windows_.has_tile_resize_edge(id, direction)) {
+                        available |= edge;
+                    }
+                }
+                const auto edges = resize ? resize_edges_at(view.geometry, x, y) : 0U;
+                drag_ = Drag{.window = id,
+                             .button = button,
+                             .resize = resize,
+                             .x = x,
+                             .y = y,
+                             .tiled = view.tile_layout,
+                             .resize_edges_locked = edges != 0,
+                             .available_resize_edges = available,
+                             .resize_edges = edges & available,
+                             .initial_geometry = view.geometry};
+            }
         }
     }
     // Focusing by click or arming a drag must not publish an unfinished tiled opening.
@@ -887,6 +945,16 @@ void Desktop::motion(double x, double y) noexcept try {
     if (!drag_) {
         return;
     }
+    if (drag_->resize) {
+        if (!drag_->resize_edges_locked) {
+            const auto [dx, dy] = drag_->delta(x, y);
+            drag_->resize_edges = resize_edges_toward(dx, dy, drag_->available_resize_edges);
+            drag_->resize_edges_locked = drag_->resize_edges != 0;
+        }
+        if (!drag_->resize_edges) {
+            return;
+        }
+    }
     if (frame_paced_resize_ && drag_->resize) {
         if (auto *output = window_output_handle(drag_->window)) {
             if (drag_->pending) {
@@ -920,17 +988,28 @@ void Desktop::before_output_frame(void *self, wlr_output *output) noexcept {
 void Desktop::apply_drag_motion(double x, double y) {
     const auto [dx, dy] = drag_->delta(x, y);
     const WindowId id = drag_->window;
-    if (const auto edges = drag_->resize_edges) {
-        // Client edges stay anchored to the original geometry. Compositor
-        // gestures advance x/y by whole pixels and retain the fractional remainder.
+    if (drag_->resize) {
+        const auto edges = drag_->resize_edges;
+        if (!edges) {
+            return;
+        }
+        const auto horizontal = edges & SEASIDE_RESIZE_LEFT    ? Direction::left
+                                : edges & SEASIDE_RESIZE_RIGHT ? Direction::right
+                                                               : Direction::none;
+        const auto vertical = edges & SEASIDE_RESIZE_TOP      ? Direction::up
+                              : edges & SEASIDE_RESIZE_BOTTOM ? Direction::down
+                                                              : Direction::none;
         drag_->applied_edge_delta = {dx, dy};
-        if (windows_.resize_floating(
-                id, drag_->initial_geometry,
-                edges & (SEASIDE_RESIZE_LEFT | SEASIDE_RESIZE_RIGHT) ? std::optional{dx}
-                                                                     : std::nullopt,
-                edges & (SEASIDE_RESIZE_TOP | SEASIDE_RESIZE_BOTTOM) ? std::optional{dy}
-                                                                     : std::nullopt,
-                (edges & SEASIDE_RESIZE_LEFT) != 0, (edges & SEASIDE_RESIZE_TOP) != 0)) {
+        const bool changed =
+            drag_->tiled ? windows_.resize_tile_edges(id, drag_->initial_geometry, horizontal, dx,
+                                                      vertical, dy)
+                         : windows_.resize_floating(
+                               id, drag_->initial_geometry,
+                               horizontal != Direction::none ? std::optional{dx} : std::nullopt,
+                               vertical != Direction::none ? std::optional{dy} : std::nullopt,
+                               horizontal == Direction::left, vertical == Direction::up);
+        if (changed) {
+            drag_->started = true;
             project(id, true);
         }
         return;
@@ -940,22 +1019,15 @@ void Desktop::apply_drag_motion(double x, double y) {
     }
     drag_->x += dx;
     drag_->y += dy;
-    if (drag_->resize) {
-        if (windows_.resize_window_by(id, dx, dy) == ResizeResult::changed) {
-            drag_->started = true;
-            project(id, true);
+    if (!drag_->started) {
+        if (!windows_.begin_move(id)) {
+            discard_drag();
+            return;
         }
-    } else {
-        if (!drag_->started) {
-            if (!windows_.begin_move(id)) {
-                discard_drag();
-                return;
-            }
-            drag_->started = true;
-        }
-        if (windows_.move_window_by(id, dx, dy)) {
-            project();
-        }
+        drag_->started = true;
+    }
+    if (windows_.move_window_by(id, dx, dy)) {
+        project();
     }
 }
 

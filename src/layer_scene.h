@@ -19,6 +19,8 @@ bool seaside_layer_scene_add_output(struct seaside_layer_scene *layers, struct w
                                     struct seaside_scene_rect bounds);
 void seaside_layer_scene_update_output(struct seaside_layer_scene *layers,
                                        struct wlr_output *output, struct seaside_scene_rect bounds);
+void seaside_layer_scene_reserve_top(struct seaside_layer_scene *layers, struct wlr_output *output,
+                                     int height, bool project_now);
 void seaside_layer_scene_remove_output(struct seaside_layer_scene *layers,
                                        struct wlr_output *output);
 struct seaside_scene_rect seaside_layer_scene_work_area(struct seaside_layer_scene *layers,

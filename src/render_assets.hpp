@@ -27,7 +27,7 @@ std::expected<Wallpaper, Diagnostic> decode_wallpaper(const std::string &path);
 
 inline constexpr std::size_t max_config_banner_bytes = 16 * 1024 * 1024;
 std::shared_ptr<const PixelImage> render_config_banner(std::string_view message, int width,
-                                                       float scale);
+                                                       float scale, bool dark = true);
 
 } // namespace seaside
 

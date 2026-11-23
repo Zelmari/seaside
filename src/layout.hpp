@@ -18,6 +18,8 @@ struct WindowRect {
     bool operator==(const WindowRect &) const = default;
 };
 
+WindowRect inset_window_rect(WindowRect box, int margin) noexcept;
+
 struct TileLimits {
     int min_width = 0;
     int min_height = 0;
@@ -76,6 +78,8 @@ class WorkspaceLayout {
     bool swap(WindowId first, WindowId second);
     bool resize(WindowId id, Direction direction, int distance);
     bool resize_by(WindowId id, int dx, int dy);
+    bool has_resize_edge(WindowId id, Direction edge) const noexcept;
+    bool resize_edge(WindowId id, Direction edge, int delta);
 
   private:
     // Index zero is the null link. Freed nodes form a list through `parent`.
@@ -117,8 +121,10 @@ class WorkspaceLayout {
     std::pair<int, int> split_minima(const Node &node, int extent) const noexcept;
     std::optional<int> fit_children(const Node &node, int span, int requested) const noexcept;
     void project_columns();
-    bool resize_split(WindowId id, Direction direction, int distance);
+    NodeId split_for(WindowId id, Direction direction, bool shared_edge) const noexcept;
+    bool resize_split(NodeId id, int delta);
     bool resize_column(WindowId id, int delta);
+    bool resize_column_divider(WindowId left, WindowId right, int delta);
     WindowRect tiling_area() const noexcept;
 
     LayoutSettings settings_;

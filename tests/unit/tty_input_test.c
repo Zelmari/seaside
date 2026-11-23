@@ -224,6 +224,9 @@ struct keyboard_client {
     unsigned pointer_motions;
     unsigned pointer_buttons;
     unsigned pointer_axes;
+    double axis_delta;
+    uint32_t axis_orientation, axis_source;
+    int32_t axis_discrete;
     unsigned pointer_frames;
     unsigned relative_motions;
     unsigned locks;
@@ -353,9 +356,10 @@ static void pointer_axis(void *data, struct wl_pointer *pointer, uint32_t time, 
                          wl_fixed_t value) {
     (void)pointer;
     (void)time;
-    check(axis == WL_POINTER_AXIS_VERTICAL_SCROLL && wl_fixed_to_double(value) == 3,
-          "axis event was changed in the input bridge");
-    ++((struct keyboard_client *)data)->pointer_axes;
+    struct keyboard_client *client = data;
+    ++client->pointer_axes;
+    client->axis_orientation = axis;
+    client->axis_delta = wl_fixed_to_double(value);
 }
 
 static void pointer_frame(void *data, struct wl_pointer *pointer) {
@@ -364,9 +368,8 @@ static void pointer_frame(void *data, struct wl_pointer *pointer) {
 }
 
 static void pointer_axis_source(void *data, struct wl_pointer *pointer, uint32_t source) {
-    (void)data;
     (void)pointer;
-    check(source == WL_POINTER_AXIS_SOURCE_FINGER, "wrong axis source");
+    ((struct keyboard_client *)data)->axis_source = source;
 }
 
 static void pointer_axis_stop(void *data, struct wl_pointer *pointer, uint32_t time,
@@ -380,11 +383,9 @@ static void pointer_axis_stop(void *data, struct wl_pointer *pointer, uint32_t t
 
 static void pointer_axis_discrete(void *data, struct wl_pointer *pointer, uint32_t axis,
                                   int32_t discrete) {
-    (void)data;
     (void)pointer;
     (void)axis;
-    (void)discrete;
-    check(false, "unexpected discrete axis event for finger source");
+    ((struct keyboard_client *)data)->axis_discrete = discrete;
 }
 
 static const struct wl_pointer_listener pointer_listener = {
@@ -1065,6 +1066,9 @@ static void exercise_wayland_pointer(void) {
               left.events.pointer_leaves == 1 && left.events.pointer_axes == 0 &&
               right.events.enters == 0 && right.events.pointer_enters == 1 &&
               right.events.pointer_axes == 1 && right.events.pointer_frames > 0 &&
+              right.events.axis_source == WL_POINTER_AXIS_SOURCE_FINGER &&
+              right.events.axis_orientation == WL_POINTER_AXIS_VERTICAL_SCROLL &&
+              right.events.axis_delta == 3 && right.events.axis_discrete == 0 &&
               right.events.pointer_x == 10 && right.events.pointer_y == 10,
           "hover or background scrolling changed keyboard focus or reached the wrong surface");
 
@@ -1083,14 +1087,35 @@ static void exercise_wayland_pointer(void) {
     const unsigned old_regular = right.events.pointer_motions;
     const unsigned old_relative = right.events.relative_motions;
     relative(&pointer, -125, -111);
+    seaside_tty_input_set_inverse_scroll(scene.input, true);
     axis(&pointer);
     button(&pointer, BTN_LEFT, false);
     round_trip(server, right.display);
     check(scene.x == 110 && right.events.pointer_motions == old_regular &&
               right.events.relative_motions == old_relative + 1 &&
               right.events.relative_dx == -125 && right.events.unaccelerated_dx == -111 &&
-              right.events.pointer_axes == 2 && right.events.pointer_buttons == 2,
+              right.events.pointer_axes == 2 && right.events.axis_delta == -3 &&
+              right.events.pointer_buttons == 2,
           "pointer lock did not suppress motion or failed to preserve raw deltas/axis/buttons");
+    struct wlr_pointer_axis_event wheel = {
+        .pointer = &pointer,
+        .time_msec = 14,
+        .source = WL_POINTER_AXIS_SOURCE_WHEEL,
+        .orientation = WL_POINTER_AXIS_HORIZONTAL_SCROLL,
+        .delta = 9,
+        .delta_discrete = WLR_POINTER_AXIS_DISCRETE_STEP,
+    };
+    wl_signal_emit_mutable(&pointer.events.axis, &wheel);
+    wl_signal_emit_mutable(&pointer.events.frame, &pointer);
+    round_trip(server, right.display);
+    check(right.events.axis_source == WL_POINTER_AXIS_SOURCE_WHEEL &&
+              right.events.axis_orientation == WL_POINTER_AXIS_HORIZONTAL_SCROLL &&
+              right.events.axis_delta == -9 && right.events.axis_discrete == -1,
+          "inverse wheel scrolling did not invert both axis values");
+    seaside_tty_input_set_inverse_scroll(scene.input, false);
+    axis(&pointer);
+    round_trip(server, right.display);
+    check(right.events.axis_delta == 3, "normal scrolling did not restore the original direction");
     seaside_tty_input_set_focus(scene.input, scene.surfaces[0]);
     round_trip(server, right.display);
     check(right.events.unlocks == 1 && !scene.locked,

@@ -186,7 +186,7 @@ std::expected<Wallpaper, Diagnostic> decode_wallpaper(const std::string &path) {
 }
 
 std::shared_ptr<const PixelImage> render_config_banner(std::string_view message, int width,
-                                                       float scale) {
+                                                       float scale, bool dark) {
     if (message.empty() || width <= 0 || !std::isfinite(scale) || scale <= 0 || scale > 4) {
         return {};
     }
@@ -232,11 +232,19 @@ std::shared_ptr<const PixelImage> render_config_banner(std::string_view message,
         cairo_surface_destroy);
     std::unique_ptr<cairo_t, decltype(&cairo_destroy)> cairo(cairo_create(surface.get()),
                                                              cairo_destroy);
-    cairo_set_source_rgb(cairo.get(), 0.33, 0.06, 0.10);
+    if (dark) {
+        cairo_set_source_rgb(cairo.get(), 0.33, 0.06, 0.10);
+    } else {
+        cairo_set_source_rgb(cairo.get(), 0.98, 0.90, 0.91);
+    }
     cairo_paint(cairo.get());
     cairo_scale(cairo.get(), horizontal_scale, static_cast<double>(pixels_tall) / logical_height);
     cairo_move_to(cairo.get(), padding, padding);
-    cairo_set_source_rgb(cairo.get(), 1, 1, 1);
+    if (dark) {
+        cairo_set_source_rgb(cairo.get(), 1, 1, 1);
+    } else {
+        cairo_set_source_rgb(cairo.get(), 0.28, 0.06, 0.09);
+    }
     pango_cairo_update_layout(cairo.get(), layout.get());
     pango_cairo_show_layout(cairo.get(), layout.get());
     cairo_surface_flush(surface.get());

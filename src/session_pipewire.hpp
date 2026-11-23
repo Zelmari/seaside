@@ -1,10 +1,12 @@
 #ifndef SEASIDE_SESSION_PIPEWIRE_HPP
 #define SEASIDE_SESSION_PIPEWIRE_HPP
 
+#include <array>
 #include <chrono>
 #include <expected>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 
 struct wl_event_loop;
@@ -34,6 +36,28 @@ struct PipeWireError {
     int system_error = 0;
 };
 
+struct AudioRouteStatus {
+    std::optional<std::string> effective;
+    bool available = false;
+    bool metadata_ready = false;
+};
+
+// Preserve metadata ownership when the live PipeWire probe reconnects.
+class AudioRouteOwnership final {
+  private:
+    friend class PipeWireProbe;
+    struct Write {
+        std::optional<std::string> value;
+        bool restore;
+    };
+    struct Route {
+        std::optional<std::string> previous;
+        std::optional<std::string> written;
+        std::optional<Write> pending;
+    };
+    std::array<Route, 2> routes_;
+};
+
 // A single core roundtrip, not a playback/capture or whole-session health check.
 // Create/use/destroy on the owning Wayland thread; the borrowed event loop must
 // outlive the probe. Resource construction may load the system client modules;
@@ -45,6 +69,7 @@ class PipeWireProbe final {
         // Empty selects PipeWire's normal remote and socket activation. Explicit
         // paths let isolated tests avoid connecting to the user's actual server.
         std::string remote{};
+        std::shared_ptr<AudioRouteOwnership> audio_ownership{};
     };
     using Completion = std::function<void(PipeWireResult)>;
     using RuntimeFault = std::function<void(int native_error)>;
@@ -66,6 +91,10 @@ class PipeWireProbe final {
     // before readiness and silently releases a retained connection afterwards.
     std::expected<void, PipeWireError> cancel() noexcept;
     PipeWireResult result() const noexcept;
+    void set_audio_routes(const std::optional<std::string> &output,
+                          const std::optional<std::string> &input) noexcept;
+    void refresh_audio_routes() noexcept;
+    AudioRouteStatus audio_route_status(bool playback) const;
 
   private:
     struct Impl;

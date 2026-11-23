@@ -69,6 +69,9 @@ class Desktop final {
         double x, y;
         bool started = false;
         bool client = false;
+        bool tiled = false;
+        bool resize_edges_locked = false;
+        std::uint32_t available_resize_edges = 0;
         std::uint32_t resize_edges = 0;
         WindowRect initial_geometry{};
         std::optional<PointerPosition> pending{};

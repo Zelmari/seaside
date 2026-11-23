@@ -78,6 +78,9 @@ class WindowManager final {
     bool swap_window(WindowId id, Direction direction);
     bool resize_window(WindowId id, Direction direction, int distance);
     ResizeResult resize_window_by(WindowId id, int dw, int dh);
+    bool has_tile_resize_edge(WindowId id, Direction edge) const noexcept;
+    bool resize_tile_edges(WindowId id, WindowRect start, Direction horizontal, int dx,
+                           Direction vertical, int dy);
     bool resize_floating(WindowId id, WindowRect start, std::optional<int> dx,
                          std::optional<int> dy, bool from_left, bool from_top);
     bool begin_move(WindowId id);
