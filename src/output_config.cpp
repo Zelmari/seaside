@@ -203,8 +203,16 @@ std::expected<void, Diagnostic> OutputConfig::apply(const Config &config, bool p
                                          .scale = static_cast<float>(settings.scale),
                                          .adaptive_sync = false};
         if (!seaside_tty_drm_select_mode(output.handle, &next)) {
-            return failure("monitors.resolution",
-                           "Unsupported resolution or refresh for " + connector);
+            auto automatic = next;
+            automatic.refresh_millihz = 0;
+            if (next.refresh_millihz && seaside_tty_drm_select_mode(output.handle, &automatic)) {
+                return failure("monitors.refresh_rate",
+                               "Unsupported refresh rate for " + connector + " at " +
+                                   std::to_string(automatic.width) + "x" +
+                                   std::to_string(automatic.height) +
+                                   ". Use auto or select a supported rate for this output");
+            }
+            return failure("monitors.resolution", "Unsupported resolution for " + connector);
         }
         if (!output.enabled) {
             continue;

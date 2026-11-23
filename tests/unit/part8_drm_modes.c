@@ -66,6 +66,13 @@ int main(void) {
         }
     }
     CHECK(matched == 3);
+    modes[2].refresh = 180003;
+    struct seaside_drm_output_settings nominal_180 = {.refresh_millihz = 180000};
+    automatic.refresh_millihz = 0;
+    CHECK(seaside_tty_drm_select_mode(&output, &nominal_180));
+    CHECK(seaside_tty_drm_select_mode(&output, &automatic));
+    CHECK(nominal_180.mode == &modes[2] && nominal_180.mode == automatic.mode);
+    CHECK(nominal_180.refresh_millihz == 180003);
     modes[2].refresh = 60000;
     refresh.refresh_millihz = 60000;
     CHECK(seaside_tty_drm_select_mode(&output, &refresh) && refresh.mode == &modes[2]);
