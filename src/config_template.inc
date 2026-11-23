@@ -110,9 +110,21 @@ temperature_kelvin = 4500
 # All default bindings can be removed or remapped.
 # This table is the complete active map: delete/comment an entry to disable it.
 # An empty [keybinds] table disables all bindings; omitting the table uses defaults.
+"Super+Q" = "close_window"
 "Super+D" = "toggle_window_tiling"
 "Super+F" = "toggle_window_maximize"
 "Super+Shift+F" = "toggle_window_fullscreen"
+# Switch to workspaces 1 through 10. Use 0 for workspace 10.
+"Super+1" = "workspace 1"
+"Super+2" = "workspace 2"
+"Super+3" = "workspace 3"
+"Super+4" = "workspace 4"
+"Super+5" = "workspace 5"
+"Super+6" = "workspace 6"
+"Super+7" = "workspace 7"
+"Super+8" = "workspace 8"
+"Super+9" = "workspace 9"
+"Super+0" = "workspace 10"
 "Super+Left" = "focus left"
 "Super+Right" = "focus right"
 "Super+Up" = "focus up"
@@ -128,7 +140,6 @@ temperature_kelvin = 4500
 "XF86AudioRaiseVolume" = "exec wpctl set-volume --limit 1 @DEFAULT_AUDIO_SINK@ 5%+"
 "XF86AudioMute" = "exec wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle"
 
-# ALL OTHER APPROVED ACTIONS ARE UNBOUND BY DEFAULT.
 # Available action forms (choose your own chords; no hidden defaults):
 #   toggle_window_tiling; focus DIR; cycle_focus_mru
 #   move_window (mouse drag only); resize_window (mouse drag only)
@@ -142,8 +153,7 @@ temperature_kelvin = 4500
 # SELECTOR = identity:<as-reported> or connector:<output-name>.
 # DISTANCE = optional positive logical pixels, default 32.
 # Optional examples (uncomment ONLY those you want):
-# "Super+Q" = "close_window"
-# "Super+1" = "workspace 1"
+# "Super+B" = "exec firefox"
 # "Super+Shift+1" = "move_to_workspace 1"
 # "Super+Alt+1" = "transfer_workspace connector:DP-1"
 # "Super+Shift+Left" = "move_window left"

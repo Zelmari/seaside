@@ -282,9 +282,20 @@ std::string format_action(const Action &action) {
 
 BindingMap default_bindings() {
     const std::array definitions{
+        std::pair{"Super+Q", "close_window"},
         std::pair{"Super+D", "toggle_window_tiling"},
         std::pair{"Super+F", "toggle_window_maximize"},
         std::pair{"Super+Shift+F", "toggle_window_fullscreen"},
+        std::pair{"Super+1", "workspace 1"},
+        std::pair{"Super+2", "workspace 2"},
+        std::pair{"Super+3", "workspace 3"},
+        std::pair{"Super+4", "workspace 4"},
+        std::pair{"Super+5", "workspace 5"},
+        std::pair{"Super+6", "workspace 6"},
+        std::pair{"Super+7", "workspace 7"},
+        std::pair{"Super+8", "workspace 8"},
+        std::pair{"Super+9", "workspace 9"},
+        std::pair{"Super+0", "workspace 10"},
         std::pair{"Super+Left", "focus left"},
         std::pair{"Super+Right", "focus right"},
         std::pair{"Super+Up", "focus up"},

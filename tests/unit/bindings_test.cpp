@@ -244,7 +244,7 @@ TEST_F(BindingsTest, TransferWorkspacePreservesTheWholeOpaqueSelectorSuffix) {
 
 TEST_F(BindingsTest, DefaultsHaveOnlyTheApprovedBindings) {
     auto map = seaside::default_bindings();
-    ASSERT_EQ(map.size(), 14U);
+    ASSERT_EQ(map.size(), 25U);
     EXPECT_EQ(map.at(seaside::parse_chord("Super+Return").value()).text, "foot");
     EXPECT_EQ(map.at(seaside::parse_chord("XF86AudioRaiseVolume").value()).text,
               "wpctl set-volume --limit 1 @DEFAULT_AUDIO_SINK@ 5%+");
@@ -252,7 +252,15 @@ TEST_F(BindingsTest, DefaultsHaveOnlyTheApprovedBindings) {
               seaside::ActionKind::toggle_window_maximize);
     EXPECT_EQ(map.at(seaside::parse_chord("Super+Shift+F").value()).kind,
               seaside::ActionKind::toggle_window_fullscreen);
-    for (auto key : {"Super+Q", "Super+1", "Super+N", "Super+Shift+E", "Super+M"})
+    EXPECT_EQ(map.at(seaside::parse_chord("Super+Q").value()).kind,
+              seaside::ActionKind::close_window);
+    for (int workspace = 1; workspace <= 10; ++workspace) {
+        const auto key = "Super+" + std::to_string(workspace % 10);
+        const auto &action = map.at(seaside::parse_chord(key).value());
+        EXPECT_EQ(action.kind, seaside::ActionKind::workspace);
+        EXPECT_EQ(action.argument, workspace);
+    }
+    for (auto key : {"Super+B", "Super+N", "Super+Shift+E", "Super+M"})
         EXPECT_FALSE(map.contains(seaside::parse_chord(key).value()));
 }
 } // namespace

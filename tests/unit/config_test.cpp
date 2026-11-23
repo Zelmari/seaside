@@ -48,7 +48,7 @@ TEST_F(ConfigTest, CompiledDefaultsMatchApprovedValues) {
     EXPECT_EQ(value.render.fullscreen_aspect, seaside::FullscreenAspect::preserve);
     EXPECT_FALSE(value.night_light.enabled);
     EXPECT_EQ(value.night_light.temperature_kelvin, 4500);
-    EXPECT_EQ(value.keybinds.size(), 14U);
+    EXPECT_EQ(value.keybinds.size(), 25U);
 }
 
 TEST_F(ConfigTest, CanonicalGenerationMatchesIndependentReferenceAndCompiledDefaults) {
@@ -295,15 +295,18 @@ TEST_F(ConfigTest, BindingTablesReplaceInsteadOfMergeAndRejectNormalizedDuplicat
     auto empty = seaside::parse_config("[keybinds]");
     ASSERT_TRUE(empty);
     EXPECT_TRUE(empty->keybinds.empty());
-    auto single = seaside::parse_config("[keybinds]\n'Super+Q'='close_window'");
+    auto single = seaside::parse_config("[keybinds]\n'Super+B'='exec firefox'");
     ASSERT_TRUE(single);
-    EXPECT_EQ(single->keybinds.size(), 1U);
+    ASSERT_EQ(single->keybinds.size(), 1U);
+    EXPECT_EQ(single->keybinds.begin()->first, seaside::parse_chord("Super+B").value());
+    EXPECT_EQ(single->keybinds.begin()->second.kind, seaside::ActionKind::exec);
+    EXPECT_EQ(single->keybinds.begin()->second.text, "firefox");
     EXPECT_FALSE(single->keybinds.contains(seaside::parse_chord("Super+Return").value()));
     EXPECT_FALSE(
         seaside::parse_config("[keybinds]\n'Super+Ctrl+A'='exit'\n'Ctrl+Super+A'='close_window'"));
     EXPECT_FALSE(seaside::parse_config("[keybinds]\n'Prior'='exit'\n'Page_Up'='close_window'"));
     EXPECT_EQ(seaside::parse_config("[keybinds]").value().keybinds.size(), 0U);
-    EXPECT_EQ(seaside::parse_config("").value().keybinds.size(), 14U);
+    EXPECT_EQ(seaside::parse_config("").value().keybinds, seaside::default_bindings());
 }
 
 TEST_F(ConfigTest, NonRepresentableIntegerToFloatConversionsAreRejected) {

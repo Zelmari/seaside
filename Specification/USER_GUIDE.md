@@ -138,9 +138,11 @@ until it observes a completed save.
 | Shortcut | Action |
 |---|---|
 | Super+Enter | Open `foot` |
+| Super+Q | Close the focused window |
 | Super+D | Toggle tiling for the focused window |
 | Super+F | Toggle maximization for the focused window |
 | Super+Shift+F | Toggle fullscreen for the focused window |
+| Super+1 through Super+9, Super+0 | Switch to workspaces 1 through 9, then 10 |
 | Super+arrow keys | Focus a window in that direction |
 | Alt+Tab | Cycle through the current workspace's recent focus history |
 | Super+left mouse drag | Move a window |
@@ -151,15 +153,12 @@ until it observes a completed save.
 binding, as shown in the example. The `[keybinds]` table is the
 complete active list when present. Removing a line disables that shortcut,
 an empty table disables every shortcut, and removing the table restores the
-built-in defaults. The generated config includes commented examples for
-closing windows and switching workspaces. Uncomment the bindings you want and
-save the file to activate them. To adopt the current window shortcuts in an
-older config, add or update these lines in the existing `[keybinds]` table and
-remove any old maximization shortcut you no longer use.
+built-in defaults. Add your own app shortcuts with `exec` in the existing
+`[keybinds]` table. The generated config includes optional examples you can
+uncomment and save.
 
 ```toml
-"Super+F" = "toggle_window_maximize"
-"Super+Shift+F" = "toggle_window_fullscreen"
+"Super+B" = "exec firefox"
 ```
 
 Run `seasidectl bindings` to see the shortcuts the running session is using.
