@@ -35,7 +35,7 @@ def main():
         )
         captures = {"repair-healthy-session.log", "repair-restart-session.log",
                     "repair-unavailable-session.log", "repair-shutdown-session.log",
-                    "repair-foreign-session.log", "repair-bus-session.log", "sanitize-build.log"}
+                    "repair-foreign-session.log", "repair-bus-session.log", "repair-autostart-session.log", "sanitize-build.log"}
         return run(args, revision, bundle, scenario="repair_services", captures=captures, settings=settings, follow=follow)
 
 

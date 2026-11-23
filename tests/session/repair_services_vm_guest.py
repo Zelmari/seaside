@@ -131,6 +131,54 @@ os.execl('/usr/bin/busctl', 'busctl', '--user', 'call', 'org.freedesktop.DBus',
         cmd(*bus, "ReloadConfig", check=True)
 
 
+def exercise_autostart(session, root):
+    name, unit = PORTALS[-1], 'xdg-desktop-portal.service'
+    bus = ('busctl', '--user', 'call', 'org.freedesktop.DBus', '/org/freedesktop/DBus',
+           'org.freedesktop.DBus')
+
+    def stock():
+        lines = cmd('systemctl', '--user', 'show', unit, '-p', 'MainPID', '-p', 'InvocationID',
+                    '-p', 'ActiveState', '-p', 'InactiveExitTimestampMonotonic', check=True).stdout
+        return dict(line.split('=', 1) for line in lines.splitlines())
+
+    if (stock()['ActiveState'] != 'inactive' or
+            any(cmd(*bus, 'NameHasOwner', 's', portal, check=True).stdout.strip() != 'b false'
+                for portal in PORTALS)):
+        raise RuntimeError('A portal is already running before the autostart trial')
+    marker, response = root / 'autostart-count', root / 'autostart-activation'
+    command = (f'echo ran >> {shlex.quote(str(marker))}; exec ' +
+               shlex.join((*bus, 'StartServiceByName', 'su', name, '0')) +
+               f' > {shlex.quote(str(response))} 2>&1')
+    session.base_config = session.base_config.replace('commands = [', 'commands = [' + json.dumps(command) + ', ')
+    session.edit()
+    began = time.clock_gettime_ns(time.CLOCK_MONOTONIC) // 1000
+    stock_trial = None
+    try:
+        with session:
+            reply = until(lambda: response.read_text().strip() if response.exists() else None, 10)
+            # u 1 proves this call initiated activation. Only stop an invocation
+            # with this trial's start time, executable, cgroup and D-Bus PID.
+            if reply == 'u 1':
+                info = stock()
+                lookup = cmd(*bus, 'GetConnectionUnixProcessID', 's', name)
+                pid = info['MainPID']
+                proc = Path('/proc') / pid
+                if (pid != '0' and lookup.stdout.strip() == f'u {pid}' and info['InvocationID'] and
+                        int(info['InactiveExitTimestampMonotonic'] or 0) >= began and
+                        (proc / 'exe').readlink() == Path('/usr/lib/xdg-desktop-portal') and
+                        (proc / 'cgroup').read_text().strip().endswith('/' + unit)):
+                    stock_trial = info['InvocationID']
+            operational = until(lambda: all_available(session), 15) if not stock_trial else False
+            evidence = {'reply': reply, 'launches': marker.read_text().splitlines(),
+                        'operational': bool(operational), 'owned': bool(owned_unit(session, name)),
+                        'status': session.ctl('status')}
+            session.close()
+            return evidence
+    finally:
+        if stock_trial and stock()['InvocationID'] == stock_trial:
+            cmd('systemctl', '--user', 'stop', unit, check=True)
+
+
 def exercise_foreign(session, root):
     name = PORTALS[-1]
     marker = root / "foreign-owner"
@@ -409,6 +457,8 @@ def exercise(repo, root, results, env):
         evidence["shutdown"] = observe_shutdown(shutdown, changed)
         after = manager_environment()
         evidence["preserved_values"] = all(after.get(key) == value for key, value in changed.items())
+    autostart = Session(repo, root / "autostart", results, env, label="repair-autostart")
+    evidence["autostart"] = exercise_autostart(autostart, root)
     evidence["environment_after"] = manager_environment()
     return evidence
 
@@ -442,6 +492,8 @@ def trial():
         if not repair_baseline:
             checks = state["services"]
             assert checks["systemd_window"]["opened"] and checks["gtk_restarted"] and checks["gtk_filechooser"], checks
+            auto = checks["autostart"]
+            assert auto['reply'] == 'u 2' and auto['launches'] == ['ran'] and auto['operational'] and auto['owned'], auto
             for case in ("foreign", "bus"):
                 detail = checks[case]
                 assert detail["fault"] and detail["recovered"], detail
@@ -465,7 +517,7 @@ def trial():
     finally:
         for log in ("prepare.log", "harness.log", "repair-healthy-session.log",
                     "repair-restart-session.log", "repair-unavailable-session.log", "repair-shutdown-session.log",
-                    "repair-foreign-session.log", "repair-bus-session.log", "sanitize-build.log"):
+                    "repair-foreign-session.log", "repair-bus-session.log", "repair-autostart-session.log", "sanitize-build.log"):
             standard["upload"](log, results / log)
         standard["send"]("guest.json", json.dumps(state, indent=2).encode() + b"\n")
         standard["event"]("done", state.get("error", "Repair service observations complete"), ok=state["ok"])
