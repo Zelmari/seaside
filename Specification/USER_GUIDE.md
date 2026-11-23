@@ -138,16 +138,20 @@ until it observes a completed save.
 | Shortcut | Action |
 |---|---|
 | Super+Enter | Open `foot` |
+| Super+Space | Open the Wofi application launcher |
 | Super+Q | Close the focused window |
+| Super+P | Toggle whether the focused window is pinned across workspaces |
 | Super+D | Toggle tiling for the focused window |
 | Super+F | Toggle maximization for the focused window |
 | Super+Shift+F | Toggle fullscreen for the focused window |
 | Super+1 through Super+9, Super+0 | Switch to workspaces 1 through 9, then 10 |
+| Super+Shift+1 through Super+Shift+9, Super+Shift+0 | Move the focused window to workspaces 1 through 9, then 10, and follow it |
 | Super+arrow keys | Focus a window in that direction |
 | Alt+Tab | Cycle through the current workspace's recent focus history |
 | Super+left mouse drag | Move a window |
 | Super+right mouse drag | Resize a window |
 | Media volume down/up and mute | Adjust the default playback device in five-point steps, cap at 100%, or toggle mute |
+| Super+Shift+E | Exit Seaside and return to the console |
 
 **Super** is usually the Windows or Meta key. Use `Return` for Enter in a
 binding, as shown in the example. The `[keybinds]` table is the
@@ -225,8 +229,8 @@ local IPC socket. [JSONL protocol](../src/ipc_protocol.cpp)
 
 ## Use applications and sharing
 
-- **Wayland and X11 apps.** Run the app in a Seaside terminal or launch it from
-  your own panel. The first X11 client starts Seaside’s packaged copy of
+- **Wayland and X11 apps.** Open Wofi with Super+Space or run the app in a
+  Seaside terminal. The first X11 client starts Seaside’s packaged copy of
   `xwayland-satellite` on demand.
   If that service exits, a subsequent X11 connection can start it again.
 - **Clipboard.** Local Wayland clients running as your user can read and replace

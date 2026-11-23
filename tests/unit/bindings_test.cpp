@@ -29,6 +29,10 @@ TEST_F(BindingsTest, ModifierOrderAndXkbAliasesNormalizeWithoutInferringShift) {
     EXPECT_EQ(prior.value(), page_up.value());
     EXPECT_NE(upper_d.value(), lower_d.value());
     EXPECT_EQ(upper_d.value().modifiers, 0);
+    const auto space = seaside::parse_chord("Super+space");
+    ASSERT_TRUE(space);
+    EXPECT_EQ(seaside::parse_chord("Super+Space"), space);
+    EXPECT_EQ(seaside::format_chord(*space), "Super+Space");
     EXPECT_TRUE(seaside::parse_chord("XF86AudioMute"));
     EXPECT_TRUE(seaside::parse_chord("Ctrl+Alt+Shift+Super+F12"));
 }
@@ -244,8 +248,11 @@ TEST_F(BindingsTest, TransferWorkspacePreservesTheWholeOpaqueSelectorSuffix) {
 
 TEST_F(BindingsTest, DefaultsHaveOnlyTheApprovedBindings) {
     auto map = seaside::default_bindings();
-    ASSERT_EQ(map.size(), 25U);
+    ASSERT_EQ(map.size(), 38U);
     EXPECT_EQ(map.at(seaside::parse_chord("Super+Return").value()).text, "foot");
+    const auto &launcher = map.at(seaside::parse_chord("Super+Space").value());
+    EXPECT_EQ(launcher.kind, seaside::ActionKind::exec);
+    EXPECT_EQ(launcher.text, "wofi --show drun");
     EXPECT_EQ(map.at(seaside::parse_chord("XF86AudioRaiseVolume").value()).text,
               "wpctl set-volume --limit 1 @DEFAULT_AUDIO_SINK@ 5%+");
     EXPECT_EQ(map.at(seaside::parse_chord("Super+F").value()).kind,
@@ -254,13 +261,20 @@ TEST_F(BindingsTest, DefaultsHaveOnlyTheApprovedBindings) {
               seaside::ActionKind::toggle_window_fullscreen);
     EXPECT_EQ(map.at(seaside::parse_chord("Super+Q").value()).kind,
               seaside::ActionKind::close_window);
+    EXPECT_EQ(map.at(seaside::parse_chord("Super+P").value()).kind,
+              seaside::ActionKind::toggle_window_pin);
+    EXPECT_EQ(map.at(seaside::parse_chord("Super+Shift+E").value()).kind,
+              seaside::ActionKind::exit);
     for (int workspace = 1; workspace <= 10; ++workspace) {
-        const auto key = "Super+" + std::to_string(workspace % 10);
-        const auto &action = map.at(seaside::parse_chord(key).value());
-        EXPECT_EQ(action.kind, seaside::ActionKind::workspace);
-        EXPECT_EQ(action.argument, workspace);
+        const auto digit = std::to_string(workspace % 10);
+        const auto &select = map.at(seaside::parse_chord("Super+" + digit).value());
+        EXPECT_EQ(select.kind, seaside::ActionKind::workspace);
+        EXPECT_EQ(select.argument, workspace);
+        const auto &move = map.at(seaside::parse_chord("Super+Shift+" + digit).value());
+        EXPECT_EQ(move.kind, seaside::ActionKind::move_to_workspace);
+        EXPECT_EQ(move.argument, workspace);
     }
-    for (auto key : {"Super+B", "Super+N", "Super+Shift+E", "Super+M"})
+    for (auto key : {"Super+B", "Super+N", "Super+M"})
         EXPECT_FALSE(map.contains(seaside::parse_chord(key).value()));
 }
 } // namespace

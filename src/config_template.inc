@@ -110,7 +110,10 @@ temperature_kelvin = 4500
 # All default bindings can be removed or remapped.
 # This table is the complete active map: delete/comment an entry to disable it.
 # An empty [keybinds] table disables all bindings; omitting the table uses defaults.
+"Super+Space" = "exec wofi --show drun"
 "Super+Q" = "close_window"
+"Super+P" = "toggle_window_pin"
+"Super+Shift+E" = "exit"
 "Super+D" = "toggle_window_tiling"
 "Super+F" = "toggle_window_maximize"
 "Super+Shift+F" = "toggle_window_fullscreen"
@@ -125,6 +128,17 @@ temperature_kelvin = 4500
 "Super+8" = "workspace 8"
 "Super+9" = "workspace 9"
 "Super+0" = "workspace 10"
+# Move the focused window to a workspace and follow it there.
+"Super+Shift+1" = "move_to_workspace 1"
+"Super+Shift+2" = "move_to_workspace 2"
+"Super+Shift+3" = "move_to_workspace 3"
+"Super+Shift+4" = "move_to_workspace 4"
+"Super+Shift+5" = "move_to_workspace 5"
+"Super+Shift+6" = "move_to_workspace 6"
+"Super+Shift+7" = "move_to_workspace 7"
+"Super+Shift+8" = "move_to_workspace 8"
+"Super+Shift+9" = "move_to_workspace 9"
+"Super+Shift+0" = "move_to_workspace 10"
 "Super+Left" = "focus left"
 "Super+Right" = "focus right"
 "Super+Up" = "focus up"
@@ -145,7 +159,6 @@ temperature_kelvin = 4500
 #   move_window (mouse drag only); resize_window (mouse drag only)
 #   move_window DIR; swap_window DIR; resize_window DIR [DISTANCE]
 #   workspace ID; move_to_workspace ID; transfer_workspace SELECTOR
-# Moving a window to another workspace follows it and focuses that window.
 #   toggle_window_pin; toggle_window_maximize; toggle_window_fullscreen
 #   close_window; night_light on; night_light off; night_light toggle
 #   exit; exec SHELL_COMMAND
@@ -154,14 +167,11 @@ temperature_kelvin = 4500
 # DISTANCE = optional positive logical pixels, default 32.
 # Optional examples (uncomment ONLY those you want):
 # "Super+B" = "exec firefox"
-# "Super+Shift+1" = "move_to_workspace 1"
 # "Super+Alt+1" = "transfer_workspace connector:DP-1"
 # "Super+Shift+Left" = "move_window left"
 # "Super+Alt+Left" = "swap_window left"
 # "Super+Ctrl+Left" = "resize_window left 32"
-# "Super+P" = "toggle_window_pin"
 # "Super+N" = "night_light toggle"
-# "Super+Shift+E" = "exit"
 # System actions are EXTERNAL commands, e.g.:
 # "Super+Shift+R" = "exec systemctl reboot"
 # No dedicated power command, confirmation UI or automatic boot into Seaside.

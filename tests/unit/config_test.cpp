@@ -48,7 +48,7 @@ TEST_F(ConfigTest, CompiledDefaultsMatchApprovedValues) {
     EXPECT_EQ(value.render.fullscreen_aspect, seaside::FullscreenAspect::preserve);
     EXPECT_FALSE(value.night_light.enabled);
     EXPECT_EQ(value.night_light.temperature_kelvin, 4500);
-    EXPECT_EQ(value.keybinds.size(), 25U);
+    EXPECT_EQ(value.keybinds.size(), 38U);
 }
 
 TEST_F(ConfigTest, CanonicalGenerationMatchesIndependentReferenceAndCompiledDefaults) {

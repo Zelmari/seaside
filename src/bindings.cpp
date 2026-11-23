@@ -125,6 +125,9 @@ std::expected<Chord, Diagnostic> parse_chord(std::string_view value) {
             value == "MouseLeftDrag" ? ChordKind::mouse_left_drag : ChordKind::mouse_right_drag;
     } else {
         // XKB resolves aliases. Do not lowercase names or infer Shift from case.
+        if (value == "Space") {
+            value = "space";
+        }
         result.keysym = xkb_keysym_from_name(std::string(value).c_str(), XKB_KEYSYM_NO_FLAGS);
         if (!result.keysym) {
             return std::unexpected(error("keybinds", "Unknown or missing XKB keysym"));
@@ -247,6 +250,8 @@ std::string format_chord(const Chord &chord) {
     }
     if (chord.kind != ChordKind::keyboard) {
         result += chord.kind == ChordKind::mouse_left_drag ? "MouseLeftDrag" : "MouseRightDrag";
+    } else if (chord.keysym == XKB_KEY_space) {
+        result += "Space";
     } else {
         std::array<char, 64> name{};
         xkb_keysym_get_name(chord.keysym, name.data(), name.size());
@@ -282,7 +287,10 @@ std::string format_action(const Action &action) {
 
 BindingMap default_bindings() {
     const std::array definitions{
+        std::pair{"Super+Space", "exec wofi --show drun"},
         std::pair{"Super+Q", "close_window"},
+        std::pair{"Super+P", "toggle_window_pin"},
+        std::pair{"Super+Shift+E", "exit"},
         std::pair{"Super+D", "toggle_window_tiling"},
         std::pair{"Super+F", "toggle_window_maximize"},
         std::pair{"Super+Shift+F", "toggle_window_fullscreen"},
@@ -296,6 +304,16 @@ BindingMap default_bindings() {
         std::pair{"Super+8", "workspace 8"},
         std::pair{"Super+9", "workspace 9"},
         std::pair{"Super+0", "workspace 10"},
+        std::pair{"Super+Shift+1", "move_to_workspace 1"},
+        std::pair{"Super+Shift+2", "move_to_workspace 2"},
+        std::pair{"Super+Shift+3", "move_to_workspace 3"},
+        std::pair{"Super+Shift+4", "move_to_workspace 4"},
+        std::pair{"Super+Shift+5", "move_to_workspace 5"},
+        std::pair{"Super+Shift+6", "move_to_workspace 6"},
+        std::pair{"Super+Shift+7", "move_to_workspace 7"},
+        std::pair{"Super+Shift+8", "move_to_workspace 8"},
+        std::pair{"Super+Shift+9", "move_to_workspace 9"},
+        std::pair{"Super+Shift+0", "move_to_workspace 10"},
         std::pair{"Super+Left", "focus left"},
         std::pair{"Super+Right", "focus right"},
         std::pair{"Super+Up", "focus up"},
