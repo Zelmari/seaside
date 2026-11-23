@@ -10,7 +10,6 @@
 #include <fcntl.h>
 #include <filesystem>
 #include <optional>
-#include <span>
 #include <string>
 #include <sys/random.h>
 #include <systemd/sd-bus.h>
@@ -116,6 +115,8 @@ struct PortalActivation::Impl final : std::enable_shared_from_this<Impl> {
     wl_event_source *timer = nullptr;
     bool stopped = false;
     bool recovering = false;
+    bool checking_owners = true;
+    std::string candidate_owner;
 
     Impl(SessionBus &connection, std::string_view socket, Completion callback,
          std::chrono::milliseconds limit)
@@ -295,7 +296,7 @@ struct PortalActivation::Impl final : std::enable_shared_from_this<Impl> {
             }
             pending = *call;
             if (step == Step::pid) {
-                units[stage].owner = owner;
+                candidate_owner = owner;
             }
             if (step == Step::launch || step == Step::lifetime) {
                 units[step == Step::lifetime ? lifetime_index : stage].requested = true;
@@ -342,6 +343,15 @@ struct PortalActivation::Impl final : std::enable_shared_from_this<Impl> {
         return {};
     }
 
+    ServiceReport next_owner_check() {
+        if (++stage < services.size()) {
+            return request(Step::check_owners);
+        }
+        stage = 0;
+        checking_owners = false;
+        return request(Step::lifetime);
+    }
+
     void received(Step step, const BusReply &reply) {
         pending.reset();
         if (!completion) {
@@ -362,12 +372,7 @@ struct PortalActivation::Impl final : std::enable_shared_from_this<Impl> {
                 result = request(Step::unowned);
             } else if (reply.error == BusError::remote_error && is_missing(reply.message)) {
                 if (step == Step::check_owners) {
-                    if (++stage == services.size()) {
-                        stage = 0;
-                        result = request(Step::lifetime);
-                    } else {
-                        result = request(Step::check_owners);
-                    }
+                    result = next_owner_check();
                 } else if (step == Step::unowned) {
                     if (access(service.binary, X_OK) < 0) {
                         const int error = errno;
@@ -395,7 +400,18 @@ struct PortalActivation::Impl final : std::enable_shared_from_this<Impl> {
                              : malformed;
                 break;
             case Step::check_owners:
-                result = {ServiceFailure::wrong_environment, -EADDRINUSE};
+                if (!recovering || !units[stage].requested) {
+                    result = {ServiceFailure::wrong_environment, -EADDRINUSE};
+                } else if (sd_bus_message_read(reply.message, "s", &value) <= 0 ||
+                           value[0] != ':') {
+                    result = malformed;
+                } else if (units[stage].owner == value) {
+                    result = next_owner_check();
+                } else {
+                    // A new connection may be the same private unit restarting.
+                    // Verify that before requesting any other unit's launch.
+                    result = request(Step::pid, value);
+                }
                 break;
             case Step::unowned:
                 if (!recovering || !units[stage].requested) {
@@ -425,12 +441,16 @@ struct PortalActivation::Impl final : std::enable_shared_from_this<Impl> {
                     result = malformed;
                 } else if (units[stage].path != value) {
                     result = {ServiceFailure::wrong_environment, -EPERM};
-                } else if (stage + 1 == services.size()) {
-                    finish(StartupService::capture_backend, {});
-                    return;
                 } else {
-                    ++stage;
-                    result = request(Step::unowned);
+                    units[stage].owner = candidate_owner;
+                    if (checking_owners) {
+                        result = next_owner_check();
+                    } else if (++stage == services.size()) {
+                        finish(StartupService::capture_backend, {});
+                        return;
+                    } else {
+                        result = request(Step::unowned);
+                    }
                 }
                 break;
             }
@@ -691,10 +711,9 @@ PortalActivation::recover(SessionBus &bus, Completion completion,
     impl_->deadline = Clock::now() + timeout;
     impl_->stage = 0;
     impl_->recovering = true;
-    const bool owns_units =
-        std::ranges::any_of(std::span(impl.units).first(services.size()), &Impl::Unit::requested);
-    const auto next = owns_units ? Step::lifetime : Step::check_owners;
-    if (const auto result = impl_->request(next); result.failure != ServiceFailure::none) {
+    impl_->checking_owners = true;
+    if (const auto result = impl_->request(Step::check_owners);
+        result.failure != ServiceFailure::none) {
         impl_->completion = {};
         return std::unexpected(result);
     }

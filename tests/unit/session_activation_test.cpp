@@ -581,6 +581,20 @@ TEST_F(PortalActivationTest, RecoversOnlyMissingOwnedUnits) {
     EXPECT_EQ(stopped.size(), portals.size());
 }
 
+TEST_F(PortalActivationTest, LeavesMissingBackendStoppedWhenAnotherSessionOwnsTheFrontend) {
+    start();
+    ASSERT_EQ(outcome->second.failure, ServiceFailure::none);
+    ASSERT_TRUE(release(portals[0]));
+    ASSERT_TRUE(release(portals[2]));
+    ASSERT_TRUE(connect(external));
+    ASSERT_TRUE(claim(*external, portals[2].name));
+    foreign_unit = true;
+    recover();
+    ASSERT_TRUE(outcome);
+    EXPECT_EQ(outcome->second.failure, ServiceFailure::wrong_environment);
+    EXPECT_EQ(started.size(), portals.size());
+}
+
 TEST_F(PortalActivationTest, RuntimeRecoveryVerifiesExistingOwnerBeforeReuse) {
     RecordProperty("part", "9");
     start();
