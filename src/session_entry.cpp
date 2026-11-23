@@ -630,10 +630,14 @@ class Session {
             if (result && method == "query.status") {
                 auto &services = (*result)["integrations"] = IpcJson::object();
                 for (std::size_t i = 0; i < integrations_.size(); ++i) {
+                    const auto service = static_cast<StartupService>(i);
                     const auto &detail = integrations_[i];
-                    auto &status =
-                        services[seaside::startup_service_name(static_cast<StartupService>(i))];
-                    if (!detail) {
+                    auto &status = services[seaside::startup_service_name(service)];
+                    if (const auto dependency = blocked_by(service)) {
+                        status = {{"state", "unavailable"},
+                                  {"reason", "dependency-unavailable"},
+                                  {"dependency", seaside::startup_service_name(*dependency)}};
+                    } else if (!detail) {
                         status = {{"state", "checking"}};
                     } else if (detail->failure == ServiceFailure::none) {
                         status = {{"state", "available"}};
@@ -838,7 +842,29 @@ class Session {
         (service == StartupService::pipewire ? pipewire_retry_ : portal_retry_).request();
     }
 
+    std::optional<StartupService> blocked_by(StartupService service) const noexcept {
+        if (!portal_blocker_ || service == StartupService::systemd_user ||
+            service == StartupService::pipewire || service == *portal_blocker_) {
+            return {};
+        }
+        const auto &dependency = integrations_[static_cast<std::size_t>(*portal_blocker_)];
+        if (!dependency || dependency->failure == ServiceFailure::none) {
+            return {};
+        }
+        const auto &status = integrations_[static_cast<std::size_t>(service)];
+        if (!status || *portal_blocker_ == StartupService::systemd_user ||
+            dependency->failure == ServiceFailure::wrong_environment ||
+            (*portal_blocker_ == StartupService::portal_frontend &&
+             service == StartupService::capture_backend)) {
+            return portal_blocker_;
+        }
+        return {};
+    }
+
     void mark_integration_failed(StartupService service, ServiceReport detail) noexcept {
+        if (service != StartupService::pipewire) {
+            portal_blocker_ = service;
+        }
         auto &current = integrations_[static_cast<std::size_t>(service)];
         const bool changed = !current || current->failure != detail.failure ||
                              current->native_error != detail.native_error;
@@ -884,6 +910,7 @@ class Session {
             mark_integration_recovered(StartupService::portal_frontend);
             mark_integration_recovered(StartupService::capture_backend);
             mark_integration_recovered(StartupService::gtk_backend);
+            portal_blocker_.reset();
             portal_retry_ = {};
         }
     }
@@ -1007,9 +1034,6 @@ class Session {
         if (bus_ && bus_->last_error() != seaside::BusError::none) {
             constexpr ServiceReport disconnected{ServiceFailure::disconnected, -ENOTCONN};
             report_external_fault(StartupService::systemd_user, disconnected);
-            report_external_fault(StartupService::portal_frontend, disconnected);
-            report_external_fault(StartupService::capture_backend, disconnected);
-            report_external_fault(StartupService::gtk_backend, disconnected);
         }
         const auto now = Clock::now();
         if (portal_retry_.begin(now)) {
@@ -1182,6 +1206,7 @@ class Session {
     std::unique_ptr<seaside::PortalActivation> activation_;
     std::unique_ptr<seaside::PortalProbe> portal_;
     std::array<std::optional<ServiceReport>, 5> integrations_{};
+    std::optional<StartupService> portal_blocker_;
     RecoveryRetry portal_retry_, pipewire_retry_;
     std::optional<Clock::time_point> appearance_deadline_;
     Outcome outcome_;
