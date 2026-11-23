@@ -446,6 +446,26 @@ TEST_F(PortalActivationTest, RetryingForeignFrontendLeavesAllExternalUnitsAlone)
     EXPECT_EQ(portal_binary_checks, 0U);
 }
 
+TEST_F(PortalActivationTest, ASecondLiveSessionPreservesTheFirstSessionsPortalUnits) {
+    start();
+    ASSERT_EQ(outcome->second.failure, ServiceFailure::none);
+    ASSERT_TRUE(connect(external));
+    std::optional<ServiceReport> second;
+    auto other = PortalActivation::start(
+        *external, "wayland-second", [&](StartupService, ServiceReport report) { second = report; },
+        2s);
+    ASSERT_TRUE(other);
+    ASSERT_TRUE(pump_until([&] { return second.has_value(); }));
+    EXPECT_EQ(second->failure, ServiceFailure::wrong_environment);
+    EXPECT_EQ(second->native_error, -EADDRINUSE);
+    EXPECT_TRUE((*other)->stop());
+    EXPECT_EQ(started.size(), portals.size());
+    EXPECT_TRUE(stopped.empty());
+    recover();
+    ASSERT_EQ(outcome->second.failure, ServiceFailure::none);
+    EXPECT_EQ(started.size(), portals.size());
+}
+
 TEST_F(PortalActivationTest, DistinguishesMissingPortalBinaryFromAnInaccessibleBinary) {
     for (const auto &[error, expected] : {std::pair{ENOENT, ServiceFailure::missing},
                                           std::pair{EACCES, ServiceFailure::activation_failed}}) {
