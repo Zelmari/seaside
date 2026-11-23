@@ -37,7 +37,9 @@ prepare() {
 
 build() {
   cd "$srcdir/$pkgname-$pkgver"
-  tools/prepare-xwayland-bridge --build --work-dir "$srcdir/bridge-build" --output "$srcdir/seaside-xwayland-satellite"
+  # Let makepkg split the Rust debug information requested by its build flags.
+  CARGO_PROFILE_RELEASE_STRIP=none tools/prepare-xwayland-bridge --build \
+    --work-dir "$srcdir/bridge-build" --output "$srcdir/seaside-xwayland-satellite"
   arch-meson --sysconfdir=/etc -Dwerror=false -Dpackage_version="$pkgver-$pkgrel" \
     -Dxwayland_bridge="$srcdir/seaside-xwayland-satellite" . build
   meson compile -C build seaside seasidectl
