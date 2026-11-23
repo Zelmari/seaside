@@ -179,6 +179,23 @@ def exercise_autostart(session, root):
             cmd('systemctl', '--user', 'stop', unit, check=True)
 
 
+def count_autostart(session):
+    marker = session.marker.with_suffix(".count")
+    command = tomllib.loads(session.base_config)["autostart"]["commands"][0]
+    counted = "printf x >> " + shlex.quote(str(marker)) + " && " + command
+    session.base_config = session.base_config.replace(json.dumps(command), json.dumps(counted))
+    session.edit()
+    return marker
+
+
+def use_degraded_desktop(session):
+    marker = session.marker.with_suffix(".terminal")
+    result = cmd("/usr/bin/foot", "--app-id=seaside-degraded-trial", "/usr/bin/touch", str(marker),
+                 env=session.env)
+    session.ctl("workspace", "2")
+    return result.returncode == 0 and marker.is_file()
+
+
 def exercise_foreign(session, root):
     name = PORTALS[-1]
     marker = root / "foreign-owner"
@@ -194,18 +211,20 @@ signal.pause()
 """, name, str(marker)])
     evidence = {}
     before = manager_environment()
+    launches = count_autostart(session)
     try:
         if not until(marker.exists, 4):
             raise RuntimeError("Could not acquire disposable foreign portal name")
         with session:
             status = until(lambda: fault_status(session, "portal-frontend"), 12)
             evidence["fault"] = status
-            session.ctl("workspace", "2")
+            evidence["desktop"] = use_degraded_desktop(session)
             evidence["untouched"] = (owner.poll() is None and manager_environment() == before
                                      and not any(owned_unit(session, item) for item in PORTALS))
             owner.terminate()
             owner.wait(timeout=3)
             evidence["recovered"] = bool(until(lambda: all_available(session), 24))
+            evidence["autostart_runs"] = len(launches.read_bytes())
             session.close()
     except RuntimeError as error:
         evidence["error"] = str(error)
@@ -262,14 +281,16 @@ int lstat(const char *path, struct stat *info) {
 
 def exercise_bus(session, marker):
     evidence = {}
+    launches = count_autostart(session)
     try:
         with session:
             evidence["fault"] = until(lambda: fault_status(session, "systemd"), 8)
-            session.ctl("workspace", "2")
+            evidence["desktop"] = use_degraded_desktop(session)
             evidence["pipewire"] = bool(until(lambda: session.ctl("status").get(
                 "integrations", {}).get("pipewire", {}).get("state") == "available", 4))
             marker.unlink()
             evidence["recovered"] = bool(until(lambda: all_available(session), 25))
+            evidence["autostart_runs"] = len(launches.read_bytes())
             session.close()
     except RuntimeError as error:
         evidence["error"] = str(error)
@@ -432,13 +453,15 @@ def exercise(repo, root, results, env):
     missing = root / "repair-pipewire"
     pw = Session(repo, root / "unavailable", results, dict(env, PIPEWIRE_REMOTE=str(missing)),
                  label="repair-unavailable")
+    pw_launches = count_autostart(pw)
     try:
         with pw:
             evidence["missing_pipewire"] = pw.ctl("status")
-            pw.ctl("workspace", "2")
+            evidence["missing_pipewire_desktop"] = use_degraded_desktop(pw)
             missing.symlink_to(Path(env["XDG_RUNTIME_DIR"]) / "pipewire-0")
             evidence["pipewire_recovered"] = bool(until(
                 lambda: "service recovered service=pipewire" in pw.log.read_text(errors="replace"), 20))
+            evidence["pipewire_autostart_runs"] = len(pw_launches.read_bytes())
             pw.process.send_signal(signal.SIGPIPE)
             evidence["sigpipe_ready"] = pw.ctl("status")["ready"]
             pw.process.send_signal(signal.SIGHUP)
@@ -496,7 +519,8 @@ def trial():
             assert auto['reply'] == 'u 2' and auto['launches'] == ['ran'] and auto['operational'] and auto['owned'], auto
             for case in ("foreign", "bus"):
                 detail = checks[case]
-                assert detail["fault"] and detail["recovered"], detail
+                assert detail["fault"] and detail["recovered"] and detail["desktop"], detail
+                assert detail["autostart_runs"] == 1, detail
                 assert all(detail["fault"][k]["state"] == "unavailable" for k in
                            ("portal-frontend", "capture-backend", "gtk-backend")), detail
             assert checks["bus"]["pipewire"] and checks["foreign"]["untouched"], checks
@@ -507,6 +531,7 @@ def trial():
             assert app["wayland"] and app["x11"] and app["environment"] == checks["environment_during"], app
             assert checks["restart_ready"] and checks["restart_portals"] and not checks["orphan_units"], checks
             assert checks["missing_pipewire"]["ready"] and checks["pipewire_recovered"], checks
+            assert checks["missing_pipewire_desktop"] and checks["pipewire_autostart_runs"] == 1, checks
             assert checks["sigpipe_ready"] and checks["hangup_exit"] == 0 and checks["hangup_cleanup"], checks
             assert checks["shutdown"]["exit"] == 0 and checks["shutdown"]["acknowledged"], checks
             assert checks["shutdown"]["samples"].count(0) >= 2, checks
