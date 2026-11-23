@@ -309,6 +309,13 @@ struct PortalActivation::Impl final : std::enable_shared_from_this<Impl> {
 
     void finish(StartupService service, ServiceReport report) {
         remove_timer();
+        if (report.failure == ServiceFailure::wrong_environment &&
+            (report.native_error == -EADDRINUSE || report.native_error == -EPERM) &&
+            units[lifetime_index].requested && pipe[1] >= 0) {
+            // An owner changed during activation. EOF makes the private helper
+            // restore our environment and retires only this instance's units.
+            close(std::exchange(pipe[1], -1));
+        }
         if (auto callback = std::exchange(completion, {})) {
             callback(service, report);
         }
@@ -705,6 +712,19 @@ PortalActivation::recover(SessionBus &bus, Completion completion,
     if (impl.stopped || impl.completion || impl.pending || !completion || !bus.event_loop() ||
         timeout <= 0ms || timeout > 60s) {
         return std::unexpected(ServiceReport{ServiceFailure::internal_error, -EINVAL});
+    }
+    if (impl.pipe[1] < 0) {
+        // The previous helper is rolling back a conflicting activation. Check
+        // all names from scratch, with a new pipe and new private unit names.
+        const auto socket = std::string_view(impl.wayland).substr(sizeof("WAYLAND_DISPLAY=") - 1);
+        auto next =
+            start(bus, socket, std::move(completion), timeout, impl.display, impl.authority);
+        if (!next) {
+            return std::unexpected(next.error());
+        }
+        impl_->stopped = true; // Its units are already bound to the closed pipe.
+        impl_.swap((*next)->impl_);
+        return {};
     }
     impl_->bus = &bus;
     impl_->completion = std::move(completion);

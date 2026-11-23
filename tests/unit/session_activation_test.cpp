@@ -1,5 +1,6 @@
 #include "session_activation.hpp"
 #include "session_bus.hpp"
+#include "storage_fd.hpp"
 #include "test_dbus_daemon.hpp"
 #include "test_directory.hpp"
 
@@ -13,6 +14,7 @@
 #include <gtest/gtest.h>
 #include <memory>
 #include <optional>
+#include <poll.h>
 #include <string>
 #include <string_view>
 #include <systemd/sd-bus.h>
@@ -91,6 +93,7 @@ class PortalActivationTest : public testing::Test {
     std::optional<std::pair<StartupService, ServiceReport>> outcome;
     std::vector<RunningUnit> units;
     std::string lifetime;
+    std::optional<seaside::StorageFd> lifetime_pipe;
     std::vector<std::string> started;
     std::vector<std::string> stopped;
     bool foreign_unit = false;
@@ -255,6 +258,24 @@ class PortalActivationTest : public testing::Test {
         EXPECT_STREQ(mode, "fail");
         if (std::string_view(name).starts_with("seaside-session-")) {
             lifetime = name;
+            while (sd_bus_message_enter_container(message, 'r', "sv") > 0) {
+                const char *property;
+                if (sd_bus_message_read(message, "s", &property) <= 0) {
+                    return -EINVAL;
+                }
+                if (std::string_view(property) == "StandardInputFileDescriptor") {
+                    int fd;
+                    if (sd_bus_message_read(message, "v", "h", &fd) <= 0) {
+                        return -EINVAL;
+                    }
+                    lifetime_pipe.emplace(dup(fd));
+                } else if (sd_bus_message_skip(message, "v") < 0) {
+                    return -EINVAL;
+                }
+                if (sd_bus_message_exit_container(message) < 0) {
+                    return -EINVAL;
+                }
+            }
             return sd_bus_reply_method_return(message, "o", "/org/freedesktop/systemd1/job/1");
         }
         EXPECT_TRUE(std::string_view(name).starts_with("seaside-portal-"));
@@ -565,10 +586,36 @@ TEST_F(PortalActivationTest, RollsBackOnlyItsOwnUnitWhenTheNextPortalClaimsItsNa
     EXPECT_EQ(outcome->second.failure, ServiceFailure::wrong_environment);
     ASSERT_EQ(units.size(), 1U);
     EXPECT_EQ(units.front().portal, &portals[0]);
+    ASSERT_TRUE(lifetime_pipe);
+    ASSERT_GE(lifetime_pipe->get(), 0);
+    pollfd guard{.fd = lifetime_pipe->get(), .events = POLLIN, .revents = 0};
+    EXPECT_EQ(poll(&guard, 1, 0), 1);
+    EXPECT_TRUE(guard.revents & POLLHUP);
     EXPECT_TRUE(activation->stop());
     ASSERT_EQ(stopped.size(), 1U);
     EXPECT_EQ(stopped.front(), units.front().name);
     EXPECT_GE(units.front().stop_polls, 2U);
+}
+
+TEST_F(PortalActivationTest, RecoversWithFreshUnitsAfterAConflictRollsBackAMidwayLaunch) {
+    ASSERT_TRUE(connect(external));
+    next_portal_claims_on_launch = true;
+    start();
+    ASSERT_EQ(outcome->second.failure, ServiceFailure::wrong_environment);
+    const auto retired = lifetime;
+    ASSERT_EQ(units.size(), 1U);
+    // Model the two independent releases: the lifetime dependency retires our
+    // backend and the foreign client eventually closes its own connection.
+    ASSERT_TRUE(release(portals.front()));
+    units.clear();
+    external.reset();
+    next_portal_claims_on_launch = false;
+    recover();
+    ASSERT_TRUE(outcome);
+    EXPECT_EQ(outcome->second.failure, ServiceFailure::none);
+    EXPECT_NE(lifetime, retired);
+    EXPECT_TRUE(stopped.empty());
+    EXPECT_EQ(units.size(), portals.size());
 }
 
 TEST_F(PortalActivationTest, RejectsAClaimedNameWhoseOwnerIsOutsideTheRequestedUnit) {
