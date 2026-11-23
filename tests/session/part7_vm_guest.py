@@ -139,16 +139,24 @@ def prepare(source, results, env, state):
                  "xorg-xwayland", "wf-recorder", "obs-studio", "discord", "mesa"]
     packages = subprocess.run(["pacman", "-Q", *installed], capture_output=True, text=True, timeout=5)
     state["installed_packages"] = dict(line.split(maxsplit=1) for line in packages.stdout.splitlines())
+    if part7_installed:
+        for binary in ("/usr/bin/seaside", "/usr/bin/seasidectl"):
+            require(output(["pacman", "-Qoq", binary], env=env) == "seaside" and
+                    f"(revision {revision})" in output([binary, "--version"], env=env),
+                    f"{binary} is not the installed Seaside package at {revision}")
     state["tools"] = {name: shutil.which(name, path=env.get("PATH")) for name in
-                      ("wofi", "grim", "xwayland-satellite", "Xwayland", "wf-recorder", "obs",
+                      ("wofi", "grim", "xclip", "wl-copy", "wl-paste", "Xwayland", "wf-recorder", "obs",
                        "discord", "wpctl", "pactl", "pacat", "parec")}
     if mode == "tty":
         state["software_checks"] = "not-run"
         event("build", revision[:12])
         require(not run_logged(["meson", "setup", "build", "--buildtype=debug"], repo, log, 120,
                                env=env), "Guest configure failed")
-        targets = ["seaside", "seasidectl", "seaside-portal-stream", "seaside-part7-native-client",
-                   "seaside-part7-x11-client"]
+        targets = ["seaside-part7-x11-client"]
+        if not part7_installed:
+            targets += ["seaside", "seasidectl"]
+        if not part7_clipboard_only:
+            targets += ["seaside-portal-stream", "seaside-part7-native-client"]
         require(not run_logged(["meson", "compile", "-C", "build", "-j2", *targets], repo, log, 420,
                                env=env), "Guest compositor or fixture build failed")
     else:
@@ -188,17 +196,30 @@ class TrialSession:
                           "\"$DISPLAY\" \"$XAUTHORITY\" > " + shlex.quote(str(self.marker)))
         config.write_text("[window]\ntiling = false\n[autostart]\ncommands = ["
                           + json.dumps(marker_command) + "]\n")
-        portal = root / "config/xdg-desktop-portal-wlr/Seaside"
-        portal.parent.mkdir()
-        command = [chooser, "-d", "-n", "--no-custom-entry", f"--cache-file={root / 'wofi-cache'}"]
-        if part7_runtime_prefix:
-            command = ["/usr/bin/env", "LD_LIBRARY_PATH=" + str(Path(part7_runtime_prefix) / "lib"),
-                       *command]
-        chooser_script = root / "share-chooser"
-        chooser_script.write_text("#!/bin/sh\nexec " + shlex.join(command) + "\n")
-        chooser_script.chmod(0o700)
-        portal.write_text(f"[screencast]\nchooser_type=dmenu\nchooser_cmd={chooser_script}\n")
-        self.process = standard["start_seaside"](repo, self.env, self.log)
+        if chooser:
+            portal = root / "config/xdg-desktop-portal-wlr/Seaside"
+            portal.parent.mkdir()
+            command = [chooser, "-d", "-n", "--no-custom-entry", f"--cache-file={root / 'wofi-cache'}"]
+            if part7_runtime_prefix:
+                command = ["/usr/bin/env", "LD_LIBRARY_PATH=" + str(Path(part7_runtime_prefix) / "lib"),
+                           *command]
+            chooser_script = root / "share-chooser"
+            chooser_script.write_text("#!/bin/sh\nexec " + shlex.join(command) + "\n")
+            chooser_script.chmod(0o700)
+            portal.write_text(f"[screencast]\nchooser_type=dmenu\nchooser_cmd={chooser_script}\n")
+        if part7_installed:
+            binaries = output(["pacman", "-Qlq", "seaside"], env=env).splitlines()
+            helpers = [Path(path) for path in binaries if Path(path).name == "seaside-xwayland-satellite"]
+            require(len(helpers) == 1, "The installed package has no unique private satellite")
+            self.satellite = helpers[0]
+            self.cli = Path("/usr/bin/seasidectl")
+            with self.log.open("wb") as stream:
+                self.process = subprocess.Popen(["/usr/bin/seaside"], env=self.env, stdout=stream,
+                                                stderr=subprocess.STDOUT)
+        else:
+            self.satellite = repo / "build/seaside-xwayland-satellite"
+            self.cli = repo / "build/seasidectl"
+            self.process = standard["start_seaside"](repo, self.env, self.log)
 
     def ready(self):
         wait_for(lambda: re.search(r"^seaside READY cursor-plane=([1-9][0-9]*)$", self.log_text(),
@@ -210,7 +231,7 @@ class TrialSession:
             values = text.splitlines()
             return values if text.endswith("\n") and len(values) == 4 and all(values) else None
 
-        lines = wait_for(launch_environment, 5, "autostart environment", self.process)
+        lines = wait_for(launch_environment, 12, "autostart environment", self.process)
         self.env.update(zip(("WAYLAND_DISPLAY", "SEASIDE_SOCKET", "DISPLAY", "XAUTHORITY"), lines,
                             strict=True))
         require(Path(lines[3]).stat().st_mode & 0o777 == 0o600,
@@ -221,7 +242,7 @@ class TrialSession:
         return self.log.read_text(errors="replace")
 
     def ctl(self, *args):
-        return json.loads(output([self.repo / "build/seasidectl", *args], env=self.env))["result"]
+        return json.loads(output([self.cli, *args], env=self.env))["result"]
 
     def windows(self):
         return self.ctl("windows")["windows"]
@@ -405,6 +426,15 @@ def run_video(session, results, state):
             state["native_window_frames"] = frame_rows(cast_log)
 
 
+def satellite_executable(session, pid):
+    children = Path(f"/proc/{session.process.pid}/task/{session.process.pid}/children")
+    require(str(pid) in children.read_text().split(), "Satellite PID is not a child of this session")
+    exe = Path(f"/proc/{pid}/exe")
+    require(exe.samefile(session.satellite),
+            f"Satellite resolved to {exe.readlink()}, expected {session.satellite}")
+    return str(exe.readlink())
+
+
 def run_x11(session, results, state):
     require("xwayland-satellite started pid=" not in session.log_text(),
             "Native Wayland and portal use started Xwayland before an X11 connection")
@@ -414,34 +444,54 @@ def run_x11(session, results, state):
         wait_for(lambda: session.window(X11_TITLE), 12, "first satellite-backed X11 window", client)
         first_pid = wait_for(lambda: re.search(r"xwayland-satellite started pid=([0-9]+)", session.log_text()),
                              5, "the owned satellite child", session.process)[1]
-        with start_stream(session, results, state, cast_log, "window", "closed", X11_TITLE,
-                          lambda reader: first_live_frame(cast_log, reader, lambda: command(client, "color 2496d0"),
-                                                          "2496d0")) as (reader, first):
-            session.ctl("workspace", "2")
-            before = session.ctl("focus")
-            command(client, "color c24122")
-            wait_color(cast_log, reader, "c24122", first[:2])
-            require(session.ctl("focus") == before, "The hidden X11 stream changed focus")
+        first_exe = satellite_executable(session, first_pid)
+        if part7_clipboard_only:
             command(client, "quit")
             require(client.wait(timeout=8) == 0, "The X11 fixture did not close")
-            require(reader.wait(timeout=10) == 0 and "closed frames " in cast_log.read_text(),
-                    f"X11 target loss failed to close its stream: {cast_log.read_text()}")
-        state["x11_window_frames"] = frame_rows(cast_log)
+        else:
+            with start_stream(session, results, state, cast_log, "window", "closed", X11_TITLE,
+                              lambda reader: first_live_frame(cast_log, reader, lambda: command(client, "color 2496d0"),
+                                                              "2496d0")) as (reader, first):
+                session.ctl("workspace", "2")
+                before = session.ctl("focus")
+                command(client, "color c24122")
+                wait_color(cast_log, reader, "c24122", first[:2])
+                require(session.ctl("focus") == before, "The hidden X11 stream changed focus")
+                command(client, "quit")
+                require(client.wait(timeout=8) == 0, "The X11 fixture did not close")
+                require(reader.wait(timeout=10) == 0 and "closed frames " in cast_log.read_text(),
+                        f"X11 target loss failed to close its stream: {cast_log.read_text()}")
+            state["x11_window_frames"] = frame_rows(cast_log)
     session.ctl("workspace", "1")
     previous = int(first_pid)
     children = Path(f"/proc/{session.process.pid}/task/{session.process.pid}/children")
-    require(str(previous) in children.read_text().split(), "Satellite PID is not a child of this trial")
-    os.kill(previous, signal.SIGTERM)
+    pidfd = os.pidfd_open(previous)
+    try:
+        satellite_executable(session, previous)
+        signal.pidfd_send_signal(pidfd, signal.SIGTERM)
+    finally:
+        os.close(pidfd)
     wait_for(lambda: str(previous) not in children.read_text().split(), 8, "satellite child reaping",
              session.process)
+    # The restarted helper must handle an X11 selection before it has ever
+    # received keyboard focus. xclip opens only an unmapped selection window.
+    from part7_clipboard import ClipboardClient, background_selections, select
+    with ClipboardClient(session.env, "wayland", "Part 7 native focus") as native:
+        select(session.focus, native)
+        require(len(re.findall(r"xwayland-satellite started pid=", session.log_text())) == 1,
+                "The rearmed helper restarted before the next X11 connection")
+        state["cold_background_clipboard"] = background_selections(session.env, native, cold=True)
+    require(state["cold_background_clipboard"]["status"] == "pass",
+            f"Cold background X11 selection results {state['cold_background_clipboard']}")
     with process(session, results / "part7-x11-restart.log", "seaside-part7-x11-client",
                  stdin=True) as client:
         wait_for(lambda: session.window(X11_TITLE), 12, "X11 window after satellite restart", client)
         pids = re.findall(r"xwayland-satellite started pid=([0-9]+)", session.log_text())
         require(len(pids) == 2 and pids[0] != pids[1], "Satellite did not restart exactly once")
+        state["satellite_pids"] = pids
+        state["satellite_executables"] = [first_exe, satellite_executable(session, pids[1])]
         command(client, "quit")
         require(client.wait(timeout=8) == 0, "The restarted X11 client did not exit")
-        state["satellite_pids"] = pids
 
 
 def volume(session):
@@ -717,25 +767,28 @@ def trial():
                  "part7-native.log", "part7-x11.log", "part7-monitor.log", "part7-window.log",
                  "part7-cancel.log", "part7-x11-window.log", "part7-grim.png", "part7-portals.log",
                  "part7-pipewire.log", "part7-memory.jsonl", "part7-recorder.log", "part7-monitor.mkv")
-    state = {"revision": revision, "kernel": os.uname().release, "renderer": "pixman", "ok": False}
+    state = {"revision": revision, "kernel": os.uname().release, "renderer": "pixman",
+             "installed": part7_installed, "ok": False}
     try:
         env = environment(state)
         with tempfile.TemporaryDirectory(prefix="seaside-vm-source-") as source:
             repo = prepare(Path(source), results, env, state)
-            for tool in ("wofi", "grim", "xwayland-satellite", "Xwayland", "wpctl", "pactl", "pacat", "parec"):
+            required = ["xclip", "wl-copy", "wl-paste", "Xwayland"]
+            if not part7_clipboard_only:
+                required += ["wofi", "grim", "wpctl", "pactl", "pacat", "parec"]
+            for tool in required:
                 require(state["tools"][tool], f"Required guest trial tool {tool} is unavailable")
             with tempfile.TemporaryDirectory(prefix="seaside-vm-", dir=env["XDG_RUNTIME_DIR"]) as path:
                 root = Path(path)
                 prepare_xkbcomp(env, root, state)
-                # The earlier TTY regression still checks VT and failure handling with the
-                # new mandatory portal capabilities. Launch with the same qualified packages.
-                old_env = dict(os.environ)
-                os.environ.update(env)
-                try:
-                    standard["tty_trial"](repo, root, results, state)
-                finally:
-                    os.environ.clear()
-                    os.environ.update(old_env)
+                if not part7_installed and not part7_clipboard_only:
+                    old_env = dict(os.environ)
+                    try:
+                        os.environ.update(env)
+                        standard["tty_trial"](repo, root, results, state)
+                    finally:
+                        os.environ.clear()
+                        os.environ.update(old_env)
                 session = TrialSession(repo, root / "part7", results, env, state["tools"]["wofi"])
                 try:
                     with track_memory(session, results / "part7-memory.jsonl"):
@@ -746,10 +799,8 @@ def trial():
                         def clipboard():
                             result = run_clipboard(session.env, session.focus)
                             state["cross_client_clipboard"] = result
-                            if result["background"]["status"] != "pass":
-                                detail = f"Background X11 selection results {result['background']}"
-                                event("diagnostic", detail)
-                                require(not part7_require_background_clipboard, detail)
+                            require(result["background"]["status"] == "pass",
+                                    f"Background X11 selection results {result['background']}")
 
                         checks = {
                             "capture-soak": lambda: run_capture_soak(session, state),
@@ -761,6 +812,8 @@ def trial():
                             "portal-loss": lambda: run_portal_loss(session, results, state),
                             "audio": lambda: run_audio(session, state),
                         }
+                        if part7_clipboard_only:
+                            checks = {key: checks[key] for key in ("x11", "clipboard")}
                         outcomes = state["tty_checks"] = {}
                         for name, check in checks.items():
                             event("part7", name)

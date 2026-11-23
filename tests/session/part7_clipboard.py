@@ -9,6 +9,7 @@ import selectors
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 
 
@@ -19,7 +20,7 @@ def bind(library, name, result, *arguments):
     return function
 
 
-def client(title):
+def client(title, mapped=True):
     gtk = c.CDLL("libgtk-3.so.0")
     gdk = c.CDLL("libgdk-3.so.0")
     glib = c.CDLL("libglib-2.0.so.0")
@@ -30,13 +31,28 @@ def client(title):
     bind(gtk, "gtk_window_set_title", None, ptr, word)(window, title.encode())
     bind(gtk, "gtk_window_set_default_size", None, ptr, num, num)(window, 240, 120)
     bind(gtk, "gtk_window_set_decorated", None, ptr, num)(window, 0)
-    bind(gtk, "gtk_widget_show_all", None, ptr)(window)
+    if mapped:
+        bind(gtk, "gtk_widget_show_all", None, ptr)(window)
     clipboard_get = bind(gtk, "gtk_clipboard_get", ptr, ptr)
     intern = bind(gdk, "gdk_atom_intern_static_string", ptr, word)
     selections = [clipboard_get(intern(name)) for name in (b"CLIPBOARD", b"PRIMARY")]
     if not all(selections):
         raise RuntimeError("GTK did not offer both clipboard and primary-selection objects")
     active = bind(gtk, "gtk_window_is_active", num, ptr)
+    # Detect a transient focus loss even if the native window regains focus
+    # before the external clipboard process finishes its transfer.
+    changes = 0
+    notify = c.CFUNCTYPE(None, ptr, ptr, ptr)
+
+    @notify
+    def activation_changed(widget, _spec, _data):
+        nonlocal changes
+        if not active(widget):
+            changes += 1
+
+    gobject = c.CDLL("libgobject-2.0.so.0")
+    bind(gobject, "g_signal_connect_data", c.c_ulong, ptr, word, notify, ptr, ptr, num)(
+        window, b"notify::is-active", activation_changed, None, None, 0)
     set_text = bind(gtk, "gtk_clipboard_set_text", None, ptr, word, num)
     wait_text = bind(gtk, "gtk_clipboard_wait_for_text", ptr, ptr)
     g_free = bind(glib, "g_free", None, ptr)
@@ -62,6 +78,8 @@ def client(title):
             operation, *values = json.loads(line)
             if operation == "active":
                 result = bool(active(window))
+            elif operation == "focus_status":
+                result = [bool(active(window)), changes]
             elif operation == "offer":
                 for selection, text in zip(selections, values, strict=True):
                     set_text(selection, text.encode(), -1)
@@ -91,10 +109,13 @@ def client(title):
 
 
 class ClipboardClient:
-    def __init__(self, environment, backend, title):
+    def __init__(self, environment, backend, title, *, mapped=True):
         self.title = title
+        command = [sys.executable, str(Path(__file__).resolve()), title]
+        if not mapped:
+            command.append("--unmapped")
         self.process = subprocess.Popen(
-            [sys.executable, str(Path(__file__).resolve()), title],
+            command,
             env=dict(environment, GDK_BACKEND=backend), stdin=subprocess.PIPE,
             stdout=subprocess.PIPE, bufsize=0)
 
@@ -167,19 +188,19 @@ def transfer(focus, source, target, payload):
     raise RuntimeError(f"{source.title} to {target.title} selection transfer returned {latest!r}")
 
 
-def background_selections(environment, native):
+def background_selections(environment, native, *, cold=False):
     """Transfer both X11 selections while a native Wayland window holds keyboard focus."""
     missing = [tool for tool in ("xclip", "wl-copy", "wl-paste")
                if not shutil.which(tool, path=environment.get("PATH"))]
     if missing:
         return {"status": "unavailable", "reason": "Missing clipboard tools: " + ", ".join(missing)}
 
-    def matches(command, expected):
-        deadline = time.monotonic() + 2
+    def matches(command, expected, status=0):
+        deadline = time.monotonic() + 3
         while time.monotonic() < deadline:
             try:
-                read = subprocess.run(command, env=environment, capture_output=True, timeout=.5)
-                if read.returncode == 0 and read.stdout == expected:
+                read = subprocess.run(command, env=environment, capture_output=True, timeout=1)
+                if read.returncode == status and read.stdout == expected:
                     return True
             except subprocess.TimeoutExpired:
                 pass
@@ -188,34 +209,92 @@ def background_selections(environment, native):
 
     @contextmanager
     def offer(command, payload):
-        with subprocess.Popen(command, env=environment, stdin=subprocess.PIPE,
-                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) as writer:
+        with tempfile.TemporaryFile() as data:
+            data.write(payload)
+            data.seek(0)
+            writer = subprocess.Popen(command, env=environment, stdin=data,
+                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             try:
-                writer.stdin.write(payload)
-                writer.stdin.close()
                 yield
             finally:
                 if writer.poll() is None:
                     writer.terminate()
+                try:
+                    writer.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    writer.kill()
+                    writer.wait(timeout=2)
 
-    to_x11, to_wayland = {}, {}
-    for name, options in (("clipboard", []), ("primary", ["--primary"])):
-        read_x11 = ["xclip", "-selection", name, "-out"]
-        read_native = ["wl-paste", "--no-newline", *options]
-        native_payload = f"Wayland background {name} ✓".encode()
-        x11_payload = f"X11 background {name} ✓".encode()
-        with offer(["wl-copy", "--foreground", *options], native_payload):
-            if not matches(read_native, native_payload):
-                raise RuntimeError(f"wl-paste could not read wl-copy's {name} offer")
-            to_x11[name] = matches(read_x11, native_payload)
-            with offer(["xclip", "-quiet", "-selection", name, "-in"], x11_payload):
-                if not matches(read_x11, x11_payload):
-                    raise RuntimeError(f"xclip failed to own {name}")
-                to_wayland[name] = matches(read_native, x11_payload)
-    if not native.command("active"):
-        raise RuntimeError("The native client lost keyboard focus during the background check")
-    status = "pass" if all(to_x11.values()) and all(to_wayland.values()) else "failed"
-    return {"status": status, "wayland_to_x11": to_x11, "x11_to_wayland": to_wayland}
+    initial_focus = native.command("focus_status")
+    if not initial_focus[0]:
+        raise RuntimeError("The native window did not have keyboard focus before the transfer")
+    results = {}
+    selections = (("clipboard", []), ("primary", ["--primary"]))
+    for name, options in selections:
+        for kind in (("text",) if cold else ("text", "binary")):
+            mime = ["--type", "application/octet-stream"] if kind == "binary" else []
+            target = ["-target", "application/octet-stream"] if mime else []
+            data = bytes(range(256)) * 2048 if mime else " ✓".encode()
+            xwrite = ["xclip", "-quiet", "-selection", name, *target, "-in"]
+            xread = ["xclip", "-selection", name, *target, "-out"]
+            wlwrite = ["wl-copy", "--foreground", *options, *mime]
+            wlread = ["wl-paste", "--no-newline", *options, *mime]
+            first = f"Wayland {name} ".encode() + data
+            second = f"X11 {name} ".encode() + data
+            third = f"Wayland replacement {name} ".encode() + data
+            transfers = {}
+            with offer(wlwrite, first):
+                if not matches(wlread, first):
+                    raise RuntimeError(f"Native Wayland {name} {kind} control failed")
+                transfers["wayland_to_x11"] = matches(xread, first)
+                with offer(xwrite, second):
+                    if not matches(xread, second):
+                        raise RuntimeError(f"Native X11 {name} {kind} control failed")
+                    transfers["x11_to_wayland"] = matches(wlread, second)
+                    # Replace a live X11 owner. A stale bridge must not keep
+                    # serving that owner's bytes after the new Wayland offer.
+                    with offer(wlwrite, third):
+                        if not matches(wlread, third):
+                            raise RuntimeError(f"Replacing the native {name} {kind} offer failed")
+                        transfers["replaced_x11_owner"] = matches(xread, third)
+            # Wait for source destruction to reach both protocols before
+            # publishing the next offer. This catches an X11 ownership claim
+            # with an older timestamp than the preceding release.
+            transfers["cleared_wayland"] = matches(["wl-paste", "--list-types", *options], b"", 1)
+            transfers["cleared_x11"] = matches(["xclip", "-selection", name, "-out", "-target", "TARGETS"], b"", 1)
+            results[f"{name}_{kind}"] = transfers
+    if not cold:
+        # A never-mapped GTK/X11 client must be able to read and offer while
+        # the native window remains active. Check both GTK operations against
+        # an X11-only peer before attributing a failure to the bridge.
+        with ClipboardClient(environment, "x11", "Part 7 unmapped X11", mapped=False) as gtk:
+            for index, (name, options) in enumerate(selections):
+                row = {}
+                offers = ["GTK clipboard", "GTK primary"]
+                gtk.command("offer", *offers)
+                xread = ["xclip", "-selection", name, "-out"]
+                wlread = ["wl-paste", "--no-newline", *options]
+                row["gtk_to_xclip"] = matches(xread, offers[index].encode())
+                row["gtk_to_wayland"] = matches(wlread, offers[index].encode())
+                for provider, command in (("xclip", ["xclip", "-quiet", "-selection", name, "-in"]),
+                                          ("wayland", ["wl-copy", "--foreground", *options])):
+                    payload = f"{provider} to unmapped GTK {name}"
+                    with offer(command, payload.encode()):
+                        if not matches(xread, payload.encode()):
+                            row[provider + "_to_gtk"] = False
+                            continue
+                        deadline = time.monotonic() + 2
+                        received = gtk.command("read")[index]
+                        while received != payload and time.monotonic() < deadline:
+                            time.sleep(.025)
+                            received = gtk.command("read")[index]
+                        row[provider + "_to_gtk"] = received == payload
+                results[f"{name}_unmapped_gtk"] = row
+    final_focus = native.command("focus_status")
+    if final_focus != initial_focus:
+        raise RuntimeError(f"Native focus changed during the background transfer: {initial_focus} -> {final_focus}")
+    return {"status": "pass" if all(all(row.values()) for row in results.values()) else "failed",
+            "transfers": results, "keyboard_focus_unchanged": True}
 
 
 def run_clipboard(environment, focus):
@@ -231,4 +310,4 @@ def run_clipboard(environment, focus):
 
 
 if __name__ == "__main__":
-    client(sys.argv[1])
+    client(sys.argv[1], "--unmapped" not in sys.argv[2:])

@@ -38,8 +38,12 @@ def main():
     parser.add_argument("--vm", default="Arch Seaside Testing")
     parser.add_argument("--state", type=Path, default=Path.home() / ".local/state/seaside-vm")
     parser.add_argument("--tty-only", action="store_true")
-    parser.add_argument("--require-background-clipboard", action="store_true",
-                        help="require unfocused X11 transfers in both directions for both selections")
+    parser.add_argument("--installed", action="store_true",
+                        help="exercise the installed Seaside package matching the supplied revision")
+    parser.add_argument("--clipboard-only", action="store_true",
+                        help="exercise lazy X11 startup, restart and focused/background clipboard transfers")
+    # Retain the existing invocation spelling. The gate now applies to every trial.
+    parser.add_argument("--require-background-clipboard", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--pkg-config-path", type=Path)
     parser.add_argument("--runtime-prefix", type=Path,
                         help="guest-local signed packages with bin/ and lib/ directories")
@@ -49,7 +53,7 @@ def main():
     for path in (args.pkg_config_path, args.runtime_prefix, args.recorder_prefix):
         if path is not None and not path.is_absolute():
             parser.error("package and runtime paths must be absolute guest paths")
-    settings = (f"part7_require_background_clipboard = {args.require_background_clipboard!r}\n"
+    settings = (f"part7_installed = {args.installed!r}\npart7_clipboard_only = {args.clipboard_only!r}\n"
                 f"part7_pkg_config_path = {str(args.pkg_config_path or '')!r}\n"
                 f"part7_runtime_prefix = {str(args.runtime_prefix or '')!r}\n"
                 f"part7_recorder_prefix = {str(args.recorder_prefix or '')!r}\n")
