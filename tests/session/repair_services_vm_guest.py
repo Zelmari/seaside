@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import signal
 import stat
 import sys
 import subprocess
@@ -390,7 +391,11 @@ def exercise(repo, root, results, env):
             missing.symlink_to(Path(env["XDG_RUNTIME_DIR"]) / "pipewire-0")
             evidence["pipewire_recovered"] = bool(until(
                 lambda: "service recovered service=pipewire" in pw.log.read_text(errors="replace"), 20))
-            pw.close()
+            pw.process.send_signal(signal.SIGPIPE)
+            evidence["sigpipe_ready"] = pw.ctl("status")["ready"]
+            pw.process.send_signal(signal.SIGHUP)
+            evidence["hangup_exit"] = pw.process.wait(timeout=12)
+            evidence["hangup_cleanup"] = not Path(pw.env["SEASIDE_SOCKET"]).exists()
     except RuntimeError as error:
         evidence["missing_pipewire_error"] = str(error)
         evidence["missing_pipewire_log"] = pw.log.read_text(errors="replace")[-1200:]
@@ -450,6 +455,7 @@ def trial():
             assert app["wayland"] and app["x11"] and app["environment"] == checks["environment_during"], app
             assert checks["restart_ready"] and checks["restart_portals"] and not checks["orphan_units"], checks
             assert checks["missing_pipewire"]["ready"] and checks["pipewire_recovered"], checks
+            assert checks["sigpipe_ready"] and checks["hangup_exit"] == 0 and checks["hangup_cleanup"], checks
             assert checks["shutdown"]["exit"] == 0 and checks["shutdown"]["acknowledged"], checks
             assert checks["shutdown"]["samples"].count(0) >= 2, checks
             assert checks["environment_before"] == checks["environment_after"], checks
