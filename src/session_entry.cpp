@@ -400,21 +400,24 @@ class Session {
         stopping_ = true;
         timer_.reset();
         scene_.set_frame_observer(nullptr, nullptr);
-        trace_.reset();
         idle_->set_active(false);
-        satellite_.reset();
         portal_.reset();
         systemd_.reset();
         pipewire_.reset();
         if (activation_) {
+            // Waiting for the private units also dispatches the Wayland loop.
+            // Read-only IPC and already registered callbacks still use the
+            // session configuration, diagnostics and X11 reservation here.
             outcome_.cleanup_failed = !activation_->stop();
             activation_.reset();
         }
         seaside_tty_drm_set_output_callbacks(drm_, nullptr, nullptr);
         desktop_.set_input(nullptr);
         commands_->reap();
-        config_.reset();
         ipc_.reset();
+        config_.reset();
+        trace_.reset();
+        satellite_.reset();
         if (!clean_exit_ && !ready_ && !outcome_.failure_stage) {
             outcome_.failure_stage = "interrupted-before-ready";
         }
