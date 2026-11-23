@@ -832,9 +832,17 @@ class Session {
             std::fputs("seaside READY outputs=none\n", stderr);
         }
         config_->session_ready();
+        if (!startup_commands_.empty()) {
+            autostart_deadline_ = Clock::now() + probe_timeout;
+        }
+    }
+
+    void run_autostart() noexcept {
+        autostart_deadline_.reset();
         for (const auto &command : startup_commands_) {
             launch(command);
         }
+        startup_commands_.clear();
     }
 
     void report_external_fault(StartupService service, ServiceReport detail) noexcept {
@@ -906,6 +914,7 @@ class Session {
         if (detail.failure != ServiceFailure::none) {
             mark_integration_failed(service, detail);
             portal_retry_.failed();
+            run_autostart();
         } else if (service == StartupService::capture_backend) {
             // PortalProbe reports its final success after verifying both pinned
             // owners, backend bindings, and an operational ScreenCast route.
@@ -946,6 +955,9 @@ class Session {
                 return;
             }
             if (detail.failure == ServiceFailure::none) {
+                // An autostarted app may request a portal immediately. Publish
+                // the session environment and establish our owners first.
+                run_autostart();
                 start_portal_probe();
             } else {
                 finish_portal_recovery(service, detail);
@@ -1039,6 +1051,9 @@ class Session {
             report_external_fault(StartupService::systemd_user, disconnected);
         }
         const auto now = Clock::now();
+        if (autostart_deadline_ && now >= *autostart_deadline_) {
+            run_autostart();
+        }
         if (portal_retry_.begin(now)) {
             retry_portal();
         }
@@ -1153,8 +1168,8 @@ class Session {
         } else if (!session.ready_) {
             const bool has_output = std::ranges::any_of(
                 session.outputs_.outputs(), [](const auto &entry) { return entry.second.enabled; });
-            // With no usable output there is no cursor to present. The seat and
-            // Wayland server can still run the same mandatory service checks.
+            // With no usable output there is no cursor to present. The seat
+            // and Wayland server can still accept clients and probe services.
             if (display.cursor_presented || (!has_output && !display.output_pending)) {
                 session.appearance_deadline_.reset();
                 session.mark_ready(display.cursor_plane_id);
@@ -1211,7 +1226,7 @@ class Session {
     std::array<std::optional<ServiceReport>, 5> integrations_{};
     std::optional<StartupService> portal_blocker_;
     RecoveryRetry portal_retry_, pipewire_retry_;
-    std::optional<Clock::time_point> appearance_deadline_;
+    std::optional<Clock::time_point> appearance_deadline_, autostart_deadline_;
     Outcome outcome_;
     bool attaching_startup_ = true;
     bool applying_config_ = false;

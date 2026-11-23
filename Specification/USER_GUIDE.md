@@ -77,6 +77,10 @@ before ending the desktop session. Seaside checks PipeWire, the user service
 manager and portals in the background. The `integrations` field in
 `seasidectl status` shows which are checking, available or unavailable.
 You can use windows and workspaces while Seaside retries an unavailable service.
+Configured autostart commands run once when Seaside has claimed its portal
+names, when the initial activation fails, or after ten seconds. This gives
+applications that request a portal immediately the session’s display and
+portal owner. You can launch programs manually as soon as the desktop is ready.
 A portal waiting for another service reports `dependency-unavailable` and names
 that service.
 
