@@ -1303,7 +1303,7 @@ static void fit_banner(struct scene_output *view, bool project_now) {
     int height = 0;
     if (view->banner_logical_height > 0 && view->width > 0 && view->height > 1) {
         height = view->banner_logical_height < view->height ? view->banner_logical_height
-                                                           : view->height - 1;
+                                                            : view->height - 1;
     }
     const bool visible = height > 0 && !view->banner_fullscreen;
     wlr_scene_node_set_enabled(&view->banner->node, visible);
@@ -1524,14 +1524,13 @@ static bool prepare_blur(struct scene_output *output) {
         if (!view || node != &view->tree->node) {
             continue;
         }
-        if ((view->id && !view->placement.visible) || view->placement.fullscreen ||
-            !view->mapped) {
+        if ((view->id && !view->placement.visible) || view->placement.fullscreen || !view->mapped) {
             seaside_scene_blur_remove_output(view->blur, output->viewport->output);
             continue;
         }
-        applied |= seaside_scene_blur_update(
-            &view->blur, &scene->scene->tree, view->tree, view->xdg_tree, output->viewport->output,
-            &viewport, scene->blur_strength, scene->blur_passes);
+        applied |= seaside_scene_blur_update(&view->blur, &scene->scene->tree, view->tree,
+                                             view->xdg_tree, output->viewport->output, &viewport,
+                                             scene->blur_strength, scene->blur_passes);
     }
     return applied;
 }
@@ -1599,9 +1598,9 @@ static bool commit_frame(struct scene_output *view) {
             view->pending_commit = output->commit_seq;
             view->pending_mode = scanout ? "scanout" : "composed";
             view->pending_tearing = async;
-            view->pending_fallback = scanout                        ? NULL
-                                     : view->retry_composed         ? "scanout commit rejected"
-                                     : blur                         ? "backdrop blur requires composition"
+            view->pending_fallback = scanout                ? NULL
+                                     : view->retry_composed ? "scanout commit rejected"
+                                     : blur                 ? "backdrop blur requires composition"
                                      : !view->owner->direct_scanout ? "direct scanout disabled"
                                      : !wlr_output_is_direct_scanout_allowed(output)
                                          ? "output requires composition"
@@ -1817,7 +1816,7 @@ struct seaside_scene_bridge *seaside_scene_create(struct wl_display *display) {
 }
 
 void seaside_scene_watch_surfaces(struct seaside_scene_bridge *scene,
-                                   struct wlr_compositor *compositor) {
+                                  struct wlr_compositor *compositor) {
     if (compositor && wl_list_empty(&scene->blur_new_surface.link)) {
         scene->blur_new_surface.notify = blur_new_surface;
         scene->blur_compositor_destroy.notify = blur_compositor_destroy;
@@ -1874,7 +1873,7 @@ void seaside_scene_set_render_policy(struct seaside_scene_bridge *scene, bool di
 }
 
 void seaside_scene_set_blur(struct seaside_scene_bridge *scene, bool enabled, double strength,
-                             int passes) {
+                            int passes) {
     if (!scene || !scene->attached) {
         return;
     }
@@ -2194,8 +2193,8 @@ static void project_border(struct scene_view *view, size_t side, struct wlr_box 
     }
     const uint32_t rgb = view->placement.activated ? view->owner->active_border_color
                                                    : view->owner->inactive_border_color;
-    const float color[4] = {(float)((rgb >> 16) & 0xff) / 255.f,
-                            (float)((rgb >> 8) & 0xff) / 255.f, (float)(rgb & 0xff) / 255.f, 1};
+    const float color[4] = {(float)((rgb >> 16) & 0xff) / 255.f, (float)((rgb >> 8) & 0xff) / 255.f,
+                            (float)(rgb & 0xff) / 255.f, 1};
     if (!border) {
         border = wlr_scene_rect_create(view->tree, bounds.width, bounds.height, color);
         if (!border) {

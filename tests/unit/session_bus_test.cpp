@@ -181,39 +181,41 @@ TEST_F(SessionBusTest, SettingsPortalPublishesAndChangesAppearancePreference) {
     ASSERT_GE(sd_bus_request_name(gtk_bus, gtk_name, 0), 0);
     static const sd_bus_vtable gtk_vtable[]{
         SD_BUS_VTABLE_START(0),
-        SD_BUS_METHOD("Read", "ss", "v",
-                      [](sd_bus_message *message, void *, sd_bus_error *) {
-                          const char *space = nullptr;
-                          const char *key = nullptr;
-                          if (sd_bus_message_read(message, "ss", &space, &key) <= 0) {
-                              return -EINVAL;
-                          }
-                          EXPECT_STREQ(space, "org.gnome.desktop.interface");
-                          EXPECT_STREQ(key, "gtk-theme");
-                          return sd_bus_reply_method_return(message, "v", "s", "mock GTK theme");
-                      },
-                      SD_BUS_VTABLE_UNPRIVILEGED),
-        SD_BUS_METHOD("ReadAll", "as", "a{sa{sv}}",
-                      [](sd_bus_message *message, void *, sd_bus_error *) {
-                          if (sd_bus_message_enter_container(message, 'a', "s") <= 0) {
-                              return -EINVAL;
-                          }
-                          const char *pattern = nullptr;
-                          EXPECT_GT(sd_bus_message_read(message, "s", &pattern), 0);
-                          EXPECT_STREQ(pattern, "org.freedesktop.*");
-                          EXPECT_GT(sd_bus_message_read(message, "s", &pattern), 0);
-                          EXPECT_STREQ(pattern, "org.gnome.desktop.interface");
-                          return sd_bus_reply_method_return(
-                              message, "a{sa{sv}}", 2, "org.freedesktop.appearance", 2,
-                              "color-scheme", "u", 2U, "contrast", "u", 1U,
-                              "org.gnome.desktop.interface", 1, "gtk-theme", "s", "mock GTK theme");
-                      },
-                      SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_METHOD(
+            "Read", "ss", "v",
+            [](sd_bus_message *message, void *, sd_bus_error *) {
+                const char *space = nullptr;
+                const char *key = nullptr;
+                if (sd_bus_message_read(message, "ss", &space, &key) <= 0) {
+                    return -EINVAL;
+                }
+                EXPECT_STREQ(space, "org.gnome.desktop.interface");
+                EXPECT_STREQ(key, "gtk-theme");
+                return sd_bus_reply_method_return(message, "v", "s", "mock GTK theme");
+            },
+            SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_METHOD(
+            "ReadAll", "as", "a{sa{sv}}",
+            [](sd_bus_message *message, void *, sd_bus_error *) {
+                if (sd_bus_message_enter_container(message, 'a', "s") <= 0) {
+                    return -EINVAL;
+                }
+                const char *pattern = nullptr;
+                EXPECT_GT(sd_bus_message_read(message, "s", &pattern), 0);
+                EXPECT_STREQ(pattern, "org.freedesktop.*");
+                EXPECT_GT(sd_bus_message_read(message, "s", &pattern), 0);
+                EXPECT_STREQ(pattern, "org.gnome.desktop.interface");
+                return sd_bus_reply_method_return(
+                    message, "a{sa{sv}}", 2, "org.freedesktop.appearance", 2, "color-scheme", "u",
+                    2U, "contrast", "u", 1U, "org.gnome.desktop.interface", 1, "gtk-theme", "s",
+                    "mock GTK theme");
+            },
+            SD_BUS_VTABLE_UNPRIVILEGED),
         SD_BUS_VTABLE_END};
     sd_bus_slot *backend = nullptr;
     ASSERT_GE(sd_bus_add_object_vtable(gtk_bus, &backend, path, interface, gtk_vtable, nullptr), 0);
-    const std::unique_ptr<sd_bus_slot, decltype(&sd_bus_slot_unref)> backend_slot(backend,
-                                                                                 sd_bus_slot_unref);
+    const std::unique_ptr<sd_bus_slot, decltype(&sd_bus_slot_unref)> backend_slot(
+        backend, sd_bus_slot_unref);
     auto settings = seaside::SettingsPortal::start(*service, seaside::ColorScheme::dark);
     ASSERT_TRUE(settings);
     ASSERT_TRUE(pump_until([&] { return service->pending() == 0; }));
@@ -238,9 +240,9 @@ TEST_F(SessionBusTest, SettingsPortalPublishesAndChangesAppearancePreference) {
     read(1);
 
     sd_bus_message *theme = nullptr;
-    ASSERT_GE(sd_bus_message_new_method_call(bus->native_handle(), &theme, name, path, interface,
-                                             "Read"),
-              0);
+    ASSERT_GE(
+        sd_bus_message_new_method_call(bus->native_handle(), &theme, name, path, interface, "Read"),
+        0);
     const std::unique_ptr<sd_bus_message, decltype(&sd_bus_message_unref)> theme_request(
         theme, sd_bus_message_unref);
     ASSERT_GE(sd_bus_message_append(theme, "ss", "org.gnome.desktop.interface", "gtk-theme"), 0);
@@ -260,9 +262,8 @@ TEST_F(SessionBusTest, SettingsPortalPublishesAndChangesAppearancePreference) {
               0);
     const std::unique_ptr<sd_bus_message, decltype(&sd_bus_message_unref)> all_request(
         all, sd_bus_message_unref);
-    ASSERT_GE(sd_bus_message_append(all, "as", 2, "org.freedesktop.*",
-                                    "org.gnome.desktop.interface"),
-              0);
+    ASSERT_GE(
+        sd_bus_message_append(all, "as", 2, "org.freedesktop.*", "org.gnome.desktop.interface"), 0);
     bool received = false;
     ASSERT_TRUE(bus->call(all, 1s, [&](const BusReply &reply) {
         received = true;
@@ -334,10 +335,10 @@ TEST_F(SessionBusTest, SettingsPortalPublishesAndChangesAppearancePreference) {
     const std::unique_ptr<sd_bus_slot, decltype(&sd_bus_slot_unref)> signal(match,
                                                                             sd_bus_slot_unref);
     ASSERT_GE(sd_bus_emit_signal(gtk_bus, path, interface, "SettingChanged", "ssv", appearance,
-                                  "color-scheme", "u", 2U),
+                                 "color-scheme", "u", 2U),
               0);
     ASSERT_GE(sd_bus_emit_signal(gtk_bus, path, interface, "SettingChanged", "ssv", appearance,
-                                  "contrast", "u", 1U),
+                                 "contrast", "u", 1U),
               0);
     ASSERT_TRUE((*gtk)->refresh_events());
     ASSERT_TRUE(pump_until([&] { return changed.contrast == 1; }));

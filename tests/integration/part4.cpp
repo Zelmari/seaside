@@ -1202,17 +1202,18 @@ bool run_floating_resize_edges(const Fixture &fixture) {
             if (!horizontal && !vertical) {
                 continue;
             }
-            const double x = rect.x +
-                             (horizontal < 0 ? 2 : horizontal > 0 ? rect.width - 2 : rect.width / 2);
-            const double y = rect.y +
-                             (vertical < 0 ? 2 : vertical > 0 ? rect.height - 2 : rect.height / 2);
+            const double x = rect.x + (horizontal < 0   ? 2
+                                       : horizontal > 0 ? rect.width - 2
+                                                        : rect.width / 2);
+            const double y = rect.y + (vertical < 0   ? 2
+                                       : vertical > 0 ? rect.height - 2
+                                                      : rect.height / 2);
             REQUIRE(begin_drag(fixture, id, BTN_RIGHT, x, y));
             desktop.motion(x + (horizontal ? horizontal * 5 : 7),
                            y + (vertical ? vertical * 3 : 9));
-            const WindowRect expected{rect.x - (horizontal < 0 ? 5 : 0),
-                                      rect.y - (vertical < 0 ? 3 : 0),
-                                      rect.width + (horizontal ? 5 : 0),
-                                      rect.height + (vertical ? 3 : 0)};
+            const WindowRect expected{
+                rect.x - (horizontal < 0 ? 5 : 0), rect.y - (vertical < 0 ? 3 : 0),
+                rect.width + (horizontal ? 5 : 0), rect.height + (vertical ? 3 : 0)};
             REQUIRE(desktop.windows().view(id).geometry == expected);
             desktop.motion(x, y);
             REQUIRE(desktop.windows().view(id).geometry == rect);
@@ -1963,19 +1964,20 @@ bool run_layer_shell(const Fixture &fixture) {
     config.window.gaps_inner = 0;
     config.window.border_width = 0;
     desktop.apply_config(config);
-    const auto banner = seaside::render_config_banner("Configuration error\nInvalid value",
-                                                       output_bounds.width, 1);
+    const auto banner =
+        seaside::render_config_banner("Configuration error\nInvalid value", output_bounds.width, 1);
     REQUIRE(banner);
-    scene.set_config_error(seaside::Diagnostic{.path = {}, .field = {}, .message = "Invalid value"});
+    scene.set_config_error(
+        seaside::Diagnostic{.path = {}, .field = {}, .message = "Invalid value"});
     const auto banner_height = banner->logical_height;
     const WindowRect below_banner{4, reserved.y + banner_height + 4, 152,
                                   reserved.height - banner_height - 8};
-    REQUIRE(connection.wait(
-        client, [&] { return desktop.windows().view(id).geometry == below_banner; }));
+    REQUIRE(connection.wait(client,
+                            [&] { return desktop.windows().view(id).geometry == below_banner; }));
     REQUIRE(wait_pixel(connection, client, primary.get(), 4, banner_height + 5, green));
     const auto &banner_pixel = banner->pixels;
-    const auto banner_color = static_cast<std::uint32_t>(banner_pixel[0] | banner_pixel[1] << 8 |
-                                                        banner_pixel[2] << 16);
+    const auto banner_color =
+        static_cast<std::uint32_t>(banner_pixel[0] | banner_pixel[1] << 8 | banner_pixel[2] << 16);
     REQUIRE(wait_pixel(connection, client, other.get(), 0, 0, banner_color));
 
     REQUIRE(desktop.dispatch(action(ActionKind::toggle_window_maximize), 0, id).value_or(false));
@@ -1993,8 +1995,8 @@ bool run_layer_shell(const Fixture &fixture) {
     scene.set_config_error(std::nullopt);
     config.window.gaps_outer = 0;
     desktop.apply_config(config);
-    REQUIRE(connection.wait(
-        client, [&] { return desktop.windows().view(id).geometry == reserved; }));
+    REQUIRE(
+        connection.wait(client, [&] { return desktop.windows().view(id).geometry == reserved; }));
     REQUIRE(wait_pixel(connection, client, primary.get(), 4, 5, green));
 
     zwlr_layer_surface_v1_set_exclusive_zone(panel.role, 20);

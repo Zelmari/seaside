@@ -53,17 +53,16 @@ int setting_not_found(sd_bus_message *request) noexcept {
 
 template <typename Reply>
 int forward_setting(SessionBus &bus, sd_bus_message *request, Reply respond) {
-    auto call = method(bus.native_handle(), gtk_settings_service, settings_path,
-                       settings_interface, sd_bus_message_get_member(request));
+    auto call = method(bus.native_handle(), gtk_settings_service, settings_path, settings_interface,
+                       sd_bus_message_get_member(request));
     if (!call || sd_bus_message_rewind(request, true) < 0 ||
         sd_bus_message_copy(call.get(), request, true) < 0) {
         return respond(request, BusReply{});
     }
-    auto incoming = std::shared_ptr<sd_bus_message>(sd_bus_message_ref(request),
-                                                     sd_bus_message_unref);
-    if (!bus.call(call.get(), 3s, [incoming, respond](const BusReply &reply) {
-            respond(incoming.get(), reply);
-        })) {
+    auto incoming =
+        std::shared_ptr<sd_bus_message>(sd_bus_message_ref(request), sd_bus_message_unref);
+    if (!bus.call(call.get(), 3s,
+                  [incoming, respond](const BusReply &reply) { respond(incoming.get(), reply); })) {
         return respond(request, BusReply{});
     }
     return 1;
@@ -124,8 +123,7 @@ bool append_settings_namespace(sd_bus_message *reply, sd_bus_message *source, co
             return false;
         }
     }
-    return sd_bus_message_close_container(reply) >= 0 &&
-           sd_bus_message_close_container(reply) >= 0;
+    return sd_bus_message_close_container(reply) >= 0 && sd_bus_message_close_container(reply) >= 0;
 }
 
 int merge_settings(sd_bus_message *request, sd_bus_message *source,
@@ -145,8 +143,8 @@ int merge_settings(sd_bus_message *request, sd_bus_message *source,
             if (sd_bus_message_read(source, "s", &name) <= 0) {
                 return -EBADMSG;
             }
-            const auto override = name == std::string_view(appearance_namespace) ? color
-                                                                                   : std::nullopt;
+            const auto override =
+                name == std::string_view(appearance_namespace) ? color : std::nullopt;
             if (!append_settings_namespace(raw, source, name, override) ||
                 sd_bus_message_exit_container(source) < 0) {
                 return -EBADMSG;
@@ -247,15 +245,16 @@ bool parse_power_state(sd_bus_message *message, PowerProfiles::Status &status) {
 std::unique_ptr<SettingsPortal> SettingsPortal::start(SessionBus &bus, ColorScheme scheme) noexcept
     try {
     static const sd_bus_vtable vtable[] = {
-        SD_BUS_VTABLE_START(0), SD_BUS_METHOD("Read", "ss", "v", read, SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_VTABLE_START(0),
+        SD_BUS_METHOD("Read", "ss", "v", read, SD_BUS_VTABLE_UNPRIVILEGED),
         SD_BUS_METHOD("ReadAll", "as", "a{sa{sv}}", read_all, SD_BUS_VTABLE_UNPRIVILEGED),
-        SD_BUS_PROPERTY("version", "u",
-                        [](sd_bus *, const char *, const char *, const char *,
-                           sd_bus_message *reply, void *, sd_bus_error *) {
-                            return sd_bus_message_append(reply, "u", 1U);
-                        },
-                        0, SD_BUS_VTABLE_PROPERTY_CONST),
-        SD_BUS_SIGNAL("SettingChanged", "ssv", 0), SD_BUS_VTABLE_END};
+        SD_BUS_PROPERTY(
+            "version", "u",
+            [](sd_bus *, const char *, const char *, const char *, sd_bus_message *reply, void *,
+               sd_bus_error *) { return sd_bus_message_append(reply, "u", 1U); },
+            0, SD_BUS_VTABLE_PROPERTY_CONST),
+        SD_BUS_SIGNAL("SettingChanged", "ssv", 0),
+        SD_BUS_VTABLE_END};
     auto portal = std::unique_ptr<SettingsPortal>(new SettingsPortal(bus, scheme));
     if (sd_bus_add_object_vtable(bus.native_handle(), &portal->object_, settings_path,
                                  settings_interface, vtable, portal.get()) < 0 ||

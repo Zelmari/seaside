@@ -170,8 +170,8 @@ void SceneImageRelease::operator()(wlr_buffer *buffer) const noexcept {
     seaside_scene_drop_image(buffer);
 }
 
-std::expected<std::unique_ptr<Scene>, SceneError> Scene::create(wl_display *display,
-                                                               wlr_compositor *compositor) noexcept {
+std::expected<std::unique_ptr<Scene>, SceneError>
+Scene::create(wl_display *display, wlr_compositor *compositor) noexcept {
     if (!display) {
         return std::unexpected(SceneError::invalid_arguments);
     }
