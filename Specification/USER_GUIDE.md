@@ -112,11 +112,34 @@ change applies to the running session. Most settings take effect this way.
 [Canonical TOML](SEASIDE_CONFIG_EXAMPLE.toml)
 
 If an edit is invalid, Seaside keeps the active settings and displays an error
-banner. `seasidectl status` reports the config path and error. Correct the
+banner. It reserves space above panels and ordinary windows, and the top outer
+gap starts below the reserved work area. A fullscreen output hides its banner
+until fullscreen ends. `seasidectl status` reports the config path and error. Correct the
 file and save again. A subsequent launch with invalid TOML uses the last
 accepted configuration, or built-in defaults when there is no accepted file.
 The last-good copy is in `$XDG_STATE_HOME/seaside/last-good-config.toml`,
 with `~/.local/state` as the fallback state directory.
+
+Set `[appearance].color_scheme` to `"dark"` or `"light"`. Dark is the default.
+Seaside publishes the preference through the Settings portal. Apps that offer
+their own appearance setting can override the session preference. Set
+`[window].active_border_color` and `inactive_border_color` to quoted
+`"#RRGGBB"` hex colors.
+
+Under `[input.mouse]`, choose `scroll_direction = "normal"` or `"inverse"`
+for wheel and touchpad scrolling. Under `[render.blur]`, set `enabled = true`
+to blur the backdrop behind translucent windows. Blur is off by default.
+Use `strength` from `0.0` through `1.0` and `passes` from `1` through `4`.
+
+Set `[audio].default_output` and `default_input` independently. Run
+`wpctl status --name` and copy a node name from Sinks or Sources. `"auto"`
+lets WirePlumber choose. `seasidectl status` shows the requested and effective
+routes and reports configured devices that are temporarily unavailable.
+
+The Arch package installs `power-profiles-daemon`. Set `[power].profile` to
+`"saver"`, `"balanced"`, or `"performance"`. An omitted setting follows the
+system policy. Run `powerprofilesctl list` to see supported profiles and
+`seasidectl status` to check the requested and effective profile.
 
 Seaside follows chains of symlinks such as a dotfile profile selected by an
 intermediate link. On local filesystems that allow Linux read leases on your
@@ -142,14 +165,14 @@ until it observes a completed save.
 | Super+Q | Close the focused window |
 | Super+P | Toggle whether the focused window is pinned across workspaces |
 | Super+D | Toggle tiling for the focused window |
-| Super+F | Toggle maximization for the focused window |
-| Super+Shift+F | Toggle fullscreen for the focused window |
+| Super+F | Maximize the focused window within the configured outer gaps |
+| Super+Shift+F | Toggle fullscreen without outer gaps |
 | Super+1 through Super+9, Super+0 | Switch to workspaces 1 through 9, then 10 |
 | Super+Shift+1 through Super+Shift+9, Super+Shift+0 | Move the focused window to workspaces 1 through 9, then 10, and follow it |
 | Super+arrow keys | Focus a window in that direction |
 | Alt+Tab | Cycle through the current workspace's recent focus history |
 | Super+left mouse drag | Move a window |
-| Super+right mouse drag | Resize a window |
+| Super+right mouse drag | Resize from a side or corner, or move a shared tile boundary |
 | Media volume down/up and mute | Adjust the default playback device in five-point steps, cap at 100%, or toggle mute |
 | Super+Shift+E | Exit Seaside and return to the console |
 
