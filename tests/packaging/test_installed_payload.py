@@ -19,13 +19,16 @@ def run(*argv, **kwargs):
 def installed_payload(source, build, stage):
     options = json.loads((build / "meson-info/intro-buildoptions.json").read_text())
     paths = {row["name"]: Path(row["value"]) for row in options
-             if row["name"] in {"prefix", "bindir", "datadir", "sysconfdir"}}
+             if row["name"] in {"prefix", "bindir", "libexecdir", "datadir", "sysconfdir"}}
 
     def destination(option, filename):
         return (paths["prefix"] / paths[option] / filename).relative_to("/")
 
     binaries = {name: destination("bindir", name) for name in ("seaside", "seasidectl")}
+    bridge = destination("libexecdir", "seaside/seaside-xwayland-satellite")
     data = {
+        destination("datadir", "doc/seaside/xwayland-bridge/data-control.patch"):
+            "packaging/xwayland-bridge/data-control.patch",
         destination("datadir", "doc/seaside/config.example.toml"):
             "Specification/SEASIDE_CONFIG_EXAMPLE.toml",
         destination("datadir", "licenses/seaside/LICENSE"): "LICENSE",
@@ -35,6 +38,9 @@ def installed_payload(source, build, stage):
         destination("sysconfdir", "xdg/xdg-desktop-portal-wlr/Seaside"):
             "packaging/xdg-desktop-portal-wlr/Seaside",
     }
+    for name in ("LICENSE", "OFL.txt", "NOTICE.md", "THIRD-PARTY.txt"):
+        data[destination("datadir", f"licenses/seaside/xwayland-satellite/{name}")] = (
+            f"packaging/xwayland-bridge/{name}")
     # Even with DESTDIR, Meson replaces the build's install-log.txt. A real
     # system installation may own that log. Give the exact plan and its built
     # inputs a private working directory so this trial cannot overwrite it.
@@ -52,8 +58,14 @@ def installed_payload(source, build, stage):
     assert result.returncode == 0, result.stderr or result.stdout
     actual = {path.relative_to(stage) for path in stage.rglob("*")
               if path.is_file() or path.is_symlink()}
-    expected = set(data) | set(binaries.values())
+    expected = set(data) | set(binaries.values()) | {bridge}
     assert actual == expected, f"Missing {expected - actual}; unexpected {actual - expected}"
+    private = stage / bridge
+    assert not private.is_symlink() and os.access(private, os.X_OK), bridge
+    assert private.read_bytes() == (build / private.name).read_bytes(), bridge
+    build_version = run(build / private.name, "-version", check=True).stdout.strip()
+    assert "+seaside." in build_version, build_version
+    assert run(private, "-version", check=True).stdout.strip() == build_version
     for target, original in data.items():
         installed = stage / target
         assert not installed.is_symlink(), target

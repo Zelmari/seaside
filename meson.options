@@ -1,2 +1,4 @@
 option('package_version', type: 'string', value: '',
   description: 'Installed package version reported by the Seaside commands')
+option('xwayland_bridge', type: 'string', value: '',
+  description: 'Absolute path to the prepared private Seaside Xwayland bridge')

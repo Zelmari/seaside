@@ -138,6 +138,12 @@ struct SatelliteTest : ::testing::Test {
     }
 };
 
+TEST_F(SatelliteTest, RequiresAnAbsolutePathForAnExplicitBridge) {
+    auto created = reserve("xwayland-satellite");
+    ASSERT_FALSE(created);
+    EXPECT_EQ(created.error(), EINVAL);
+}
+
 TEST_F(SatelliteTest, ReservesIndependentDisplaysAndPrivateAuthority) {
     const auto occupied_path = directory.path() / ".X0-lock";
     std::ofstream(occupied_path) << "existing display";

@@ -1,5 +1,7 @@
 #include "satellite.hpp"
 
+#include "bridge_paths.hpp"
+
 #include <X11/Xauth.h>
 #include <array>
 #include <cerrno>
@@ -7,6 +9,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fcntl.h>
+#include <filesystem>
 #include <limits.h>
 #include <poll.h>
 #include <spawn.h>
@@ -159,6 +162,20 @@ void drop_pending(const Fd &listener) noexcept {
         }
     }
     fcntl(listener.get(), F_SETFL, flags);
+}
+
+std::string private_bridge_path() {
+    namespace fs = std::filesystem;
+    std::error_code error;
+    const auto executable = fs::read_symlink("/proc/self/exe", error);
+    const auto directory = executable.parent_path();
+    // The installed compositor always uses its package's libexec directory.
+    // Only a compositor running directly in a Meson build tree uses a sibling.
+    if (!error && directory != SEASIDE_INSTALL_BINDIR &&
+        fs::is_regular_file(directory / "meson-private/coredata.dat", error)) {
+        return directory / SEASIDE_XWAYLAND_BRIDGE_NAME;
+    }
+    return fs::path(SEASIDE_XWAYLAND_BRIDGE_DIR) / SEASIDE_XWAYLAND_BRIDGE_NAME;
 }
 
 using EventSource = std::unique_ptr<wl_event_source, decltype(&wl_event_source_remove)>;
@@ -334,7 +351,7 @@ struct Satellite::Impl {
                                    const_cast<char *>("tcp"),
                                    nullptr};
                 pid_t pid = 0;
-                error = posix_spawnp(&pid, executable.c_str(), &actions, &attr, args, envp.data());
+                error = posix_spawn(&pid, executable.c_str(), &actions, &attr, args, envp.data());
                 if (!error) {
                     child = pid;
                 }
@@ -422,10 +439,12 @@ std::expected<std::unique_ptr<Satellite>, int>
 Satellite::reserve(wl_event_loop *loop, std::string_view wayland_display,
                    std::string_view runtime_dir, std::string_view executable,
                    std::string_view socket_root) noexcept try {
-    if (!loop || wayland_display.empty() || runtime_dir.empty() || executable.empty()) {
+    if (!loop || wayland_display.empty() || runtime_dir.empty() ||
+        (!executable.empty() && executable.front() != '/')) {
         return std::unexpected(EINVAL);
     }
-    auto impl = std::make_unique<Impl>(loop, executable);
+    auto impl = std::make_unique<Impl>(loop, executable.empty() ? private_bridge_path()
+                                                                : std::string(executable));
     if (const int error = impl->reserve_sockets(socket_root)) {
         return std::unexpected(error);
     }

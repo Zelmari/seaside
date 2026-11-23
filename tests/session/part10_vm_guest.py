@@ -437,6 +437,11 @@ def satellite_restart(session, state):
     def note(pid):
         return str(pid) in children.read_text().split()
 
+    bridge = Path("/usr/lib/seaside/seaside-xwayland-satellite")
+
+    def private_child(pid):
+        return note(pid) and Path(f"/proc/{pid}/exe").resolve() == bridge
+
     require("xwayland-satellite started" not in session.log.read_text(),
             "The packaged session started Xwayland without an X11 client")
     children = Path(f"/proc/{session.process.pid}/task/{session.process.pid}/children")
@@ -448,7 +453,7 @@ def satellite_restart(session, state):
         previous = int(found[1])
         descriptor = os.pidfd_open(previous)
         try:
-            require(note(previous), "Refusing to stop an Xwayland satellite outside this trial")
+            require(private_child(previous), "The first X11 client did not start the packaged private bridge")
             signal.pidfd_send_signal(descriptor, signal.SIGTERM)
         finally:
             os.close(descriptor)
@@ -462,10 +467,11 @@ def satellite_restart(session, state):
         wait_for(restarted_window, 12, "a new X11 client after satellite restart", client)
         pids = re.findall(r"xwayland-satellite started pid=([0-9]+)", session.log.read_text())
         require(len(pids) == 2 and pids[0] != pids[1], "Xwayland did not restart exactly once")
+        require(private_child(pids[1]), "The restarted X11 client did not use the packaged private bridge")
         client.stdin.write("quit\n")
         client.stdin.flush()
         require(client.wait(timeout=8) == 0, "The restarted X11 client did not exit")
-    state["satellite_restart"] = {"processes": pids, "status": "pass"}
+    state["satellite_restart"] = {"processes": pids, "executable": str(bridge), "status": "pass"}
 
 
 def stability_resources(pid):

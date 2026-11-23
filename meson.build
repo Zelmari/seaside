@@ -390,11 +390,41 @@ test('part5-layout-policy', layout_policy_tests, suite: ['unit', 'part5'], timeo
   env: {'SEASIDE_GTEST': '1', 'SEASIDE_TEST_PART': '5', 'SEASIDE_REQUIREMENTS': '4.1,4.5,5,8.2,12.2b'},
 )
 
+bridge_name = 'seaside-xwayland-satellite'
+bridge_dir = get_option('libexecdir') / 'seaside'
+bridge_path = get_option('xwayland_bridge')
+if bridge_path == ''
+  located = run_command(files('tools/prepare-xwayland-bridge'), '--locate', check: false)
+  if located.returncode() != 0
+    error('Prepare the private Xwayland bridge with tools/prepare-xwayland-bridge, or pass -Dxwayland_bridge=/absolute/path/to/' + bridge_name)
+  endif
+  bridge_path = located.stdout().strip()
+endif
+if not fs.is_absolute(bridge_path) or not fs.is_file(bridge_path)
+  error('xwayland_bridge must be the absolute path to a prepared bridge executable: ' + bridge_path)
+endif
+bridge_program = find_program(bridge_path)
+bridge_version = run_command(bridge_program, '-version', check: false)
+bridge_revision = '+seaside.' + fs.hash('packaging/xwayland-bridge/data-control.patch', 'sha256').substring(0, 12)
+if bridge_version.returncode() != 0 or not bridge_version.stdout().strip().endswith(bridge_revision)
+  error('The selected Xwayland bridge does not report the Seaside data-control backport: ' + bridge_path)
+endif
+bridge_binary = custom_target('private-xwayland-bridge',
+  input: bridge_path, output: bridge_name,
+  command: [find_program('install'), '-m', '0755', '@INPUT@', '@OUTPUT@'],
+  install: true, install_dir: bridge_dir, install_mode: 'rwxr-xr-x',
+)
+bridge_config = configuration_data()
+bridge_config.set_quoted('SEASIDE_XWAYLAND_BRIDGE_NAME', bridge_name)
+bridge_config.set_quoted('SEASIDE_XWAYLAND_BRIDGE_DIR', get_option('prefix') / bridge_dir)
+bridge_config.set_quoted('SEASIDE_INSTALL_BINDIR', get_option('prefix') / get_option('bindir'))
+bridge_paths = configure_file(output: 'bridge_paths.hpp', configuration: bridge_config)
+
 session_foundation = static_library(
   'seaside-session-foundation',
   ['src/session_activation.cpp', 'src/session_bus.cpp', 'src/session_pipewire.cpp',
    'src/session_portal.cpp', 'src/session_services.cpp', 'src/session_systemd.cpp',
-   'src/startup_gate.cpp', 'src/satellite.cpp'],
+   'src/startup_gate.cpp', 'src/satellite.cpp', bridge_paths],
   include_directories: include_directories('src'),
   dependencies: [systemd, pipewire, wayland_server, threads, xau],
   install: false,
@@ -547,6 +577,7 @@ seaside = executable(
   dependencies: [wlroots, wayland_server, pixman, libdrm, systemd, pipewire, xkbcommon, xau, threads, nlohmann_json],
   link_with: [core, tty_foundation, config_foundation, capture_foundation, session_foundation,
               desktop_foundation, ipc_foundation, idle_foundation, trace_foundation],
+  link_depends: bridge_binary,
   install: true,
 )
 install_data('packaging/seaside-portals.conf', install_dir: get_option('datadir') / 'xdg-desktop-portal')
@@ -554,6 +585,11 @@ install_data('packaging/black.png', install_dir: get_option('datadir') / 'seasid
 install_data('packaging/xdg-desktop-portal-wlr/Seaside',
   install_dir: get_option('sysconfdir') / 'xdg' / 'xdg-desktop-portal-wlr',
 )
+install_data('packaging/xwayland-bridge/LICENSE', 'packaging/xwayland-bridge/OFL.txt',
+  'packaging/xwayland-bridge/NOTICE.md', 'packaging/xwayland-bridge/THIRD-PARTY.txt',
+  install_dir: get_option('datadir') / 'licenses' / 'seaside' / 'xwayland-satellite')
+install_data('packaging/xwayland-bridge/data-control.patch',
+  install_dir: get_option('datadir') / 'doc' / 'seaside' / 'xwayland-bridge')
 install_data('LICENSE', install_dir: get_option('datadir') / 'licenses' / 'seaside')
 install_data('Specification/SEASIDE_CONFIG_EXAMPLE.toml',
   rename: 'config.example.toml', install_dir: get_option('datadir') / 'doc' / 'seaside',

@@ -15,8 +15,7 @@ class Satellite final {
   public:
     static std::expected<std::unique_ptr<Satellite>, int>
     reserve(wl_event_loop *loop, std::string_view wayland_display, std::string_view runtime_dir,
-            std::string_view executable = "xwayland-satellite",
-            std::string_view socket_root = "/tmp") noexcept;
+            std::string_view executable = {}, std::string_view socket_root = "/tmp") noexcept;
 
     ~Satellite() noexcept;
     Satellite(const Satellite &) = delete;
