@@ -84,9 +84,12 @@ Seaside publishes `WAYLAND_DISPLAY`, `XDG_CURRENT_DESKTOP`, `XDG_SESSION_TYPE`
 and, when X11 is available, `DISPLAY` and `XAUTHORITY` to the systemd user
 manager. Arch's dbus-broker launches D-Bus services through this manager, so
 applications activated that way receive the session display too. The old values
-are restored after exit or a compositor crash. Values changed by another
-program during the session are preserved. Classic dbus-daemon services that
-use its own activation environment require separate configuration.
+are restored after exit or a compositor crash for variables whose values still
+match Seaside’s when cleanup reads the manager. Removal checks the current
+value atomically. Restoring a previously set value uses a separate manager
+call, so a concurrent write between the check and that call can be overwritten.
+Services activated by classic dbus-daemon’s own launcher require separate
+configuration.
 
 The three private portal units stop when their owning compositor exits.
 A portal already running under another desktop or left over from an older
