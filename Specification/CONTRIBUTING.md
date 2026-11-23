@@ -4,20 +4,27 @@ Use an Arch Linux development environment for the GCC C++23, Meson and Ninja
 build. Work from the root of a Git checkout. The package recipe declares the
 runtime libraries and commands, build dependencies, and test dependencies.
 The [package build instructions](USER_GUIDE.md#build-and-install-from-source)
-prepare those dependencies on Arch. Install `clang` for clang-format and
-clang-tidy when running the full development suite. GDB is useful for
-interactive debugging.
+prepare those dependencies on Arch. A development build also uses the
+private X11 clipboard bridge. The preparation command below downloads the
+pinned upstream source and locked Rust dependencies, applies Seaside’s
+backport, and caches the executable for use across build directories.
+Install `rust`, `clang`, `patch`, `libxcb` and `xcb-util-cursor` to build it.
+GDB is useful for interactive debugging.
 
 ## Build and test
 
 ```sh
+tools/prepare-xwayland-bridge
 meson setup build --buildtype=debug
 meson compile -C build
 meson test -C build --print-errorlogs
 ```
 
 These commands configure a debug build, build the tools and fixtures, and run
-the registered tests. Use `meson setup --reconfigure build` when changing
+the registered tests. The Arch package prepares the bridge automatically.
+To supply an already-prepared copy in another location, pass
+`-Dxwayland_bridge=/absolute/path/to/seaside-xwayland-satellite` to Meson.
+Use `meson setup --reconfigure build` when changing
 options in an existing build directory. Meson resolves system dependencies
 locally and uses `wrap_mode=nodownload`. The installed session workflow starts
 from the Arch package so it can use the package-owned wallpaper and portal
@@ -83,8 +90,8 @@ Use Arch's `devtools` and a fresh root with `base-devel` for a package
 qualification run. `mkarchroot` initializes the base root. Run the preparation
 script from the project checkout, then run `makechrootpkg` from the resulting
 staging directory. It uses a clean working copy and runs `makepkg` as an
-ordinary user. `makepkg --verifysource` checks the staged source archive before
-building. [mkarchroot manual](https://man.archlinux.org/man/mkarchroot.1.en) · [makechrootpkg manual](https://man.archlinux.org/man/makechrootpkg.1.en) · [makepkg manual](https://man.archlinux.org/man/makepkg.8.en)
+ordinary user. `makepkg --verifysource` checks the Seaside and X11 bridge
+source archives before building. [mkarchroot manual](https://man.archlinux.org/man/mkarchroot.1.en) · [makechrootpkg manual](https://man.archlinux.org/man/makechrootpkg.1.en) · [makepkg manual](https://man.archlinux.org/man/makepkg.8.en)
 
 ```sh
 sudo pacman -Syu --needed base-devel devtools git

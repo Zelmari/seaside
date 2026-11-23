@@ -221,14 +221,17 @@ local IPC socket. [JSONL protocol](../src/ipc_protocol.cpp)
 ## Use applications and sharing
 
 - **Wayland and X11 apps.** Run the app in a Seaside terminal or launch it from
-  your own panel. The first X11 client starts `xwayland-satellite` on demand.
+  your own panel. The first X11 client starts Seaside’s packaged copy of
+  `xwayland-satellite` on demand.
   If that service exits, a subsequent X11 connection can start it again.
 - **Clipboard.** Local Wayland clients running as your user can read and replace
   clipboard and primary selections in the background. Use `wl-copy` and
   `wl-paste` for command-line transfers. For history, run an external manager
-  such as `wl-paste --watch cliphist store`. With Arch’s `xwayland-satellite`
-  0.8.3, focus the X11 window to exchange selections with a Wayland app.
-  Background X11 transfers require data-control support in the bridge.
+  such as `wl-paste --watch cliphist store`. A background X11 app can also
+  exchange either selection with a Wayland app while your current window keeps
+  keyboard focus. For example, text copied with `xclip -selection clipboard`
+  is available to `wl-paste`. Seaside’s bridge includes the upstream
+  data-control change for this purpose.
   [Upstream implementation](https://github.com/Supreeeme/xwayland-satellite/pull/431)
 - **Audio.** The media keys adjust the current default playback device through
   WirePlumber. Run `wpctl status` to list devices and
