@@ -104,6 +104,15 @@ layout='scrolling'
 gaps_outer=21
 gaps_inner=22
 border_width=23
+active_border_color='#00d0Ef'
+inactive_border_color='#123456'
+[appearance]
+color_scheme='light'
+[audio]
+default_output='alsa_output.usb-Example'
+default_input='alsa_input.usb-Example'
+[power]
+profile='performance'
 [workspaces]
 mode='per-monitor'
 [monitors]
@@ -121,6 +130,7 @@ default_column_width=0.75
 [input.mouse]
 profile='flat'
 sensitivity=-0.7
+scroll_direction='inverse'
 [idle]
 display_off_after_minutes=42
 [render]
@@ -128,6 +138,10 @@ direct_scanout=false
 adaptive_sync='always'
 allow_tearing=false
 fullscreen_aspect='stretch'
+[render.blur]
+enabled=true
+strength=0.75
+passes=4
 [night_light]
 enabled=true
 temperature_kelvin=6000
@@ -144,6 +158,12 @@ temperature_kelvin=6000
     EXPECT_EQ(c.window.gaps_outer, 21);
     EXPECT_EQ(c.window.gaps_inner, 22);
     EXPECT_EQ(c.window.border_width, 23);
+    EXPECT_EQ(c.window.active_border_color, 0x00d0efU);
+    EXPECT_EQ(c.window.inactive_border_color, 0x123456U);
+    EXPECT_EQ(c.appearance.color_scheme, seaside::ColorScheme::light);
+    EXPECT_EQ(c.audio.default_output, "alsa_output.usb-Example");
+    EXPECT_EQ(c.audio.default_input, "alsa_input.usb-Example");
+    EXPECT_EQ(c.power.profile, seaside::PowerProfile::performance);
     EXPECT_EQ(c.workspaces.mode, seaside::WorkspaceMode::per_monitor);
     ASSERT_TRUE(c.monitors.primary);
     EXPECT_EQ(c.monitors.primary->kind, seaside::SelectorKind::identity);
@@ -158,11 +178,15 @@ temperature_kelvin=6000
     EXPECT_EQ(c.scrolling.default_column_width, 0.75);
     EXPECT_EQ(c.input.mouse.profile, "flat");
     EXPECT_EQ(c.input.mouse.sensitivity, -0.7);
+    EXPECT_EQ(c.input.mouse.scroll_direction, seaside::ScrollDirection::inverse);
     EXPECT_EQ(c.idle.display_off_after_minutes, 42);
     EXPECT_FALSE(c.render.direct_scanout);
     EXPECT_EQ(c.render.adaptive_sync, seaside::AdaptiveSync::always);
     EXPECT_FALSE(c.render.allow_tearing);
     EXPECT_EQ(c.render.fullscreen_aspect, seaside::FullscreenAspect::stretch);
+    EXPECT_TRUE(c.render.blur.enabled);
+    EXPECT_EQ(c.render.blur.strength, 0.75);
+    EXPECT_EQ(c.render.blur.passes, 4);
     EXPECT_TRUE(c.night_light.enabled);
     EXPECT_EQ(c.night_light.temperature_kelvin, 6000);
     ASSERT_EQ(c.keybinds.size(), 1U);
@@ -174,8 +198,9 @@ temperature_kelvin=6000
 }
 
 TEST_F(ConfigTest, EveryTableRejectsUnknownFields) {
-    for (auto table : {"autostart", "wallpaper", "window", "workspaces", "monitors", "dwindle",
-                       "scrolling", "input", "input.mouse", "idle", "render", "night_light"}) {
+    for (auto table : {"autostart", "wallpaper", "window", "appearance", "audio", "power",
+                       "workspaces", "monitors", "dwindle", "scrolling", "input", "input.mouse",
+                       "idle", "render", "render.blur", "night_light"}) {
         const std::string text = "[" + std::string(table) + "]\nunknown_setting=1";
         SCOPED_TRACE(text);
         auto parsed = seaside::parse_config(text);
@@ -240,6 +265,12 @@ TEST_F(ConfigTest, WrongTypesUnknownFieldsAndInvalidEnumsAreRejected) {
         "[window]\ngaps_outer=true",
         "[window]\ngaps_inner=1.0",
         "[window]\nborder_width='2'",
+        "[window]\nactive_border_color='#ffcc'",
+        "[window]\ninactive_border_color='#12345z'",
+        "[appearance]\ncolor_scheme='automatic'",
+        "[audio]\ndefault_input=''",
+        "[audio]\ndefault_output=180",
+        "[power]\nprofile='power-saver'",
         "[window]\nlayout='master'",
         "[workspaces]\nmode='local'",
         "[monitors]\nprimary=1",
@@ -266,6 +297,10 @@ TEST_F(ConfigTest, WrongTypesUnknownFieldsAndInvalidEnumsAreRejected) {
         "[scrolling]\ndefault_column_width='auto'",
         "[input.mouse]\nprofile='adaptive'",
         "[input.mouse]\nsensitivity=false",
+        "[input.mouse]\nscroll_direction='up'",
+        "[render.blur]\nstrength=1.01",
+        "[render.blur]\npasses=0",
+        "[render.blur]\npasses=5",
         "[idle]\ndisplay_off_after_minutes=1.0",
         "[render]\ndirect_scanout='true'",
         "[render]\nadaptive_sync=true",

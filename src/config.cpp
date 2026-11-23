@@ -162,6 +162,33 @@ class Validator {
         return result;
     }
 
+    void rgb_color(const toml::node *node, std::string_view field, std::uint32_t &target) {
+        const auto value = string(node, field);
+        if (!value)
+            return;
+        if (value->size() == 7 && value->front() == '#') {
+            std::uint32_t color;
+            const auto end = value->data() + value->size();
+            const auto [parsed, error] = std::from_chars(value->data() + 1, end, color, 16);
+            if (error == std::errc{} && parsed == end) {
+                target = color;
+                return;
+            }
+        }
+        fail(node, field, "Expected a quoted #RRGGBB hex color");
+    }
+
+    std::optional<std::string> audio_node(const toml::node *node, std::string_view field) {
+        auto value = string(node, field);
+        if (!value || *value == "auto")
+            return {};
+        if (value->empty() || value->size() > 4096) {
+            fail(node, field, "Expected auto or a nonempty PipeWire node name");
+            return {};
+        }
+        return value;
+    }
+
     void boolean(const toml::table &table, std::string_view key, std::string_view field,
                  bool &target) {
         auto *node = table.get(key);
@@ -255,7 +282,7 @@ class Validator {
             auto value = string(node, field);
             if (value && *value == "auto")
                 return {};
-            fail(node, field, "Expected auto or a positive finite refresh rate");
+            fail(node, field, "Use auto or an unquoted positive number in Hz, such as 180");
             return {};
         }
         return number(node, field, std::numeric_limits<double>::denorm_min(),
@@ -399,8 +426,9 @@ std::expected<Config, Diagnostic> parse_config(std::string_view text, std::strin
         Validator v(path);
         Config config = default_config();
         v.keys(parsed,
-               {"autostart", "wallpaper", "window", "workspaces", "monitors", "dwindle",
-                "scrolling", "input", "idle", "render", "night_light", "keybinds"},
+               {"autostart", "wallpaper", "window", "appearance", "audio", "power", "workspaces",
+                "monitors", "dwindle", "scrolling", "input", "idle", "render", "night_light",
+                "keybinds"},
                "");
         if (auto *table = v.table(parsed, "autostart", "autostart")) {
             v.keys(*table, {"commands"}, "autostart");
@@ -431,7 +459,8 @@ std::expected<Config, Diagnostic> parse_config(std::string_view text, std::strin
         }
         if (auto *table = v.table(parsed, "window", "window")) {
             v.keys(*table,
-                   {"tiling", "titlebars", "layout", "gaps_outer", "gaps_inner", "border_width"},
+                   {"tiling", "titlebars", "layout", "gaps_outer", "gaps_inner", "border_width",
+                    "active_border_color", "inactive_border_color"},
                    "window");
             v.boolean(*table, "tiling", "window.tiling", config.window.tiling);
             v.boolean(*table, "titlebars", "window.titlebars", config.window.titlebars);
@@ -441,6 +470,32 @@ std::expected<Config, Diagnostic> parse_config(std::string_view text, std::strin
             v.integer(*table, "gaps_inner", "window.gaps_inner", config.window.gaps_inner, 0, 512);
             v.integer(*table, "border_width", "window.border_width", config.window.border_width, 0,
                       64);
+            v.rgb_color(table->get("active_border_color"), "window.active_border_color",
+                        config.window.active_border_color);
+            v.rgb_color(table->get("inactive_border_color"), "window.inactive_border_color",
+                        config.window.inactive_border_color);
+        }
+        if (auto *table = v.table(parsed, "appearance", "appearance")) {
+            v.keys(*table, {"color_scheme"}, "appearance");
+            v.enumeration(*table, "color_scheme", "appearance.color_scheme",
+                          config.appearance.color_scheme,
+                          {{"dark", ColorScheme::dark}, {"light", ColorScheme::light}});
+        }
+        if (auto *table = v.table(parsed, "audio", "audio")) {
+            v.keys(*table, {"default_output", "default_input"}, "audio");
+            config.audio.default_output =
+                v.audio_node(table->get("default_output"), "audio.default_output");
+            config.audio.default_input =
+                v.audio_node(table->get("default_input"), "audio.default_input");
+        }
+        if (auto *table = v.table(parsed, "power", "power")) {
+            v.keys(*table, {"profile"}, "power");
+            if (table->contains("profile")) {
+                v.enumeration(*table, "profile", "power.profile", config.power.profile.emplace(),
+                              {{"saver", PowerProfile::saver},
+                               {"balanced", PowerProfile::balanced},
+                               {"performance", PowerProfile::performance}});
+            }
         }
         if (auto *table = v.table(parsed, "workspaces", "workspaces")) {
             v.keys(*table, {"mode"}, "workspaces");
@@ -467,7 +522,7 @@ std::expected<Config, Diagnostic> parse_config(std::string_view text, std::strin
         if (auto *table = v.table(parsed, "input", "input")) {
             v.keys(*table, {"mouse"}, "input");
             if (auto *mouse = v.table(*table, "mouse", "input.mouse")) {
-                v.keys(*mouse, {"profile", "sensitivity"}, "input.mouse");
+                v.keys(*mouse, {"profile", "sensitivity", "scroll_direction"}, "input.mouse");
                 if (auto profile = v.string(mouse->get("profile"), "input.mouse.profile")) {
                     if (*profile != "flat")
                         v.fail(mouse->get("profile"), "input.mouse.profile",
@@ -476,6 +531,10 @@ std::expected<Config, Diagnostic> parse_config(std::string_view text, std::strin
                 if (auto value =
                         v.number(mouse->get("sensitivity"), "input.mouse.sensitivity", -1.0, 1.0))
                     config.input.mouse.sensitivity = *value;
+                v.enumeration(
+                    *mouse, "scroll_direction", "input.mouse.scroll_direction",
+                    config.input.mouse.scroll_direction,
+                    {{"normal", ScrollDirection::normal}, {"inverse", ScrollDirection::inverse}});
             }
         }
         if (auto *table = v.table(parsed, "idle", "idle")) {
@@ -484,9 +543,10 @@ std::expected<Config, Diagnostic> parse_config(std::string_view text, std::strin
                       config.idle.display_off_after_minutes, 0, 1440);
         }
         if (auto *table = v.table(parsed, "render", "render")) {
-            v.keys(*table,
-                   {"direct_scanout", "adaptive_sync", "allow_tearing", "fullscreen_aspect"},
-                   "render");
+            v.keys(
+                *table,
+                {"direct_scanout", "adaptive_sync", "allow_tearing", "fullscreen_aspect", "blur"},
+                "render");
             v.boolean(*table, "direct_scanout", "render.direct_scanout",
                       config.render.direct_scanout);
             v.boolean(*table, "allow_tearing", "render.allow_tearing", config.render.allow_tearing);
@@ -499,6 +559,13 @@ std::expected<Config, Diagnostic> parse_config(std::string_view text, std::strin
                 *table, "fullscreen_aspect", "render.fullscreen_aspect",
                 config.render.fullscreen_aspect,
                 {{"preserve", FullscreenAspect::preserve}, {"stretch", FullscreenAspect::stretch}});
+            if (auto *blur = v.table(*table, "blur", "render.blur")) {
+                v.keys(*blur, {"enabled", "strength", "passes"}, "render.blur");
+                v.boolean(*blur, "enabled", "render.blur.enabled", config.render.blur.enabled);
+                if (auto strength = v.number(blur->get("strength"), "render.blur.strength", 0, 1))
+                    config.render.blur.strength = *strength;
+                v.integer(*blur, "passes", "render.blur.passes", config.render.blur.passes, 1, 4);
+            }
         }
         if (auto *table = v.table(parsed, "night_light", "night_light")) {
             v.keys(*table, {"enabled", "temperature_kelvin"}, "night_light");

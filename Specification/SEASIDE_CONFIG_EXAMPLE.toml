@@ -23,8 +23,26 @@ layout = "dwindle"
 gaps_outer = 10
 gaps_inner = 5
 border_width = 2
+# Quoted RGB hex colors, in the form "#RRGGBB".
+active_border_color = "#BFBFBF"
+inactive_border_color = "#595959"
 # false hides title bars in apps that support Wayland decoration negotiation.
 titlebars = true
+
+[appearance]
+# Global color preference for Seaside and compatible apps. "dark" or "light".
+color_scheme = "dark"
+
+[audio]
+# Run `wpctl status --name` and copy the name from the Sinks or Sources list.
+# "auto" lets WirePlumber choose. These defaults apply to playback and capture.
+default_output = "auto"
+default_input = "auto"
+
+[power]
+# Optional system power profile. Omit to follow the system policy.
+# Run `powerprofilesctl list` to see the available profiles.
+# profile = "balanced"  # "saver", "balanced", or "performance"
 
 [workspaces]
 # "global" (default) or "per-monitor". THIS KEY NEEDS A RESTART.
@@ -37,7 +55,8 @@ mode = "global"
 primary = "auto"
 # Mode: "auto" = preferred/native resolution + highest Hz at that res.
 # Resolution override: "WIDTHxHEIGHT", e.g. "2560x1440".
-# Refresh rate override: positive Hz number, e.g. 165.0 or 59.94.
+# Refresh rate override: unquoted positive Hz number, e.g. 180 or 59.94.
+# A nominal 180 can select a nearby advertised mode such as 180.003 Hz.
 resolution = "auto"
 refresh_rate = "auto"
 # Fractional scale: finite number 0.5..4.0; 1.0 means 100% (default).
@@ -75,6 +94,8 @@ default_column_width = 0.5
 profile = "flat"
 # libinput normalized speed: -1.0..1.0; 0.0 = neutral default.
 sensitivity = 0.0
+# "normal" (default) or "inverse" for mouse wheels and touchpad scrolling.
+scroll_direction = "normal"
 
 [idle]
 # Minutes with no activity before display power-off: 0..1440; 0 disables.
@@ -93,6 +114,14 @@ adaptive_sync = "off"
 allow_tearing = true
 # "preserve" (default) for aspect ratio / bars, or "stretch" to fill.
 fullscreen_aspect = "preserve"
+
+[render.blur]
+# Blur the backdrop behind translucent windows. Off by default.
+enabled = false
+# Normalized strength from 0.0 (off) to 1.0 (maximum).
+strength = 0.5
+# Number of blur passes, 1..4. More passes can increase rendering cost.
+passes = 2
 
 [night_light]
 # false (default) or true; manual global hardware-only night light.

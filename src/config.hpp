@@ -19,6 +19,9 @@ enum class WorkspaceMode { global, per_monitor };
 enum class Insertion { focused, largest };
 enum class AdaptiveSync { off, fullscreen, always };
 enum class FullscreenAspect { preserve, stretch };
+enum class ColorScheme { dark, light };
+enum class ScrollDirection { normal, inverse };
+enum class PowerProfile { saver, balanced, performance };
 
 struct Resolution {
     std::int32_t width = 0;
@@ -65,8 +68,23 @@ struct Config {
         std::int32_t gaps_outer = 10;
         std::int32_t gaps_inner = 5;
         std::int32_t border_width = 2;
+        std::uint32_t active_border_color = 0xbfbfbf;
+        std::uint32_t inactive_border_color = 0x595959;
         bool operator==(const Window &) const = default;
     } window;
+    struct Appearance {
+        ColorScheme color_scheme = ColorScheme::dark;
+        bool operator==(const Appearance &) const = default;
+    } appearance;
+    struct Audio {
+        std::optional<std::string> default_output;
+        std::optional<std::string> default_input;
+        bool operator==(const Audio &) const = default;
+    } audio;
+    struct Power {
+        std::optional<PowerProfile> profile;
+        bool operator==(const Power &) const = default;
+    } power;
     struct Workspaces {
         WorkspaceMode mode = WorkspaceMode::global;
         bool operator==(const Workspaces &) const = default;
@@ -90,6 +108,7 @@ struct Config {
         struct Mouse {
             std::string profile = "flat";
             double sensitivity = 0.0;
+            ScrollDirection scroll_direction = ScrollDirection::normal;
             bool operator==(const Mouse &) const = default;
         } mouse;
         bool operator==(const Input &) const = default;
@@ -103,6 +122,12 @@ struct Config {
         AdaptiveSync adaptive_sync = AdaptiveSync::off;
         bool allow_tearing = true;
         FullscreenAspect fullscreen_aspect = FullscreenAspect::preserve;
+        struct Blur {
+            bool enabled = false;
+            double strength = 0.5;
+            std::int32_t passes = 2;
+            bool operator==(const Blur &) const = default;
+        } blur;
         bool operator==(const Render &) const = default;
     } render;
     struct NightLight {
