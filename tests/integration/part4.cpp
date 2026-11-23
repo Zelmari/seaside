@@ -1362,6 +1362,23 @@ bool run_tile_popup(const Fixture &fixture) {
             target.surface != fixture.scene.window_surface(a) && target.sx == 7 && target.sy == 2);
     REQUIRE(wait_pixel(connection, left, output.get(), 83, 12, 0));
     REQUIRE(left.keyboard_surface == menu.surface);
+    auto *handle = part3_output_handle(output.get());
+    auto *menu_surface = target.surface;
+    REQUIRE(left.subcompositor);
+    Subsurface child;
+    child.surface = wl_compositor_create_surface(left.compositor);
+    child.role = wl_subcompositor_get_subsurface(left.subcompositor, child.surface, menu.surface);
+    wl_subsurface_set_position(child.role, 4, 4);
+    REQUIRE(connection.attach_subsurface(left, child, 3, 3, blue));
+    wl_surface_commit(menu.surface);
+    REQUIRE(connection.roundtrip(left) && wait_pixel(connection, left, output.get(), 81, 15, blue));
+    target = {};
+    REQUIRE(fixture.scene.window_at(81, 15, target) && target.id == a &&
+            target.surface != menu_surface && target.sx == 1 && target.sy == 1);
+    auto *child_surface = target.surface;
+    REQUIRE(fixture.scene.visible_output(fixture.scene.window_surface(a)) == handle);
+    REQUIRE(fixture.scene.visible_output(menu_surface) == handle);
+    REQUIRE(fixture.scene.visible_output(child_surface) == handle);
     {
         Popup submenu;
         REQUIRE(connection.open_popup(left, submenu, nullptr, left.button_serial, 0, &menu));
@@ -1369,16 +1386,19 @@ bool run_tile_popup(const Fixture &fixture) {
         target = {};
         REQUIRE(fixture.scene.window_at(88, 22, target) && target.id == a && target.sx == 2 &&
                 target.sy == 2);
+        REQUIRE(fixture.scene.visible_output(target.surface) == handle);
     }
     REQUIRE(connection.roundtrip(left) && left.keyboard_surface == menu.surface);
     auto shifted = output_bounds;
-    shifted.x = 17;
+    shifted.x = 217;
     REQUIRE(desktop.update_output(part3_output_handle(output.get()), shifted));
     target = {};
-    REQUIRE(fixture.scene.window_at(100, 12, target) && target.id == a && target.sx == 7 &&
-            target.sy == 2);
+    REQUIRE(fixture.scene.window_at(shifted.x + 83, 12, target) && target.id == a &&
+            target.sx == 7 && target.sy == 2);
     REQUIRE(wait_pixel(connection, left, output.get(), 83, 12, 0));
 
+    REQUIRE(fixture.scene.visible_output(menu_surface) == handle);
+    REQUIRE(fixture.scene.visible_output(child_surface) == handle);
     Popup submenu;
     REQUIRE(connection.open_popup(left, submenu, nullptr, left.button_serial, 0, &menu));
     REQUIRE(desktop.dispatch(action(ActionKind::cycle_focus_mru)).value_or(false));
@@ -1387,6 +1407,8 @@ bool run_tile_popup(const Fixture &fixture) {
     REQUIRE(submenu.dismissed && menu.dismissed && left.keys == 0 && right.keys == 1);
     REQUIRE(right.keyboard_surface == right.surface && desktop.keyboard_window() == b);
     REQUIRE(wait_pixel(connection, right, output.get(), 83, 12, green));
+    REQUIRE(!fixture.scene.visible_output(menu_surface) &&
+            !fixture.scene.visible_output(child_surface));
     desktop.remove_output(part3_output_handle(output.get()));
     return true;
 }

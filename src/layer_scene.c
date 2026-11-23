@@ -724,7 +724,9 @@ static void test_buffer_intersection(struct wlr_scene_buffer *buffer, int x, int
     struct intersection_search *search = data;
     struct wlr_scene_surface *surface = wlr_scene_surface_try_from_buffer(buffer);
     if (surface && surface->surface == search->surface && buffer->buffer &&
-        buffer->primary_output) {
+        buffer->primary_output && wlr_scene_node_coords(&buffer->node, &x, &y)) {
+        // A popup's scene tree can be anchored under a translated parent.
+        // Compare its absolute buffer bounds to the output layout coordinates.
         const struct seaside_scene_rect viewport = search->viewport;
         const int width = buffer->dst_width, height = buffer->dst_height;
         search->intersects |= width > 0 && height > 0 && x < (int64_t)viewport.x + viewport.width &&

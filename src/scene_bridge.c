@@ -2171,8 +2171,11 @@ struct wlr_output *seaside_scene_visible_output(const struct seaside_scene_bridg
     struct scene_view *view =
         popup ? popup->view : toplevel_view(scene, wlr_xdg_toplevel_try_from_wlr_surface(root));
     if (!view || !view->mapped || !view->placement.visible ||
-        !has_viewport(view->placement.output) ||
-        !seaside_scene_surface_intersects(view->tree, surface, view->placement.output)) {
+        !has_viewport(view->placement.output)) {
+        return NULL;
+    }
+    struct wlr_scene_tree *tree = popup ? popup->surface_tree : view->tree;
+    if (!seaside_scene_surface_intersects(tree, surface, view->placement.output)) {
         return NULL;
     }
     struct scene_output *output;
