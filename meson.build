@@ -405,7 +405,10 @@ if not fs.is_absolute(bridge_path) or not fs.is_file(bridge_path)
 endif
 bridge_program = find_program(bridge_path)
 bridge_version = run_command(bridge_program, '-version', check: false)
-bridge_revision = '+seaside.' + fs.hash('packaging/xwayland-bridge/data-control.patch', 'sha256').substring(0, 12)
+bridge_patch = files('packaging/xwayland-bridge/data-control.patch')
+# A changed backport must reconfigure existing build trees and select its new helper.
+patch_digest = run_command(find_program('sha256sum'), bridge_patch, check: true).stdout().split()[0]
+bridge_revision = '+seaside.' + patch_digest.substring(0, 12)
 if bridge_version.returncode() != 0 or not bridge_version.stdout().strip().endswith(bridge_revision)
   error('The selected Xwayland bridge does not report the Seaside data-control backport: ' + bridge_path)
 endif
@@ -588,7 +591,7 @@ install_data('packaging/xdg-desktop-portal-wlr/Seaside',
 install_data('packaging/xwayland-bridge/LICENSE', 'packaging/xwayland-bridge/OFL.txt',
   'packaging/xwayland-bridge/NOTICE.md', 'packaging/xwayland-bridge/THIRD-PARTY.txt',
   install_dir: get_option('datadir') / 'licenses' / 'seaside' / 'xwayland-satellite')
-install_data('packaging/xwayland-bridge/data-control.patch',
+install_data(bridge_patch,
   install_dir: get_option('datadir') / 'doc' / 'seaside' / 'xwayland-bridge')
 install_data('LICENSE', install_dir: get_option('datadir') / 'licenses' / 'seaside')
 install_data('Specification/SEASIDE_CONFIG_EXAMPLE.toml',
