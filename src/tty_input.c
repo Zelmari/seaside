@@ -377,7 +377,7 @@ static void refresh_focus(struct seaside_tty_input *input) {
     if (!input->seat) {
         return;
     }
-    if (!input->focus || input->snapshot.keyboards == 0) {
+    if (!input->focus || !wlr_seat_get_keyboard(input->seat)) {
         wlr_seat_keyboard_notify_clear_focus(input->seat);
         refresh_constraint(input);
         return;
@@ -416,16 +416,17 @@ static void refresh_capabilities(struct seaside_tty_input *input) {
         return;
     }
     uint32_t capabilities = input->snapshot.pointers > 0 ? WL_SEAT_CAPABILITY_POINTER : 0;
-    if (input->snapshot.keyboards > 0) {
+    // Once discovered, keep the logical keyboard on the seat. Libinput
+    // removes and re-adds physical devices on VT switches, and the first key
+    // may arrive before a client can bind a replacement wl_keyboard.
+    if (input->snapshot.keyboards > 0 && !wlr_seat_get_keyboard(input->seat)) {
         wlr_seat_set_keyboard(input->seat, &input->client_keyboard);
-        capabilities |= WL_SEAT_CAPABILITY_KEYBOARD;
-        wlr_seat_set_capabilities(input->seat, capabilities);
-        refresh_focus(input);
-    } else {
-        refresh_focus(input);
-        wlr_seat_set_capabilities(input->seat, capabilities);
-        wlr_seat_set_keyboard(input->seat, NULL);
     }
+    if (wlr_seat_get_keyboard(input->seat)) {
+        capabilities |= WL_SEAT_CAPABILITY_KEYBOARD;
+    }
+    wlr_seat_set_capabilities(input->seat, capabilities);
+    refresh_focus(input);
 }
 
 static void cancel_drag(struct wlr_seat *seat) {

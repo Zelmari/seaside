@@ -627,6 +627,25 @@ static void exercise_wayland_keyboard(void) {
               keyboard_client.key_state == WL_KEYBOARD_KEY_STATE_RELEASED,
           "the compositor consumed an unbound Shift+digit release");
     key(&second, KEY_LEFTSHIFT, WL_KEYBOARD_KEY_STATE_RELEASED);
+    round_trip(server, client);
+
+    struct wl_keyboard *bound_keyboard = keyboard_client.keyboard;
+    const unsigned before_resume = keyboard_client.key_events;
+    wlr_keyboard_finish(&second);
+    round_trip(server, client);
+    const struct seaside_tty_input_snapshot suspended = seaside_tty_input_get_snapshot(input);
+    check(suspended.keyboards == 0 && suspended.has_keyboard_focus &&
+              keyboard_client.keyboard == bound_keyboard &&
+              keyboard_client.capabilities == WL_SEAT_CAPABILITY_KEYBOARD,
+          "physical keyboard suspension removed the focused logical keyboard");
+    wlr_keyboard_init(&second, &keyboard_impl, "resumed keyboard");
+    wl_signal_emit_mutable(&backend.events.new_input, &second.base);
+    key(&second, KEY_A, WL_KEYBOARD_KEY_STATE_PRESSED);
+    key(&second, KEY_A, WL_KEYBOARD_KEY_STATE_RELEASED);
+    round_trip(server, client);
+    check(keyboard_client.key_events == before_resume + 2 && keyboard_client.key == KEY_A,
+          "the first key after physical keyboard resume did not reach the existing client");
+
     const unsigned previous_modifier_changes = observation.modifier_changes;
     const uint64_t previous_forwarded = seaside_tty_input_get_snapshot(input).forwarded_key_events;
 
