@@ -61,6 +61,22 @@ software and client protocols. The installed TTY fixture covers the real
 guest session. Use the recorded evidence for each environment when describing
 support. [Verification and support](PUBLIC_DOCUMENTATION.md#verification-and-support)
 
+On the dedicated Arch VM, inspect the console and confirm TTY 1 shows an idle
+logged-in shell before each trial. These repository runners use the Council VM
+transport to build the checked-out revision and send input to the guest.
+
+```sh
+python3 tests/session/repair_services_vm.py --console-ready --tty-only --sanitize
+python3 tests/session/part7_vm.py --console-ready
+python3 tests/session/part9_vm.py --console-ready --tty-only
+```
+
+The service trial checks activation, recovery after a killed compositor,
+diagnostics during shutdown and a login with an unavailable integration. The
+Part 7 and Part 9 trials exercise clipboard transfers, portal video streams,
+monitor sleep and wake, and typing across a VT switch. Each runner prints the
+directory containing its guest log and results.
+
 ## Build in a clean Arch chroot
 
 Use Arch's `devtools` and a fresh root with `base-devel` for a package
