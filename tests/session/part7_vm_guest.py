@@ -744,7 +744,12 @@ def trial():
                         from part7_clipboard import run_clipboard
 
                         def clipboard():
-                            state["cross_client_clipboard"] = run_clipboard(session.env, session.focus)
+                            result = run_clipboard(session.env, session.focus)
+                            state["cross_client_clipboard"] = result
+                            if result["background"]["status"] != "pass":
+                                detail = f"Background X11 selection results {result['background']}"
+                                event("diagnostic", detail)
+                                require(not part7_require_background_clipboard, detail)
 
                         checks = {
                             "capture-soak": lambda: run_capture_soak(session, state),

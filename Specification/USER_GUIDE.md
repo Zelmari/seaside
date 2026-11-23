@@ -204,7 +204,10 @@ local IPC socket. [JSONL protocol](../src/ipc_protocol.cpp)
 - **Clipboard.** Local Wayland clients running as your user can read and replace
   clipboard and primary selections in the background. Use `wl-copy` and
   `wl-paste` for command-line transfers. For history, run an external manager
-  such as `wl-paste --watch cliphist store`.
+  such as `wl-paste --watch cliphist store`. With Arch’s `xwayland-satellite`
+  0.8.3, focus the X11 window to exchange selections with a Wayland app.
+  Background X11 transfers require data-control support in the bridge.
+  [Upstream implementation](https://github.com/Supreeeme/xwayland-satellite/pull/431)
 - **Audio.** The media keys adjust the current default playback device through
   WirePlumber. Run `wpctl status` to list devices and
   `wpctl get-volume @DEFAULT_AUDIO_SINK@` to inspect the current volume and

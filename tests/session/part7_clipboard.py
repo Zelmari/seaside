@@ -1,11 +1,12 @@
 """Transfer clipboard and primary-selection data between GTK Wayland and X11 clients."""
 
 import ctypes as c
-from contextlib import ExitStack
+from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
 import selectors
+import shutil
 import subprocess
 import sys
 import time
@@ -166,14 +167,67 @@ def transfer(focus, source, target, payload):
     raise RuntimeError(f"{source.title} to {target.title} selection transfer returned {latest!r}")
 
 
+def background_selections(environment, native):
+    """Transfer both X11 selections while a native Wayland window holds keyboard focus."""
+    missing = [tool for tool in ("xclip", "wl-copy", "wl-paste")
+               if not shutil.which(tool, path=environment.get("PATH"))]
+    if missing:
+        return {"status": "unavailable", "reason": "Missing clipboard tools: " + ", ".join(missing)}
+
+    def matches(command, expected):
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            try:
+                read = subprocess.run(command, env=environment, capture_output=True, timeout=.5)
+                if read.returncode == 0 and read.stdout == expected:
+                    return True
+            except subprocess.TimeoutExpired:
+                pass
+            time.sleep(.025)
+        return False
+
+    @contextmanager
+    def offer(command, payload):
+        with subprocess.Popen(command, env=environment, stdin=subprocess.PIPE,
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) as writer:
+            try:
+                writer.stdin.write(payload)
+                writer.stdin.close()
+                yield
+            finally:
+                if writer.poll() is None:
+                    writer.terminate()
+
+    to_x11, to_wayland = {}, {}
+    for name, options in (("clipboard", []), ("primary", ["--primary"])):
+        read_x11 = ["xclip", "-selection", name, "-out"]
+        read_native = ["wl-paste", "--no-newline", *options]
+        native_payload = f"Wayland background {name} ✓".encode()
+        x11_payload = f"X11 background {name} ✓".encode()
+        with offer(["wl-copy", "--foreground", *options], native_payload):
+            if not matches(read_native, native_payload):
+                raise RuntimeError(f"wl-paste could not read wl-copy's {name} offer")
+            to_x11[name] = matches(read_x11, native_payload)
+            with offer(["xclip", "-quiet", "-selection", name, "-in"], x11_payload):
+                if not matches(read_x11, x11_payload):
+                    raise RuntimeError(f"xclip failed to own {name}")
+                to_wayland[name] = matches(read_native, x11_payload)
+    if not native.command("active"):
+        raise RuntimeError("The native client lost keyboard focus during the background check")
+    status = "pass" if all(to_x11.values()) and all(to_wayland.values()) else "failed"
+    return {"status": status, "wayland_to_x11": to_x11, "x11_to_wayland": to_wayland}
+
+
 def run_clipboard(environment, focus):
     """Verify both directions using the supplied session and focus-by-title callable."""
-    with ExitStack() as clients:
-        native = clients.enter_context(ClipboardClient(environment, "wayland", "Part 7 Wayland"))
-        legacy = clients.enter_context(ClipboardClient(environment, "x11", "Part 7 X11"))
-        transfer(focus, native, legacy, ["Wayland clipboard ✓", "Wayland PRIMARY ✓"])
-        transfer(focus, legacy, native, ["X11 clipboard ✓", "X11 PRIMARY ✓"])
-    return {"wayland_to_x11": "pass", "x11_to_wayland": "pass", "primary_selection": "pass"}
+    with ClipboardClient(environment, "wayland", "Part 7 Wayland") as native:
+        with ClipboardClient(environment, "x11", "Part 7 X11") as legacy:
+            transfer(focus, native, legacy, ["Wayland clipboard ✓", "Wayland PRIMARY ✓"])
+            transfer(focus, legacy, native, ["X11 clipboard ✓", "X11 PRIMARY ✓"])
+        select(focus, native)
+        background = background_selections(environment, native)
+    return {"wayland_to_x11": "pass", "x11_to_wayland": "pass", "primary_selection": "pass",
+            "background": background}
 
 
 if __name__ == "__main__":
