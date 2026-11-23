@@ -1339,6 +1339,39 @@ struct LayerSeat {
     unsigned shortcuts = 0;
 };
 
+template <bool outside_click> bool run_popup_shutdown(const Fixture &fixture) {
+    auto output = fixture.output();
+    REQUIRE(output);
+    auto *handle = part3_output_handle(output.get());
+    REQUIRE(fixture.desktop.add_output(handle, "main", "", output_bounds));
+    LayerSeat seat(fixture);
+    REQUIRE(seat.start());
+    Connection connection(fixture.display);
+    Client client;
+    REQUIRE(connection.connect(client) && connection.open(client) &&
+            connection.attach(client, ordinary_width, ordinary_height));
+    const auto focused = fixture.desktop.keyboard_window();
+    REQUIRE(focused);
+    const auto box = fixture.desktop.windows().view(*focused).geometry;
+    seat.click(box.x + 4, box.y + 4);
+    REQUIRE(connection.wait(client, [&] { return client.button_serial; }));
+    Popup menu, submenu;
+    REQUIRE(connection.open_popup(client, menu, nullptr, client.button_serial));
+    REQUIRE(connection.open_popup(client, submenu, nullptr, client.button_serial, 0, &menu));
+    REQUIRE(client.keyboard_surface == submenu.surface);
+    if constexpr (outside_click) {
+        // Real clients can still own both popup objects after popup_done.
+        seat.click(0, 0);
+        REQUIRE(connection.roundtrip(client) && menu.dismissed && submenu.dismissed);
+    }
+    // Follow the ordinary session exit path while the client is connected.
+    fixture.desktop.set_input(nullptr);
+    seat.input.reset();
+    REQUIRE(connection.roundtrip(client) && menu.dismissed && submenu.dismissed);
+    fixture.desktop.remove_output(handle);
+    return true;
+}
+
 bool run_tile_popup(const Fixture &fixture) {
     auto &desktop = fixture.desktop;
     auto output = fixture.output();
@@ -2253,7 +2286,9 @@ int main(int argc, char **argv) {
                        run_fixture(config, run_floating_resize_dialogs) &&
                        run_fixture(config, run_floating_resize_limits) &&
                        run_fixture(config, run_floating_delayed_commits) &&
-                       run_fixture(config, run_client_gestures)
+                       run_fixture(config, run_client_gestures) &&
+                       run_fixture(config, run_popup_shutdown<false>) &&
+                       run_fixture(config, run_popup_shutdown<true>)
                    ? EXIT_SUCCESS
                    : EXIT_FAILURE;
     }

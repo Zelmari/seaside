@@ -71,12 +71,14 @@ static struct wlr_xdg_popup *unfocused_popup(struct wlr_xdg_shell *shell,
                                              struct wlr_surface *target) {
     struct wlr_xdg_popup_grab *grab;
     wl_list_for_each(grab, &shell->popup_grabs, link) {
-        if (grab->seat->keyboard_state.grab != &grab->keyboard_grab) {
+        // When the seat has no target, also finish grabs that sent popup_done
+        // while the client still has live popup objects.
+        if (target && grab->seat->keyboard_state.grab != &grab->keyboard_grab) {
             continue;
         }
         struct wlr_xdg_popup *popup;
         wl_list_for_each(popup, &grab->popups, grab_link) {
-            if (owner_surface(popup->parent) != target) {
+            if (!target || owner_surface(popup->parent) != target) {
                 return popup;
             }
         }

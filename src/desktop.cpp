@@ -63,6 +63,10 @@ Desktop::~Desktop() noexcept {
 }
 
 void Desktop::set_input(seaside_tty_input *input) noexcept {
+    if (input_ && input_ != input) {
+        // Release the client-owned popup roles while their seat still exists.
+        scene_.dismiss_unfocused_grabs(nullptr);
+    }
     input_ = input;
 }
 
