@@ -77,6 +77,21 @@ before ending the desktop session. Seaside checks PipeWire, the user service
 manager and portals in the background. The `integrations` field in
 `seasidectl status` shows which are checking, available or unavailable.
 You can use windows and workspaces while Seaside retries an unavailable service.
+A portal waiting for another service reports `dependency-unavailable` and names
+that service.
+
+Seaside publishes `WAYLAND_DISPLAY`, `XDG_CURRENT_DESKTOP`, `XDG_SESSION_TYPE`
+and, when X11 is available, `DISPLAY` and `XAUTHORITY` to the systemd user
+manager. Arch's dbus-broker launches D-Bus services through this manager, so
+applications activated that way receive the session display too. The old values
+are restored after exit or a compositor crash. Values changed by another
+program during the session are preserved. Classic dbus-daemon services that
+use its own activation environment require separate configuration.
+
+The three private portal units stop when their owning compositor exits.
+A portal already running under another desktop or left over from an older
+Seaside release keeps its name. Seaside keeps running and retries after the
+owner releases it.
 
 ## Configure Seaside
 
