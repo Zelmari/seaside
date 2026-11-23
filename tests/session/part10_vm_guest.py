@@ -26,9 +26,10 @@ REVISION = standard["REVISION"]
 BASE = standard["BASE"]
 SEASIDE = Path("/usr/bin/seaside")
 CONTROL = Path("/usr/bin/seasidectl")
+SATELLITE = Path("/usr/lib/seaside/seaside-xwayland-satellite")
 CONFIG_EXAMPLE = Path("/usr/share/doc/seaside/config.example.toml")
 PACKAGE_FILES = (
-    SEASIDE, CONTROL, Path("/usr/share/seaside/wallpapers/black.png"),
+    SEASIDE, CONTROL, SATELLITE, Path("/usr/share/seaside/wallpapers/black.png"),
     Path("/usr/share/xdg-desktop-portal/seaside-portals.conf"),
     Path("/etc/xdg/xdg-desktop-portal-wlr/Seaside"),
     CONFIG_EXAMPLE,
@@ -120,7 +121,8 @@ def prepare_fixtures(source, results, env):
         require(Path(part10_pkg_config_path).is_dir(), "The guest fixture pkg-config directory is unavailable")
         build_env["PKG_CONFIG_PATH"] = part10_pkg_config_path
     event("build", "compile portal, Wayland and X11 test clients")
-    require(run_logged(["meson", "setup", "build", "--buildtype=debug"], repo, log, 120,
+    require(run_logged(["meson", "setup", "build", "--buildtype=debug",
+                        f"-Dxwayland_bridge={SATELLITE}"], repo, log, 120,
                        env=build_env) == 0,
             "Fixture build could not configure against the guest toolchain. See prepare.log")
     targets = ["seaside-part7-native-client", "seaside-portal-stream", "seaside-part7-x11-client"]
@@ -437,10 +439,8 @@ def satellite_restart(session, state):
     def note(pid):
         return str(pid) in children.read_text().split()
 
-    bridge = Path("/usr/lib/seaside/seaside-xwayland-satellite")
-
     def private_child(pid):
-        return note(pid) and Path(f"/proc/{pid}/exe").resolve() == bridge
+        return note(pid) and Path(f"/proc/{pid}/exe").resolve() == SATELLITE
 
     require("xwayland-satellite started" not in session.log.read_text(),
             "The packaged session started Xwayland without an X11 client")
@@ -689,7 +689,7 @@ def installed_trial(source, runtime, results, state):
         verify_installed(archive, version, results, env)
         packages = checked(["/usr/bin/pacman", "-Q", "systemd", "polkit", "rtkit", "mesa", "wlroots0.20",
                             "wayland-protocols", "pipewire", "wireplumber", "xdg-desktop-portal",
-                            "xdg-desktop-portal-wlr", "wofi", "foot", "xwayland-satellite"], env=env)
+                            "xdg-desktop-portal-wlr", "wofi", "foot", "xorg-xwayland", "xcb-util-cursor"], env=env)
         state["guest_packages"] = dict(line.split(maxsplit=1) for line in packages.decode().splitlines())
         require(not config.exists(), "Package installation created a user configuration")
         repo = prepare_fixtures(source, results, env)

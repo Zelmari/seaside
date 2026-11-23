@@ -25,6 +25,7 @@ base = standard["BASE"]
 mode = standard["MODE"]
 NATIVE_TITLE = "Part7 Native Target"
 X11_TITLE = "Seaside Part 7 X11 capture"
+INSTALLED_SATELLITE = Path("/usr/lib/seaside/seaside-xwayland-satellite")
 
 
 def require(condition, message):
@@ -140,6 +141,8 @@ def prepare(source, results, env, state):
     packages = subprocess.run(["pacman", "-Q", *installed], capture_output=True, text=True, timeout=5)
     state["installed_packages"] = dict(line.split(maxsplit=1) for line in packages.stdout.splitlines())
     if part7_installed:
+        require(output(["pacman", "-Qoq", INSTALLED_SATELLITE], env=env) == "seaside",
+                "The installed private satellite does not belong to Seaside")
         for binary in ("/usr/bin/seaside", "/usr/bin/seasidectl"):
             require(output(["pacman", "-Qoq", binary], env=env) == "seaside" and
                     f"(revision {revision})" in output([binary, "--version"], env=env),
@@ -147,11 +150,14 @@ def prepare(source, results, env, state):
     state["tools"] = {name: shutil.which(name, path=env.get("PATH")) for name in
                       ("wofi", "grim", "xclip", "wl-copy", "wl-paste", "Xwayland", "wf-recorder", "obs",
                        "discord", "wpctl", "pactl", "pacat", "parec")}
+    if mode == "tty" or part7_installed:
+        event("build", revision[:12])
+        setup = ["meson", "setup", "build", "--buildtype=debug"]
+        if part7_installed:
+            setup.append(f"-Dxwayland_bridge={INSTALLED_SATELLITE}")
+        require(not run_logged(setup, repo, log, 120, env=env), "Guest configure failed")
     if mode == "tty":
         state["software_checks"] = "not-run"
-        event("build", revision[:12])
-        require(not run_logged(["meson", "setup", "build", "--buildtype=debug"], repo, log, 120,
-                               env=env), "Guest configure failed")
         targets = ["seaside-part7-x11-client"]
         if not part7_installed:
             targets += ["seaside", "seasidectl"]
@@ -208,10 +214,7 @@ class TrialSession:
             chooser_script.chmod(0o700)
             portal.write_text(f"[screencast]\nchooser_type=dmenu\nchooser_cmd={chooser_script}\n")
         if part7_installed:
-            binaries = output(["pacman", "-Qlq", "seaside"], env=env).splitlines()
-            helpers = [Path(path) for path in binaries if Path(path).name == "seaside-xwayland-satellite"]
-            require(len(helpers) == 1, "The installed package has no unique private satellite")
-            self.satellite = helpers[0]
+            self.satellite = INSTALLED_SATELLITE
             self.cli = Path("/usr/bin/seasidectl")
             with self.log.open("wb") as stream:
                 self.process = subprocess.Popen(["/usr/bin/seaside"], env=self.env, stdout=stream,
