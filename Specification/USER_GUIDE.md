@@ -192,10 +192,11 @@ Run `seasidectl bindings` to see the shortcuts the running session is using.
 [Binding examples and action names](SEASIDE_CONFIG_EXAMPLE.toml)
 
 The default pointer is a black arrow with a white outline. Apps can request
-their own pointer shapes. Ordinary tiled and floating windows use
-`window.border_width`. A brighter border marks the focused window. Focus
-navigation brings a selected tile in front of a maximized window that covers
-it and preserves that window's maximized state. To move or resize a floating
+their own pointer shapes. Tiled, floating, and maximized windows use
+`window.border_width`. A brighter border marks the focused window, and
+fullscreen windows are borderless. Focus navigation brings a selected tile
+in front of a maximized window that covers it and preserves that window's
+maximized state. To move or resize a floating
 window, drag its title bar or resize handles where the app provides them.
 During a resize, Seaside can briefly scale the app's last drawn frame to keep
 the window aligned with the pointer while the app redraws.

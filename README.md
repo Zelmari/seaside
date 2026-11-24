@@ -11,39 +11,40 @@ TTY startup, window management, virtual display power, and real portal capture.
 Native AMD display, gaming, and application compatibility checks are still
 open. [Verification and support status](Specification/PUBLIC_DOCUMENTATION.md)
 
-## Install on Arch
+## Install or upgrade on Arch
 
-Use an up-to-date x86-64 Arch Linux installation.
-[System requirements](Specification/USER_GUIDE.md#install-on-arch)
+On x86-64 Arch Linux, paste this block into a Bash terminal. It updates Arch,
+downloads the newest published Seaside preview, verifies its checksum, and
+installs it with pacman. Use the same block for a first install or an upgrade.
 
-### Build and install from the checkout
+```bash
+(
+  set -euo pipefail
+  sudo pacman -Syu --needed curl jq
 
-Run these commands as your normal user. `makepkg -si` installs dependencies,
-builds the package, and installs it through pacman.
+  downloads=$(mktemp -d)
+  trap 'rm -rf -- "$downloads"' EXIT
+  cd "$downloads"
 
-```sh
-sudo pacman -Syu --needed base-devel git
-git clone https://github.com/Zelmari/seaside.git
-cd seaside
-staging=$(mktemp -d)
-packaging/prepare-source "$staging"
-cd "$staging"
-makepkg -si
+  release_info=$(curl -fsSL 'https://api.github.com/repos/Zelmari/seaside/releases?per_page=1' |
+    jq -er '.[0] | [
+      .tag_name,
+      ([.assets[].name | select(test("^seaside-[A-Za-z0-9._+-]+-x86_64\\.pkg\\.tar\\.zst$"))] |
+        if length == 1 then .[0] else error("Expected one Seaside Arch package") end)
+    ] | @tsv')
+  IFS=$'\t' read -r tag package <<< "$release_info"
+  release="https://github.com/Zelmari/seaside/releases/download/$tag"
+  curl -fsSL --fail-early -O "$release/$package" -O "$release/SHA256SUMS"
+  awk -v package="$package" '$2 == package' SHA256SUMS | sha256sum --check --strict
+  sudo pacman -U "./$package"
+)
 ```
 
-### Install a package archive
-
-Download the `.pkg.tar.zst` archive and `SHA256SUMS` from the
-[GitHub releases page](https://github.com/Zelmari/seaside/releases). Substitute
-the archive filename below and compare the first command's output with its
-entry in `SHA256SUMS` before installing. Use the same commands with a newer
-archive to upgrade. Your configuration stays in `~/.config/seaside/` unless
-you use a custom `$XDG_CONFIG_HOME`.
-
-```sh
-sha256sum ./seaside-example-x86_64.pkg.tar.zst
-sudo pacman -U ./seaside-example-x86_64.pkg.tar.zst
-```
+After upgrading, save your work, run `seasidectl exit`, and start `seaside`
+again from the TTY to use the new version. Pacman keeps your user configuration.
+[Release notes](https://github.com/Zelmari/seaside/releases) ·
+[System requirements](Specification/USER_GUIDE.md#install-on-arch) ·
+[Build from source](Specification/USER_GUIDE.md#build-and-install-from-source)
 
 ## Start a session
 
