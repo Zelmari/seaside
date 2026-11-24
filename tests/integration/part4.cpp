@@ -1638,6 +1638,55 @@ bool run_pending_opening_focus(const Fixture &fixture) {
     return true;
 }
 
+bool run_fullscreen_idle_focus(const Fixture &fixture) {
+    auto &desktop = fixture.desktop;
+    auto left = fixture.output();
+    auto right = fixture.output();
+    REQUIRE(left && right);
+    auto *left_output = part3_output_handle(left.get());
+    auto *right_output = part3_output_handle(right.get());
+    REQUIRE(desktop.add_output(left_output, "left", "", output_bounds));
+    REQUIRE(desktop.add_output(right_output, "right", "", {160, 0, 160, 90}));
+    LayerSeat seat(fixture);
+    REQUIRE(seat.start());
+
+    Connection connection(fixture.display);
+    Client fullscreen, neighbor, opening;
+    WindowId fullscreen_id{};
+    REQUIRE(map_tiled(fixture, connection, fullscreen, fullscreen_id, 160, 90, 0, red));
+    REQUIRE(connection.connect(neighbor) && connection.open(neighbor));
+    REQUIRE(connection.attach_configured(neighbor, blue));
+    REQUIRE(wait_tiled(connection, fullscreen, 80, 90));
+    REQUIRE(connection.attach_configured(fullscreen, red));
+    REQUIRE(
+        connection.wait(neighbor, [&] { return neighbor.keyboard_surface == neighbor.surface; }));
+    REQUIRE(desktop.dispatch(action(ActionKind::toggle_window_fullscreen), 0, fullscreen_id)
+                .value_or(false));
+    REQUIRE(connection.wait(fullscreen, [&] { return fullscreen.configured.fullscreen; }));
+    REQUIRE(connection.attach_configured(fullscreen, red));
+    REQUIRE(desktop.keyboard_window() == fullscreen_id);
+    REQUIRE(desktop.fullscreen_inhibits_idle(left_output) &&
+            !desktop.fullscreen_inhibits_idle(right_output));
+
+    // The newly mapped tile is selected in policy while the displayed
+    // fullscreen window keeps keyboard focus until the new tile has resized.
+    REQUIRE(connection.connect(opening) && connection.open(opening));
+    REQUIRE(connection.attach(opening, 8, 8, true, green));
+    REQUIRE(desktop.windows().focused_window() != fullscreen_id);
+    REQUIRE(desktop.keyboard_window() == fullscreen_id);
+    REQUIRE(desktop.fullscreen_inhibits_idle(left_output) &&
+            !desktop.fullscreen_inhibits_idle(right_output));
+
+    REQUIRE(connection.attach(opening, opening.configured.width, opening.configured.height, false,
+                              green));
+    REQUIRE(connection.wait(opening, [&] { return opening.keyboard_surface == opening.surface; }));
+    REQUIRE(!desktop.fullscreen_inhibits_idle(left_output) &&
+            !desktop.fullscreen_inhibits_idle(right_output));
+    desktop.remove_output(right_output);
+    desktop.remove_output(left_output);
+    return true;
+}
+
 enum class OpeningFinish { right_first, left_first, close_right, close_focused, timeout };
 
 template <OpeningFinish finish> bool run_overlapping_openings(const Fixture &fixture) {
@@ -2498,6 +2547,7 @@ int main(int argc, char **argv) {
                        run_fixture(transaction, run_opening_transaction) &&
                        run_fixture(transaction, run_workspace_during_opening) &&
                        run_fixture(transaction, run_pending_opening_focus) &&
+                       run_fixture(transaction, run_fullscreen_idle_focus) &&
                        run_fixture(transaction,
                                    run_overlapping_openings<OpeningFinish::right_first>) &&
                        run_fixture(transaction,

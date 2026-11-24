@@ -38,7 +38,7 @@ class Desktop final {
     }
     wlr_output *focused_output_handle() const noexcept;
     WindowRect output_bounds(wlr_output *output) const noexcept;
-    bool has_fullscreen(wlr_output *output) const noexcept;
+    bool fullscreen_inhibits_idle(wlr_output *output) const noexcept;
     std::optional<WindowId> keyboard_window() const noexcept { return keyboard_window_; }
     bool action(const Action &action, std::uint8_t modifiers = 0) noexcept;
     std::expected<bool, DesktopActionError>

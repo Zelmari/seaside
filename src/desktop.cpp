@@ -219,9 +219,21 @@ WindowRect Desktop::output_bounds(wlr_output *output) const noexcept {
                : windows_.output_bounds(entry->second.id).value_or(WindowRect{});
 }
 
-bool Desktop::has_fullscreen(wlr_output *output) const noexcept {
+bool Desktop::fullscreen_inhibits_idle(wlr_output *output) const noexcept {
     const auto entry = outputs_.find(output);
-    return entry != outputs_.end() && windows_.has_fullscreen(entry->second.id);
+    if (entry == outputs_.end()) {
+        return false;
+    }
+    const auto &id = entry->second.id;
+    // A pending tile can take policy focus before the scene and keyboard
+    // switch away from the displayed fullscreen window.
+    if (!opening_.empty() && keyboard_window_ && windows_.window_output(*keyboard_window_) == id) {
+        const auto focused = windows_.view(*keyboard_window_);
+        if (focused.visible && focused.fullscreen) {
+            return true;
+        }
+    }
+    return windows_.has_fullscreen(id);
 }
 
 void Desktop::on_layer_changed(void *self) noexcept {

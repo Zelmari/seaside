@@ -252,7 +252,7 @@ class Session {
                 return seaside_tty_drm_set_output_power(drm_, output, on);
             },
             [this](wlr_surface *surface) { return scene_.visible_output(surface); },
-            [this](wlr_output *output) { return desktop_.has_fullscreen(output); });
+            [this](wlr_output *output) { return desktop_.fullscreen_inhibits_idle(output); });
         if (!idle_) {
             return false;
         }
