@@ -9,7 +9,7 @@ constexpr WindowRect left = {0, 0, 1000, 700};
 constexpr WindowRect right = {1000, 0, 800, 600};
 constexpr WindowRect top = {0, -600, 800, 600};
 constexpr WindowRect usable = {8, 32, 984, 660};
-constexpr WindowRect maximized = {18, 42, 964, 640};
+constexpr WindowRect maximized = {20, 44, 960, 636};
 constexpr WindowRect client = {0, 0, 320, 200};
 
 WindowId open_window(WindowManager &manager, std::optional<WindowId> parent = {},
@@ -308,6 +308,27 @@ TEST(WindowManager, InitialFullscreenDoesNotSaveItsBoundsAsOrdinaryGeometry) {
     ASSERT_TRUE(manager.commit_geometry(*id, client));
     EXPECT_EQ(manager.view(*id).geometry.width, client.width);
     EXPECT_EQ(manager.view(*id).geometry.height, client.height);
+}
+
+TEST(WindowManager, MaximizedBorderFitsWithinTheWorkAreaWithZeroOuterGap) {
+    Config config;
+    config.window.gaps_outer = 0;
+    config.window.border_width = 4;
+    WindowManager manager(config);
+    ASSERT_TRUE(manager.add_output("left", left, usable));
+    const auto id = open_window(manager);
+
+    ASSERT_TRUE(manager.set_maximized(id, true));
+    EXPECT_EQ(manager.view(id).geometry, (WindowRect{12, 36, 976, 652}));
+    EXPECT_EQ(manager.view(id).border_width, 4);
+
+    ASSERT_TRUE(manager.set_fullscreen(id, true));
+    EXPECT_EQ(manager.view(id).geometry, left);
+    EXPECT_EQ(manager.view(id).border_width, 0);
+
+    ASSERT_TRUE(manager.set_fullscreen(id, false));
+    EXPECT_EQ(manager.view(id).geometry, (WindowRect{12, 36, 976, 652}));
+    EXPECT_EQ(manager.view(id).border_width, 4);
 }
 
 TEST(WindowManager, NewlyFocusedOrdinaryWindowIsVisibleAboveFullscreen) {

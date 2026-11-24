@@ -817,7 +817,7 @@ bool run_part4(const Fixture &fixture) {
 
     xdg_toplevel_set_maximized(second.toplevel);
     REQUIRE(connection.wait(second, [&] { return second.configured.maximized; }));
-    const WindowRect maximized{10, 10, 140, 70};
+    const WindowRect maximized{12, 12, 136, 66};
     REQUIRE(second.configured.width == maximized.width &&
             second.configured.height == maximized.height);
     REQUIRE(connection.attach(second, second.configured.width, second.configured.height));
@@ -2153,13 +2153,16 @@ bool run_dwindle(const Fixture &fixture) {
     REQUIRE(connection.wait(second, [&] { return second.configured.maximized; }));
     REQUIRE(connection.attach_configured(second, green));
     REQUIRE(wait_pixel(connection, first, output.get(), 20, 45, green));
+    REQUIRE(wait_pixel(connection, first, output.get(), 80, 4, active_border));
     REQUIRE(desktop.action(action(ActionKind::cycle_focus_mru)));
     REQUIRE(windows.focused_window() == a && windows.view(b).maximized);
     REQUIRE(wait_pixel(connection, first, output.get(), 20, 45, red));
     REQUIRE(wait_pixel(connection, first, output.get(), 5, 45, active_border));
+    REQUIRE(wait_pixel(connection, first, output.get(), 80, 4, inactive_border));
     REQUIRE(desktop.action(action(ActionKind::cycle_focus_mru)));
     REQUIRE(windows.focused_window() == b && windows.view(b).maximized);
     REQUIRE(wait_pixel(connection, first, output.get(), 20, 45, green));
+    REQUIRE(wait_pixel(connection, first, output.get(), 80, 4, active_border));
     xdg_toplevel_unset_maximized(second.toplevel);
     REQUIRE(wait_tiled(connection, second, 69, 78));
     REQUIRE(connection.attach_configured(second, green));

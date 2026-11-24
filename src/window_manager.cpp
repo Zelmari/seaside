@@ -790,7 +790,8 @@ WindowRect WindowManager::geometry(WindowId id, const Window &window) const {
         return display.bounds;
     }
     if (window.maximized) {
-        return inset_window_rect(display.usable, layout_settings_.outer_gap);
+        return inset_window_rect(display.usable,
+                                 layout_settings_.outer_gap + layout_settings_.border_width);
     }
     if (tile_move_ && tile_move_->tile.id == id) {
         return tile_move_->geometry;
@@ -938,7 +939,7 @@ WindowView WindowManager::view(WindowId id) const {
     int border = 0;
     if (moving) {
         border = tile_move_->border_width;
-    } else if (ordinary) {
+    } else if (!window.fullscreen) {
         border = tile_layout ? layout.border_width(id) : layout_settings_.border_width;
     }
     auto stacking = moving ? tile_move_->stacking : window.stacking;
