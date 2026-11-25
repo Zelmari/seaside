@@ -285,13 +285,16 @@ static void log_wlroots(enum wlr_log_importance importance, const char *format, 
             (length >= sizeof(source) && file[length - sizeof(source)] == '/' &&
              strcmp(file + length - sizeof(source) + 1, source) == 0)) {
             importance = WLR_INFO;
-            format = "[%s:%d] connector %s: Skipped disabling CRTC %" PRIu32 " while seat is paused";
+            format =
+                "[%s:%d] connector %s: Skipped disabling CRTC %" PRIu32 " while seat is paused";
         }
     }
     if ((unsigned)importance > (unsigned)wlr_log_get_verbosity()) {
         return;
     }
-    static const struct { const char *label, *color; } levels[] = {
+    static const struct {
+        const char *label, *color;
+    } levels[] = {
         [WLR_SILENT] = {"", ""},
         [WLR_ERROR] = {"[ERROR] ", "\033[1;31m"},
         [WLR_INFO] = {"[INFO] ", "\033[1;34m"},
