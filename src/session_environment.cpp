@@ -21,8 +21,8 @@ namespace {
 constexpr char manager[] = "org.freedesktop.systemd1";
 constexpr char path[] = "/org/freedesktop/systemd1";
 constexpr char interface[] = "org.freedesktop.systemd1.Manager";
-constexpr std::array keys{"WAYLAND_DISPLAY", "XDG_CURRENT_DESKTOP", "XDG_SESSION_TYPE", "DISPLAY",
-                          "XAUTHORITY"};
+constexpr std::array keys{"WAYLAND_DISPLAY", "XDG_CURRENT_DESKTOP", "XDG_SESSION_TYPE",
+                          "DISPLAY",         "XAUTHORITY",          "XCURSOR_SIZE"};
 using Environment = std::array<std::optional<std::string>, keys.size()>;
 using Message = std::unique_ptr<sd_bus_message, decltype(&sd_bus_message_unref)>;
 
@@ -80,7 +80,8 @@ bool update(sd_bus *bus, const Environment &from, const Environment &to,
 }
 } // namespace
 
-int run_session_environment(const char *wayland, const char *display, const char *authority) {
+int run_session_environment(const char *wayland, const char *display, const char *authority,
+                            const char *cursor_size) {
     struct stat pipe{};
     const char *runtime = std::getenv("XDG_RUNTIME_DIR");
     if (!runtime || !std::getenv("NOTIFY_SOCKET") || fstat(STDIN_FILENO, &pipe) < 0 ||
@@ -99,7 +100,8 @@ int run_session_environment(const char *wayland, const char *display, const char
     const std::unique_ptr<sd_bus, decltype(&sd_bus_unref)> bus(raw, sd_bus_unref);
     Environment before, after;
     Environment session{
-        std::string(wayland), std::string("Seaside"), std::string("wayland"), {}, {}};
+        std::string(wayland),    std::string("Seaside"), std::string("wayland"), {}, {},
+        std::string(cursor_size)};
     if (*display && *authority) {
         session[3] = display;
         session[4] = authority;

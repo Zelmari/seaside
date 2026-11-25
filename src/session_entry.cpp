@@ -447,6 +447,8 @@ class Session {
             activation_.reset();
         }
         settings_.reset();
+        // End the bridge and its Xwayland process before closing their Wayland connection.
+        satellite_.reset();
         // Disconnect Wayland clients while the seat and surface owners still exist.
         // Destroying the seat first would send data-control device events to
         // clients whose session is already ending.
@@ -457,7 +459,6 @@ class Session {
         ipc_.reset();
         config_.reset();
         trace_.reset();
-        satellite_.reset();
         if (!clean_exit_ && !ready_ && !outcome_.failure_stage) {
             outcome_.failure_stage = "interrupted-before-ready";
         }
@@ -1440,8 +1441,8 @@ int report_exit(const std::expected<Outcome, const char *> &result) noexcept {
 } // namespace
 
 int main(int argc, char **argv) try {
-    if (argc == 5 && std::string_view(argv[1]) == "--activation-environment") {
-        return seaside::run_session_environment(argv[2], argv[3], argv[4]);
+    if (argc == 6 && std::string_view(argv[1]) == "--activation-environment") {
+        return seaside::run_session_environment(argv[2], argv[3], argv[4], argv[5]);
     }
     if (argc == 2 && std::string_view(argv[1]) == "--help") {
         std::fputs("Usage: seaside [--help | --version]\n"

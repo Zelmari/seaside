@@ -186,6 +186,7 @@ struct PortalActivation::Impl final : std::enable_shared_from_this<Impl> {
 
     int append_lifetime(sd_bus_message *message) const {
         const auto *cmd = executable.c_str();
+        const auto *cursor_size = std::getenv("XCURSOR_SIZE");
         // systemd starts the portal units only after this helper has published
         // the session's environment. Pipe EOF also reaches it after SIGKILL.
         return sd_bus_message_append(
@@ -193,9 +194,9 @@ struct PortalActivation::Impl final : std::enable_shared_from_this<Impl> {
             "notify", "CollectMode", "s", "inactive-or-failed", "Before", "as", 1, graphical_target,
             "StandardInputFileDescriptor", "h", pipe[0], "TimeoutStartUSec", "t",
             static_cast<std::uint64_t>(5'000'000), "TimeoutStopUSec", "t",
-            static_cast<std::uint64_t>(3'000'000), "ExecStart", "a(sasb)", 1, cmd, 5, cmd,
+            static_cast<std::uint64_t>(3'000'000), "ExecStart", "a(sasb)", 1, cmd, 6, cmd,
             "--activation-environment", wayland.c_str() + sizeof("WAYLAND_DISPLAY=") - 1,
-            display.c_str(), authority.c_str(), 0, 0);
+            display.c_str(), authority.c_str(), cursor_size ? cursor_size : "", 0, 0);
     }
 
     int append_launch(sd_bus_message *message, const Service &service) const {

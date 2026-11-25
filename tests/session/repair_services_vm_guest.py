@@ -19,7 +19,8 @@ import tomllib
 
 PORTALS = ("org.freedesktop.impl.portal.desktop.wlr", "org.freedesktop.impl.portal.desktop.gtk",
            "org.freedesktop.portal.Desktop")
-ENV_KEYS = ("WAYLAND_DISPLAY", "XDG_CURRENT_DESKTOP", "XDG_SESSION_TYPE", "DISPLAY", "XAUTHORITY")
+ENV_KEYS = ("WAYLAND_DISPLAY", "XDG_CURRENT_DESKTOP", "XDG_SESSION_TYPE", "DISPLAY", "XAUTHORITY",
+            "XCURSOR_SIZE")
 
 
 def cmd(*args, **kwargs):
@@ -108,7 +109,8 @@ connection = xcb.xcb_connect(None, None)
 connected = bool(connection and not xcb.xcb_connection_has_error(connection))
 if connection:
     xcb.xcb_disconnect(connection)
-keys = ('WAYLAND_DISPLAY', 'XDG_CURRENT_DESKTOP', 'XDG_SESSION_TYPE', 'DISPLAY', 'XAUTHORITY')
+keys = ('WAYLAND_DISPLAY', 'XDG_CURRENT_DESKTOP', 'XDG_SESSION_TYPE', 'DISPLAY', 'XAUTHORITY',
+        'XCURSOR_SIZE')
 Path(mark).write_text(json.dumps(dict(wayland=Path(wayland).exists(), x11=connected,
     environment={k: os.environ[k] for k in keys if k in os.environ})))
 os.execl('/usr/bin/busctl', 'busctl', '--user', 'call', 'org.freedesktop.DBus',
@@ -390,7 +392,7 @@ def exercise(repo, root, results, env):
     before = manager_environment()
     evidence = {"environment_before": before}
     Session = helpers["Session"]
-    first = Session(repo, root / "healthy", results, env, label="repair-healthy")
+    first = Session(repo, root / "healthy", results, dict(env, XCURSOR_SIZE="27"), label="repair-healthy")
     x11_marker = root / "x11-environment"
     commands = tomllib.loads(first.base_config)["autostart"]["commands"]
     extra = 'printf "%s\\n" "$DISPLAY" "$XAUTHORITY" > ' + shlex.quote(str(x11_marker))
@@ -411,6 +413,9 @@ def exercise(repo, root, results, env):
             r = cmd("systemd-run", "--user", "--wait", "--collect", "--quiet", "foot",
                     "--app-id=seaside-activation-trial", "/usr/bin/touch", str(marker))
             evidence["systemd_window"] = {"exit": r.returncode, "opened": marker.exists()}
+            cursor = cmd("systemd-run", "--user", "--wait", "--pipe", "--collect", "--quiet",
+                         "/usr/bin/printenv", "XCURSOR_SIZE", check=True)
+            evidence["systemd_cursor_size"] = cursor.stdout.strip()
             gtk, invocation, pid = units[1]
             if unit_invocation(gtk) != invocation:
                 raise RuntimeError("GTK unit changed before its recovery trial")
@@ -527,6 +532,7 @@ def trial():
             assert checks["preserved_values"] and checks["trial_x11_cleanup"], checks
             assert checks["wayland_display"] != "wayland-0", checks
             assert checks["environment_during"]["WAYLAND_DISPLAY"] == checks["wayland_display"], checks
+            assert checks["environment_during"]["XCURSOR_SIZE"] == checks["systemd_cursor_size"] == "27", checks
             app = checks["activated_app"]
             assert app["wayland"] and app["x11"] and app["environment"] == checks["environment_during"], app
             assert checks["restart_ready"] and checks["restart_portals"] and not checks["orphan_units"], checks
