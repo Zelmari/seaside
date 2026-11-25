@@ -235,11 +235,17 @@ TEST_F(BindingsTest, RetiredWorkspaceTransferIsRejected) {
 
 TEST_F(BindingsTest, DefaultsHaveOnlyTheApprovedBindings) {
     auto map = seaside::default_bindings();
-    ASSERT_EQ(map.size(), 42U);
+    ASSERT_EQ(map.size(), 44U);
     EXPECT_EQ(map.at(seaside::parse_chord("Super+Return").value()).text, "foot");
     const auto &launcher = map.at(seaside::parse_chord("Super+Space").value());
     EXPECT_EQ(launcher.kind, seaside::ActionKind::exec);
     EXPECT_EQ(launcher.text, "wofi --show drun");
+    const auto &region = map.at(seaside::parse_chord("Super+S").value());
+    EXPECT_EQ(region.kind, seaside::ActionKind::exec);
+    EXPECT_EQ(region.text, "seaside-screenshot region");
+    const auto &screen = map.at(seaside::parse_chord("Super+Shift+S").value());
+    EXPECT_EQ(screen.kind, seaside::ActionKind::exec);
+    EXPECT_EQ(screen.text, "seaside-screenshot screen");
     EXPECT_EQ(map.at(seaside::parse_chord("XF86AudioRaiseVolume").value()).text,
               "wpctl set-volume --limit 1 @DEFAULT_AUDIO_SINK@ 5%+");
     EXPECT_EQ(map.at(seaside::parse_chord("Super+F").value()).kind,

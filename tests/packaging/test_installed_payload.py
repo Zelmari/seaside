@@ -25,6 +25,7 @@ def installed_payload(source, build, stage):
         return (paths["prefix"] / paths[option] / filename).relative_to("/")
 
     binaries = {name: destination("bindir", name) for name in ("seaside", "seasidectl")}
+    screenshot = destination("bindir", "seaside-screenshot")
     bridge = destination("libexecdir", "seaside/seaside-xwayland-satellite")
     data = {
         destination("datadir", "doc/seaside/xwayland-bridge/data-control.patch"):
@@ -60,8 +61,11 @@ def installed_payload(source, build, stage):
     assert result.returncode == 0, result.stderr or result.stdout
     actual = {path.relative_to(stage) for path in stage.rglob("*")
               if path.is_file() or path.is_symlink()}
-    expected = set(data) | set(binaries.values()) | {bridge}
+    expected = set(data) | set(binaries.values()) | {bridge, screenshot}
     assert actual == expected, f"Missing {expected - actual}; unexpected {actual - expected}"
+    installed_screenshot = stage / screenshot
+    assert not installed_screenshot.is_symlink() and os.access(installed_screenshot, os.X_OK)
+    assert installed_screenshot.read_bytes() == (source / "tools/seaside-screenshot").read_bytes()
     private = stage / bridge
     assert not private.is_symlink() and os.access(private, os.X_OK), bridge
     assert private.read_bytes() == (build / private.name).read_bytes(), bridge

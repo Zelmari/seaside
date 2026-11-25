@@ -1,0 +1,28 @@
+#!/bin/sh
+set -eu
+
+case "${1:-}" in
+    region)
+        geometry=$(slurp) || exit 0
+        [ -n "$geometry" ] || exit 0
+        set -- -g "$geometry"
+        ;;
+    screen)
+        set --
+        ;;
+    *)
+        printf 'Usage: %s region|screen\n' "${0##*/}" >&2
+        exit 2
+        ;;
+esac
+
+directory="$HOME/Pictures/Screenshots"
+mkdir -p -- "$directory"
+timestamp=$(date +%Y-%m-%d_%H-%M-%S)
+image=$(mktemp -- "$directory/Screenshot-${timestamp}-XXXXXX.png")
+if ! grim "$@" "$image"; then
+    rm -f -- "$image"
+    exit 1
+fi
+
+wl-copy --type image/png < "$image"

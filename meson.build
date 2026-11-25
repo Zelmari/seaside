@@ -594,6 +594,8 @@ seaside = executable(
 )
 install_data('packaging/seaside-portals.conf', install_dir: get_option('datadir') / 'xdg-desktop-portal')
 install_data('packaging/seaside.portal', install_dir: get_option('datadir') / 'xdg-desktop-portal' / 'portals')
+install_data('tools/seaside-screenshot', install_dir: get_option('bindir'),
+  install_mode: 'rwxr-xr-x')
 install_data('packaging/black.png', install_dir: get_option('datadir') / 'seaside' / 'wallpapers')
 install_data('packaging/xdg-desktop-portal-wlr/Seaside',
   install_dir: get_option('sysconfdir') / 'xdg' / 'xdg-desktop-portal-wlr',

@@ -275,6 +275,8 @@ std::string format_action(const Action &action) {
 BindingMap default_bindings() {
     const std::array definitions{
         std::pair{"Super+Space", "exec wofi --show drun"},
+        std::pair{"Super+S", "exec seaside-screenshot region"},
+        std::pair{"Super+Shift+S", "exec seaside-screenshot screen"},
         std::pair{"Super+Q", "close_window"},
         std::pair{"Super+P", "toggle_window_pin"},
         std::pair{"Super+Shift+E", "exit"},

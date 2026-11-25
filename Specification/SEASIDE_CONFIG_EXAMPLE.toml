@@ -139,6 +139,8 @@ temperature_kelvin = 4500
 # This table is the complete active map: delete/comment an entry to disable it.
 # An empty [keybinds] table disables all bindings; omitting the table uses defaults.
 "Super+Space" = "exec wofi --show drun"
+"Super+S" = "exec seaside-screenshot region"
+"Super+Shift+S" = "exec seaside-screenshot screen"
 "Super+Q" = "close_window"
 "Super+P" = "toggle_window_pin"
 "Super+Shift+E" = "exit"

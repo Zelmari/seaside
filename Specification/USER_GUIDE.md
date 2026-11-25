@@ -162,6 +162,8 @@ until it observes a completed save.
 |---|---|
 | Super+Enter | Open `foot` |
 | Super+Space | Open the Wofi application launcher |
+| Super+S | Drag a rectangle to capture it |
+| Super+Shift+S | Capture the whole desktop across all monitors |
 | Super+Q | Close the focused window |
 | Super+P | Toggle whether the focused window is pinned across workspaces |
 | Super+D | Toggle tiling for the focused window |
@@ -320,9 +322,11 @@ and `pinned`. Mapping, unmapping, and destruction have their own events.
   The portal uses your per-user chooser config if you supply one. Isolated
   audio from one selected application is deferred. Receiving apps handle
   desktop audio and microphone selection.
-- **Screenshots and panels.** `grim` is an optional screenshot utility. Once
-  installed, run `grim -c "$HOME/seaside.png"` in the session to capture the
-  desktop with the cursor. External panels that use Wayland layer-shell can
+- **Screenshots.** Both screenshot shortcuts save a PNG in
+  `~/Pictures/Screenshots/` and copy it to the clipboard. Press Escape to
+  cancel region selection. If your config already has a `[keybinds]` table,
+  copy the screenshot bindings from the [example config](SEASIDE_CONFIG_EXAMPLE.toml).
+- **Panels.** External panels that use Wayland layer-shell can
   run alongside Seaside. Ordinary layers hide while an app is fullscreen on
   that display and return afterward.
 
