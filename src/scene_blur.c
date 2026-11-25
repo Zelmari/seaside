@@ -442,6 +442,9 @@ static void filter_lines(uint32_t *out, const uint32_t *in, int length, int line
 
 static bool filter_image(struct blur_image *image, int radius, int passes) {
     const int width = image->buffer.width, height = image->buffer.height;
+    if (width <= 0 || height <= 0) {
+        return false;
+    }
     uint32_t *scratch = malloc((size_t)width * height * sizeof(*scratch));
     if (!scratch) {
         return false;
