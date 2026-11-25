@@ -830,7 +830,18 @@ def trial():
                             publish_state(results, state, artifacts)
                             if session.process.poll() is not None:
                                 break
-                        session.close()
+                        with process(session, results / "part7-x11-shutdown.log",
+                                     "seaside-part7-x11-client", stdin=True) as client:
+                            wait_for(lambda: session.window(X11_TITLE), 12,
+                                     "an X11 window at shutdown", client)
+                            log_offset = len(session.log_text())
+                            session.close()
+                            require(client.wait(timeout=8) == 1,
+                                    "The live X11 client did not lose its connection on exit")
+                        shutdown_log = session.log_text()[log_offset:]
+                        require("Broken pipe (os error 32)" not in shutdown_log,
+                                "The Xwayland bridge lost Wayland before it was stopped")
+                        state["x11_shutdown"] = True
                         failed = [name for name, result in outcomes.items() if result != "pass"]
                         require(not failed, "Part 7 TTY checks failed: " + ", ".join(failed))
                 finally:
