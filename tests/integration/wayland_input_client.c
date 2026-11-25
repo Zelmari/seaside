@@ -34,7 +34,7 @@ struct client {
     unsigned enters, leaves, activations, deactivations, method_serial, text_serial;
     unsigned keys, grabbed_keys;
     bool mapped, closed, unavailable, previewed, committed, deleted, popup_rectangle, keymap;
-    bool surrounds, private_surrounds, stale_commit, cleared_preedit;
+    bool surrounds, private_surrounds, leaked_private_surrounds, stale_commit, cleared_preedit;
 };
 
 static struct wl_buffer *make_buffer(struct client *client, int width, int height, uint32_t pixel) {
@@ -277,6 +277,7 @@ static void surrounding(void *data, struct zwp_input_method_v2 *method, const ch
     struct client *client = data;
     client->surrounds |= strcmp(text, "abc") == 0 && cursor == 1 && anchor == 1;
     client->private_surrounds |= !*text && cursor == 0 && anchor == 0;
+    client->leaked_private_surrounds |= strcmp(text, "private") == 0;
 }
 
 static void cause(void *data, struct zwp_input_method_v2 *method, uint32_t type) {
@@ -481,7 +482,7 @@ static bool run(struct client *client) {
     zwp_text_input_v3_set_surrounding_text(client->text, "private", 4, 4);
     zwp_text_input_v3_commit(client->text);
     if (!roundtrip(client) || client->keys != 2 || !client->private_surrounds ||
-        client->grabbed_keys != 0) {
+        client->leaked_private_surrounds || client->grabbed_keys != 0) {
         fputs("virtual keyboard forwarding or private surrounding text failed\n", stderr);
         return false;
     }

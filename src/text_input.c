@@ -129,7 +129,7 @@ enum {
 
 static bool text_length(const char *text, size_t *length) {
     *length = text ? strnlen(text, text_input_max_bytes + 1) : 0;
-    return !text || (*length <= text_input_max_bytes && g_utf8_validate(text, *length, NULL));
+    return !text || (*length <= text_input_max_bytes && g_utf8_validate_len(text, *length, NULL));
 }
 
 static bool text_offset(const char *text, size_t length, size_t offset) {
