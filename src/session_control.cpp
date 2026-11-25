@@ -205,22 +205,22 @@ IpcJson SessionControl::workspaces() const {
     return result;
 }
 
+IpcJson SessionControl::PublishedWindow::json() const {
+    return {{"workspace_id", workspace},    {"mapped", mapped},
+            {"floating", !flags.tiled},     {"fullscreen", flags.fullscreen},
+            {"maximized", flags.maximized}, {"pinned", flags.pinned}};
+}
+
 IpcJson SessionControl::windows() const {
     const auto &desktop = desktop_.windows();
     auto result = Json::array();
     for (const auto &[id, state] : desktop.state().windows()) {
-        const auto view = desktop.view(id);
         const auto metadata = scene_.window_metadata(id);
-        auto &row = result.emplace_back();
+        auto &row = result.emplace_back(
+            PublishedWindow{state.home_workspace, desktop.window_flags(id), state.mapped}.json());
         row["id"] = id;
-        row["workspace_id"] = state.home_workspace;
         row["app_id"] = bounded_utf8(metadata.app_id, 1024);
         row["title"] = bounded_utf8(metadata.title, 4096);
-        row["mapped"] = state.mapped;
-        row["floating"] = !view.tiled;
-        row["fullscreen"] = view.fullscreen;
-        row["maximized"] = view.maximized;
-        row["pinned"] = view.pinned;
     }
     return result;
 }
@@ -368,21 +368,26 @@ void SessionControl::publish(IpcServer &ipc) {
             ++old;
             continue;
         }
-        if (old->second.second) {
+        if (old->second.mapped) {
             ipc.event("window.unmapped",
-                      {{"window_id", old->first}, {"workspace_id", old->second.first}});
+                      {{"window_id", old->first}, {"workspace_id", old->second.workspace}});
         }
         ipc.event("window.destroyed", {{"window_id", old->first}});
         old = published_windows_.erase(old);
     }
     for (const auto &[id, window] : desktop.state().windows()) {
-        auto [previous, inserted] =
-            published_windows_.try_emplace(id, window.home_workspace, false);
-        if (previous->second.second != window.mapped) {
+        const PublishedWindow next{window.home_workspace, desktop.window_flags(id), window.mapped};
+        auto [previous, inserted] = published_windows_.try_emplace(id, next);
+        const bool was_mapped = !inserted && previous->second.mapped;
+        if (was_mapped != next.mapped) {
             ipc.event(window.mapped ? "window.mapped" : "window.unmapped",
                       {{"window_id", id}, {"workspace_id", window.home_workspace}});
+        } else if (!inserted && previous->second != next) {
+            auto data = next.json();
+            data["window_id"] = id;
+            ipc.event("window.changed", std::move(data));
         }
-        previous->second = {window.home_workspace, window.mapped};
+        previous->second = next;
     }
     for (const auto &[id, output] : outputs_.outputs()) {
         const auto &state = output.status.settings;

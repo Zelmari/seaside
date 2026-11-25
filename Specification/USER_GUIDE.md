@@ -273,6 +273,16 @@ keybind, use the `keybinds` setting and send its `chord`. A `null` value removes
 that chord, or restores built-in bindings if `chord` is omitted. Updates take
 effect live and are saved to the user configuration file.
 
+`settings.changed` reports the new configuration `revision`. Subscribe to
+`settings.effective_changed` for changes reported by the power-profile daemon.
+Its data includes `setting` set to `power.profile` and `status` with the same
+fields as `query.settings` reports under `power`. `config.recovered` marks
+the first accepted save after a `config.error`.
+
+`window.changed` reports a window’s new workspace and flags. Its data includes
+`window_id`, `workspace_id`, `mapped`, `floating`, `fullscreen`, `maximized`,
+and `pinned`. Mapping, unmapping, and destruction have their own events.
+
 ## Use applications and sharing
 
 - **Wayland and X11 apps.** Open Wofi with Super+Space or run the app in a

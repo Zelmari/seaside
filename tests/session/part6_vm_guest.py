@@ -266,10 +266,12 @@ class Events:
         self.seq = message["seq"]
         return message
 
-    def expect(self, name, predicate=lambda _: True):
+    def expect(self, name, predicate=lambda _: True, *, unexpected=None):
         deadline = time.monotonic() + 8
         while time.monotonic() < deadline:
             message = self.notification(self.read())
+            require(message["event"] != unexpected,
+                    f"Unexpected event while waiting for {name}: {message}")
             if message["event"] == name and predicate(message["data"]):
                 return message
         raise RuntimeError(f"Timed out waiting for {name}")
@@ -287,7 +289,7 @@ class Events:
 
 def check_completed_saves(session, events, target, snapshot, initial, selected):
     def accepted(text, night_light):
-        events.expect("config.recovered")
+        events.expect("settings.changed")
         session.wait(lambda: session.config()["recovery_persisted"], "completed save snapshot")
         status = session.config()
         require(not status["error"] and session.night_light_enabled() == night_light and
@@ -372,7 +374,7 @@ def run_live(repo, directory, result_dir, state):
         with Events(session) as events:
             (profiles / "next").symlink_to("../files/home")
             (profiles / "next").replace(profiles / "active")
-            events.expect("config.recovered")
+            events.expect("settings.changed")
             session.wait(lambda: session.config()["recovery_persisted"], "switched profile snapshot")
             require(session.night_light_enabled() and snapshot.read_text() == selected,
                     "Retargeting the intermediate link did not apply the selected profile")
@@ -382,6 +384,7 @@ def run_live(repo, directory, result_dir, state):
                     snapshot.read_text() == selected, "Invalid profile edit replaced last-good TOML")
             (files / "home").write_text(initial)
             events.expect("config.recovered")
+            events.expect("settings.changed")
             session.wait(lambda: session.config()["recovery_persisted"], "repaired profile snapshot")
             require(not session.night_light_enabled() and snapshot.read_text() == initial,
                     "A subsequent edit of the new target did not repair the profile")
@@ -392,6 +395,7 @@ def run_live(repo, directory, result_dir, state):
             (profiles / "next").symlink_to("../files/home")
             (profiles / "next").replace(profiles / "active")
             events.expect("config.recovered")
+            events.expect("settings.changed")
             session.wait(lambda: session.config()["recovery_persisted"], "repaired profile link")
             require(not session.config()["error"] and snapshot.read_text() == initial,
                     "The profile link could not recover from pointing at its own directory")
@@ -405,8 +409,12 @@ def run_live(repo, directory, result_dir, state):
             first = mapped["data"]["window_id"]
             require(session.ctl("window", "toggle-fullscreen")["result"]["changed"],
                     "The default terminal could not enter fullscreen")
-            session.wait(lambda: any(w["id"] == first and w["fullscreen"] for w in session.windows()),
-                         "the first terminal's fullscreen state")
+            fullscreen = events.expect("window.changed", lambda data: data["window_id"] == first and
+                                       data["fullscreen"])["data"]
+            window = next(window for window in session.windows() if window["id"] == first)
+            require(all(fullscreen[field] == window[field] for field in
+                        ("workspace_id", "mapped", "floating", "fullscreen", "maximized", "pinned")),
+                    "Fullscreen event disagrees with the current window state")
             output = session.focused_output()
             workspaces = session.ctl("workspaces")["result"]["workspaces"]
             require([workspace["id"] for workspace in workspaces] == list(range(1, 11)) and
@@ -419,7 +427,7 @@ def run_live(repo, directory, result_dir, state):
             state["screen"] = session.screenshot(result_dir, "clean")
 
             session.ctl("night-light", "on")
-            events.expect("config.recovered")
+            events.expect("settings.changed", unexpected="config.recovered")
             session.wait(lambda: session.config()["recovery_persisted"], "night-light recovery snapshot")
             night_light_saved = config.read_text()
             require(session.night_light_enabled() and config.is_symlink() and
@@ -454,6 +462,7 @@ def run_live(repo, directory, result_dir, state):
                     time.sleep(.05)
                 writer.write("[keybinds]" + bindings)
             recovered = events.expect("config.recovered")
+            events.expect("settings.changed")
             session.wait(lambda: session.config()["recovery_persisted"], "new recovery snapshot")
             accepted = session.config()
             require(not accepted["error"] and snapshot.read_text() == repair,
@@ -472,6 +481,7 @@ def run_live(repo, directory, result_dir, state):
 
             replace(config, moved_config)
             moved = events.expect("config.recovered")
+            events.expect("settings.changed")
             session.wait(lambda: session.focused_output()["position"] == {"x": 64, "y": 32},
                          "live output position")
             actual = session.focused_output()
@@ -506,6 +516,12 @@ def run_live(repo, directory, result_dir, state):
             require(first_autostart.read_text().splitlines() == [str(session.path)] and
                     not second_autostart.exists(), "Reload reran autostart commands")
             target = remapped["data"]["window_id"]
+            moved_window = session.request("action.window_to_workspace",
+                                           {"window_id": target, "workspace_id": 5})
+            require(moved_window["ok"] and moved_window["result"]["changed"], "Window move failed")
+            changed = events.expect("window.changed", lambda data: data["window_id"] == target and
+                                    data["workspace_id"] == 5)["data"]
+            require(changed["mapped"], "A moved window was reported as unmapped")
             close = session.request("action.window_close", {"window_id": target})
             require(close["ok"] and close["result"] == {"accepted": True, "changed": False},
                     "Close should acknowledge the request while the client handles it")
@@ -572,7 +588,7 @@ def run_appearance(repo, directory, result_dir, state):
         with Events(session) as events:
             wallpaper_config = f"[wallpaper]\npath = {json.dumps(str(wallpaper))}\n"
             replace(config, baseline_config + wallpaper_config)
-            events.expect("config.recovered")
+            events.expect("settings.changed")
             session.wait(lambda: session.pixel(x, y) == color, "live wallpaper pixels")
             session.wait(lambda: session.config()["recovery_persisted"], "wallpaper snapshot")
             reference = snapshot.read_text()
@@ -586,6 +602,7 @@ def run_appearance(repo, directory, result_dir, state):
             scaled = reference + "\n[monitors]\nscale = 1.25\n"
             replace(config, scaled)
             events.expect("config.recovered")
+            events.expect("settings.changed")
             session.wait(lambda: session.focused_output()["scale"] == 1.25, "real fractional scale")
             output = session.focused_output()
             require(output["hardware_cursor"] and output["mode"] == mode,
@@ -597,7 +614,7 @@ def run_appearance(repo, directory, result_dir, state):
                     "Composed logical output bounds disagree with the configured scale")
 
             replace(config, reference)
-            events.expect("config.recovered")
+            events.expect("settings.changed")
             session.wait(lambda: session.focused_output()["scale"] == 1, "restored scale")
             session.key("open")
             session.wait(lambda: len(session.windows()) == 1, "first tile")
@@ -610,7 +627,7 @@ def run_appearance(repo, directory, result_dir, state):
             scrolling = ("[window]\nlayout = 'scrolling'\n[scrolling]\n"
                          "default_column_width = 0.30\n" + wallpaper_config)
             replace(config, scrolling)
-            events.expect("config.recovered")
+            events.expect("settings.changed")
             session.wait(lambda: session.pixel(x, y) == color, "scrolling layout revealing wallpaper")
             session.wait(lambda: session.config()["recovery_persisted"], "scrolling snapshot")
             replace(config, scrolling.replace("0.30", "'invalid'"))
@@ -619,6 +636,7 @@ def run_appearance(repo, directory, result_dir, state):
                     "Rejected layout edit changed presentation or the recovery snapshot")
             replace(config, reference)
             events.expect("config.recovered")
+            events.expect("settings.changed")
             session.wait(lambda: session.pixel(x, y) == tile_color, "restored Dwindle client pixels")
             require(len(session.windows()) == 2, "Live layout replaced client windows")
             state["appearance"] = {"wallpaper_rgb": color, "scale": 1.25,

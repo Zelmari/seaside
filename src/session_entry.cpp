@@ -230,7 +230,10 @@ class Session {
         : server_(server), scene_(scene), drm_(drm), socket_(socket),
           loop_(wl_display_get_event_loop(server.display())), paths_(paths),
           desktop_(scene, seaside::default_config()), outputs_(drm, desktop_),
-          control_(scene, desktop_, outputs_), power_(loop_) {
+          control_(scene, desktop_, outputs_), power_(loop_, [this] {
+              ipc_->event("settings.effective_changed",
+                          {{"setting", "power.profile"}, {"status", power_status()}});
+          }) {
         desktop_.enable_frame_paced_resize();
     }
 
@@ -842,8 +845,8 @@ class Session {
             apply_service_preferences();
             if (std::exchange(config_error_visible_, false)) {
                 scene_.set_config_error(std::nullopt);
+                ipc_->event("config.recovered", {{"source", "user"}});
             }
-            ipc_->event("config.recovered", {{"source", "user"}});
             ipc_->event("settings.changed", {{"revision", config_->revision()}});
             publish();
         } else if (change == LiveConfig::Change::rejected && transaction.diagnostic()) {

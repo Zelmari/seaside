@@ -821,6 +821,15 @@ bool WindowManager::unclipped_move(WindowId id) const {
     return id == root || is_descendant(id, root);
 }
 
+WindowFlags WindowManager::window_flags(WindowId id) const {
+    const auto found = windows_.find(id);
+    if (found == windows_.end()) {
+        return {};
+    }
+    const auto &window = found->second;
+    return {is_tiled(id, window), window.fullscreen, window.maximized, window.pinned};
+}
+
 WindowView WindowManager::view(WindowId id) const {
     auto found = windows_.find(id);
     if (found == windows_.end()) {

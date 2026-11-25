@@ -357,6 +357,7 @@ TEST_F(SessionBusTest, PowerProfilesRespectAvailabilityAndExplicitPolicy) {
     struct Daemon {
         std::string effective = "balanced";
         unsigned writes = 0;
+        bool deny = false;
     } power;
     sd_bus_slot *filter = nullptr;
     ASSERT_GE(
@@ -381,6 +382,10 @@ TEST_F(SessionBusTest, PowerProfilesRespectAvailabilityAndExplicitPolicy) {
                     EXPECT_STREQ(interface, "org.freedesktop.UPower.PowerProfiles");
                     EXPECT_STREQ(key, "ActiveProfile");
                     EXPECT_EQ(sd_bus_message_get_allow_interactive_authorization(message), 0);
+                    if (daemon.deny) {
+                        return sd_bus_reply_method_errorf(message, SD_BUS_ERROR_ACCESS_DENIED,
+                                                          "Profile change denied");
+                    }
                     daemon.effective = value;
                     ++daemon.writes;
                     return sd_bus_reply_method_return(message, "");
@@ -416,30 +421,55 @@ TEST_F(SessionBusTest, PowerProfilesRespectAvailabilityAndExplicitPolicy) {
         ~RestoreAddress() { saved ? setenv(name, saved->c_str(), 1) : unsetenv(name); }
     } restore;
     ASSERT_EQ(setenv(restore.name, address.c_str(), 1), 0);
-    seaside::PowerProfiles profiles(loop);
+    std::vector<seaside::PowerProfiles::Status> changes;
+    seaside::PowerProfiles profiles(loop, [&] { changes.push_back(profiles.status()); });
     const auto reports = [&](const char *state, bool active = true) {
         return pump_until([&] {
             profiles.tick(active);
-            return std::string_view(profiles.status().state) == state;
+            return profiles.status().state == state;
         });
     };
     ASSERT_TRUE(reports("system"));
     EXPECT_EQ(profiles.status().effective, "balanced");
     EXPECT_EQ(power.writes, 0U);
+    ASSERT_EQ(changes.size(), 1U);
+    EXPECT_EQ(changes.back(), profiles.status());
     profiles.configure(seaside::PowerProfile::performance);
+    EXPECT_EQ(changes.size(), 1U);
     ASSERT_TRUE(reports("unsupported"));
     EXPECT_EQ(profiles.status().effective, "balanced");
     EXPECT_EQ(power.writes, 0U);
+    ASSERT_EQ(changes.size(), 2U);
+    EXPECT_EQ(changes.back(), profiles.status());
 
     profiles.configure(seaside::PowerProfile::saver);
+    EXPECT_EQ(changes.size(), 2U);
     ASSERT_TRUE(reports("applied"));
     EXPECT_EQ(profiles.status().effective, "saver");
     EXPECT_EQ(power.effective, "power-saver");
     EXPECT_EQ(power.writes, 1U);
+    ASSERT_EQ(changes.size(), 3U);
+    EXPECT_EQ(changes.back(), profiles.status());
+
     profiles.configure(std::nullopt);
-    ASSERT_TRUE(reports("system", false));
-    EXPECT_EQ(profiles.status().effective, "saver");
+    EXPECT_EQ(changes.size(), 3U);
+    power.effective = "balanced";
+    ASSERT_TRUE(pump_until([&] {
+        profiles.tick(false);
+        return profiles.status().effective == "balanced";
+    }));
+    EXPECT_EQ(profiles.status().state, "system");
     EXPECT_EQ(power.writes, 1U);
+    ASSERT_EQ(changes.size(), 4U);
+    EXPECT_EQ(changes.back(), profiles.status());
+
+    power.deny = true;
+    profiles.configure(seaside::PowerProfile::saver);
+    ASSERT_TRUE(reports("denied"));
+    EXPECT_EQ(profiles.status().effective, "balanced");
+    EXPECT_EQ(power.writes, 1U);
+    ASSERT_EQ(changes.size(), 5U);
+    EXPECT_EQ(changes.back(), profiles.status());
 }
 
 class SystemdUserProbeTest : public SessionBusTest {

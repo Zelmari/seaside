@@ -490,24 +490,24 @@ void PowerProfiles::read_state(const BusReply &reply) noexcept try {
         return;
     }
     observed.state = status_.state;
-    status_ = std::move(observed);
     next_ = Clock::now() + 3s;
-    if (!requested_) {
-        status_.state = "system";
-        return;
-    }
-    const char *desired = power_profile_name(*requested_);
-    if (std::ranges::find(status_.available, desired) == status_.available.end()) {
-        status_.state = "unsupported";
+    const char *desired = requested_ ? power_profile_name(*requested_) : nullptr;
+    if (!desired) {
+        observed.state = "system";
+    } else if (std::ranges::find(observed.available, desired) == observed.available.end()) {
+        observed.state = "unsupported";
         profile_pending_ = true;
-    } else if (status_.effective == desired) {
-        status_.state = "applied";
+    } else if (observed.effective == desired) {
+        observed.state = "applied";
         profile_pending_ = false;
     } else if (profile_pending_ && active_) {
+        set_observed_status(std::move(observed));
         select();
-    } else if (std::string_view(status_.state) == "applied") {
-        status_.state = "changed-externally";
+        return;
+    } else if (observed.state == "applied") {
+        observed.state = "changed-externally";
     }
+    set_observed_status(std::move(observed));
 } catch (...) {
     mark_unavailable();
 }
@@ -527,7 +527,10 @@ void PowerProfiles::select() noexcept try {
             next_ = {};
         } else if (reply.native_error == -EPERM || reply.native_error == -EACCES) {
             profile_pending_ = false;
-            status_.state = "denied";
+            if (status_.state != "denied") {
+                status_.state = "denied";
+                notify_observed_change();
+            }
         } else {
             mark_unavailable();
         }
@@ -542,9 +545,18 @@ void PowerProfiles::select() noexcept try {
 }
 
 void PowerProfiles::mark_unavailable() noexcept {
-    status_ = {};
-    status_.state = "unavailable";
     profile_pending_ = requested_.has_value();
     next_ = Clock::now() + 3s;
+    set_observed_status({.effective = {}, .available = {}, .state = "unavailable"});
+}
+
+void PowerProfiles::set_observed_status(Status status) noexcept {
+    if (status_ != status) {
+        status_ = std::move(status);
+        notify_observed_change();
+    }
+}
+
+void PowerProfiles::notify_observed_change() noexcept try { observed_change_(); } catch (...) {
 }
 } // namespace seaside

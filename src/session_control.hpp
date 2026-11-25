@@ -46,6 +46,15 @@ class SessionControl {
         bool operator==(const WorkspaceState &) const = default;
     };
 
+    struct PublishedWindow {
+        WorkspaceId workspace;
+        WindowFlags flags;
+        bool mapped;
+
+        bool operator==(const PublishedWindow &) const = default;
+        IpcJson json() const;
+    };
+
     struct OutputState {
         WindowRect geometry;
         int refresh_millihz;
@@ -78,7 +87,7 @@ class SessionControl {
     Desktop &desktop_;
     OutputConfig &outputs_;
     const char *renderer_ = nullptr;
-    std::map<WindowId, std::pair<WorkspaceId, bool>> published_windows_;
+    std::map<WindowId, PublishedWindow> published_windows_;
     std::map<WorkspaceId, WorkspaceState> published_workspaces_;
     std::map<OutputId, PublishedOutput> published_outputs_;
     FocusState published_focus_;

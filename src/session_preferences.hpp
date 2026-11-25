@@ -5,9 +5,11 @@
 #include "session_bus.hpp"
 
 #include <chrono>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 struct sd_bus_slot;
@@ -46,10 +48,15 @@ class PowerProfiles final {
     struct Status {
         std::optional<std::string> effective;
         std::vector<std::string> available;
-        const char *state = "checking";
+        std::string_view state = "checking";
+
+        bool operator==(const Status &) const = default;
     };
 
-    explicit PowerProfiles(wl_event_loop *loop) : loop_(loop) {}
+    using ObservedChange = std::function<void()>;
+
+    explicit PowerProfiles(wl_event_loop *loop, ObservedChange observed_change)
+        : loop_(loop), observed_change_(std::move(observed_change)) {}
     ~PowerProfiles() = default;
     PowerProfiles(const PowerProfiles &) = delete;
     PowerProfiles &operator=(const PowerProfiles &) = delete;
@@ -66,8 +73,11 @@ class PowerProfiles final {
     void read_state(const BusReply &reply) noexcept;
     void select() noexcept;
     void mark_unavailable() noexcept;
+    void set_observed_status(Status status) noexcept;
+    void notify_observed_change() noexcept;
 
     wl_event_loop *loop_;
+    ObservedChange observed_change_;
     std::unique_ptr<SessionBus> bus_;
     std::optional<SessionBus::CallId> pending_;
     std::optional<PowerProfile> requested_;

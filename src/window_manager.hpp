@@ -7,6 +7,15 @@ namespace seaside {
 
 enum class ResizeResult { invalid, unchanged, changed };
 
+struct WindowFlags {
+    bool tiled;
+    bool fullscreen;
+    bool maximized;
+    bool pinned;
+
+    bool operator==(const WindowFlags &) const = default;
+};
+
 struct WindowView {
     WindowRect geometry;
     bool visible = false;
@@ -56,6 +65,7 @@ class WindowManager final {
     bool commit_geometry(WindowId id, WindowRect committed);
     bool set_size_limits(WindowId id, int min_width, int min_height, int max_width, int max_height);
     WindowView view(WindowId id) const;
+    WindowFlags window_flags(WindowId id) const;
     bool is_descendant(WindowId id, WindowId ancestor) const;
 
     std::optional<WindowId> focused_window() const noexcept { return focused_window_; }
