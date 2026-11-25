@@ -4,6 +4,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+enum { SEASIDE_DEFAULT_CURSOR_SIZE = 16 };
+
 struct wl_display;
 struct wlr_allocator;
 struct wlr_backend;

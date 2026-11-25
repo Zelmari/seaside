@@ -1428,6 +1428,11 @@ int main(int argc, char **argv) try {
         std::fputs("seaside FAIL: start on the active Linux console as a foreground job\n", stderr);
         return EXIT_FAILURE;
     }
+    const auto cursor_size = std::to_string(SEASIDE_DEFAULT_CURSOR_SIZE);
+    if (setenv("XCURSOR_SIZE", cursor_size.c_str(), 0) != 0) {
+        std::perror("seaside: could not set the session cursor size");
+        return EXIT_FAILURE;
+    }
     const std::string runtime = "/run/user/" + std::to_string(getuid());
     const char *runtime_env = std::getenv("XDG_RUNTIME_DIR");
     if (!runtime_env || runtime != runtime_env) {
