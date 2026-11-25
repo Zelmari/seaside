@@ -113,7 +113,8 @@ done
 
 Resolve any failing command before continuing. The final commands inspect
 package metadata, list installed paths and print the checksum to record
-with the candidate. The version includes the commit count and full Git SHA.
+with the candidate. Development package versions include the commit count and
+full Git SHA. Stable packages use the version in `meson.build`.
 Retain the staged recipe and source archive, the build
 log, built archive, revision, repository or snapshot details, dependency
 versions and checksums. The archive's `.BUILDINFO` records the clean chroot's

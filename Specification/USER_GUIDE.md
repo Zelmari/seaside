@@ -35,8 +35,8 @@ Your config and state are in your home directory, outside the package's files.
 
 Install Arch's package toolchain, then run the remaining commands in the Git
 checkout as your normal user. `pacman -Syu` updates the system before installing
-build tools. Use a full Git checkout so the preparation script can count its
-commits for the candidate version. The script stages the selected commit and its
+build tools. Use a full Git checkout for development builds so the preparation
+script can count its commits. The script stages the selected commit and its
 checksummed source archive in a temporary directory. Commit any intended source
 changes first so the archive uses the requested revision. `makepkg --syncdeps`
 installs declared dependencies as needed and builds the package.

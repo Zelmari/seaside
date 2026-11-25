@@ -2,7 +2,7 @@ project(
   'seaside',
   'c',
   'cpp',
-  version: '0.1.0-dev',
+  version: '1.0.0',
   license: 'MIT',
   license_files: 'LICENSE',
   meson_version: '>=1.3.0',

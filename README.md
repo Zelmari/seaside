@@ -6,7 +6,7 @@ configuration, and the `seasidectl` command-line client. Dwindle is the default
 tiling layout. Scrolling columns are also available. You can add your own
 Wayland panel or keep the default empty desktop.
 
-Seaside is in development. An Arch VirtualBox guest has verified
+Seaside v1 is available for Arch Linux. An Arch VirtualBox guest has verified
 TTY startup, window management, virtual display power, and real portal capture.
 Native AMD display, gaming, and application compatibility checks are still
 open. [Verification and support status](Specification/PUBLIC_DOCUMENTATION.md)
@@ -14,7 +14,7 @@ open. [Verification and support status](Specification/PUBLIC_DOCUMENTATION.md)
 ## Install or upgrade on Arch
 
 On x86-64 Arch Linux, paste this block into a Bash terminal. It updates Arch,
-downloads the newest published Seaside preview, verifies its checksum, and
+downloads the latest stable Seaside release, verifies its checksum, and
 installs it with pacman. Use the same block for a first install or an upgrade.
 
 ```bash
@@ -26,8 +26,8 @@ installs it with pacman. Use the same block for a first install or an upgrade.
   trap 'rm -rf -- "$downloads"' EXIT
   cd "$downloads"
 
-  release_info=$(curl -fsSL 'https://api.github.com/repos/Zelmari/seaside/releases?per_page=1' |
-    jq -er '.[0] | [
+  release_info=$(curl -fsSL 'https://api.github.com/repos/Zelmari/seaside/releases/latest' |
+    jq -er '[
       .tag_name,
       ([.assets[].name | select(test("^seaside-[A-Za-z0-9._+-]+-x86_64\\.pkg\\.tar\\.zst$"))] |
         if length == 1 then .[0] else error("Expected one Seaside Arch package") end)

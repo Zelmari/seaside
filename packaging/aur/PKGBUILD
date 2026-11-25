@@ -1,0 +1,59 @@
+# Maintainer: Zelmari
+pkgname=seaside
+pkgver=1.0.0
+pkgrel=1
+pkgdesc='TTY-launched Wayland compositor for Arch Linux'
+arch=('x86_64')
+url='https://github.com/Zelmari/seaside'
+license=('MIT' 'MPL-2.0' 'OFL-1.1')
+depends=(
+  'bash' 'cairo' 'foot' 'glib2' 'glibc' 'grim' 'libdrm' 'libgcc' 'libinput'
+  'libjpeg-turbo' 'libpipewire' 'libpng' 'libstdc++' 'libwebp' 'libxau' 'libxcb'
+  'libxkbcommon' 'mesa' 'pango' 'pipewire' 'pipewire-audio' 'pipewire-pulse'
+  'pixman' 'polkit' 'power-profiles-daemon' 'rtkit' 'slurp' 'systemd' 'systemd-libs' 'tomlplusplus>=3.4.0' 'libtomlplusplus.so'
+  'ttf-dejavu' 'wayland' 'wireplumber' 'wl-clipboard' 'wlroots0.20>=0.20.2' 'wlroots0.20<0.21.0'
+  'wofi' 'xdg-desktop-portal' 'xdg-desktop-portal-gtk' 'xdg-desktop-portal-wlr>=0.8.4'
+  'xcb-util-cursor' 'xorg-xwayland'
+)
+# Meson configures the development test targets alongside the installed targets.
+makedepends=(
+  'clang' 'dbus' 'git' 'gtest>=1.14.0' 'meson>=1.3.0' 'ninja'
+  'nlohmann-json>=3.11.0' 'pkgconf' 'python' 'rust' 'wayland-protocols' 'wlr-protocols'
+)
+optdepends=('wf-recorder: command-line recording of an output')
+backup=('etc/xdg/xdg-desktop-portal-wlr/Seaside')
+_bridge_commit=b83eab900644e4c7c77982ce3d44cb490f0c5e1d
+_bridge_archive=xwayland-satellite-$_bridge_commit.tar.gz
+_release_tag=v1
+source=("$pkgname-$pkgver::git+$url.git#tag=$_release_tag"
+        "$_bridge_archive::https://codeload.github.com/Supreeeme/xwayland-satellite/tar.gz/$_bridge_commit")
+sha256sums=('SKIP'
+            '45f06d0c7017d793fa20c85a6fa7e8b26ad3c681c579d455f697faddf3c57bdf')
+noextract=("$_bridge_archive")
+
+prepare() {
+  cd "$srcdir/$pkgname-$pkgver"
+  tools/prepare-xwayland-bridge --prepare --archive "$srcdir/$_bridge_archive" --work-dir "$srcdir/bridge-build"
+}
+
+build() {
+  cd "$srcdir/$pkgname-$pkgver"
+  # Let makepkg split the Rust debug information requested by its build flags.
+  CARGO_PROFILE_RELEASE_STRIP=none tools/prepare-xwayland-bridge --build \
+    --work-dir "$srcdir/bridge-build" --output "$srcdir/seaside-xwayland-satellite"
+  arch-meson --sysconfdir=/etc -Dwerror=false -Dpackage_version="$pkgver-$pkgrel" \
+    -Dxwayland_bridge="$srcdir/seaside-xwayland-satellite" . build
+  meson compile -C build seaside seasidectl
+}
+
+check() {
+  cd "$srcdir/$pkgname-$pkgver"
+  # Check the staged payload here. The full harness has its own runtime
+  # environment, and the installed TTY trial needs a real seat.
+  meson test -C build --no-rebuild --print-errorlogs --suite part10
+}
+
+package() {
+  cd "$srcdir/$pkgname-$pkgver"
+  meson install -C build --no-rebuild --destdir "$pkgdir"
+}

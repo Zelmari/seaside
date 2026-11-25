@@ -9,10 +9,6 @@ fi
 repository=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 destination=$(realpath -m -- "$1")
 revision=$(git -C "$repository" rev-parse --verify --end-of-options "${2:-HEAD}^{commit}")
-if [[ $(git -C "$repository" rev-parse --is-shallow-repository) == true ]]; then
-  printf 'A full Git checkout is needed to compute the candidate package version.\n' >&2
-  exit 1
-fi
 if [[ -e $destination ]] &&
   [[ ! -d $destination || -n $(find "$destination" -mindepth 1 -maxdepth 1 -print -quit) ]]; then
   printf 'The package staging directory must be new or empty: %s\n' "$destination" >&2
@@ -22,16 +18,23 @@ fi
 # Read the release recipe and version from the same tree as the archive.
 recipe=$(git -C "$repository" show "$revision:packaging/PKGBUILD")
 meson=$(git -C "$repository" show "$revision:meson.build")
-base_version=$(sed -n "s/^  version: '\([0-9][0-9.]*\)-dev',$/\1/p" <<< "$meson")
-if [[ ! $base_version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
+project_version=$(sed -n "s/^  version: '\([^']*\)',$/\1/p" <<< "$meson")
+if [[ ! $project_version =~ ^[0-9]+\.[0-9]+\.[0-9]+(-dev)?$ ]] ||
   ! grep -qxF 'pkgver=@PACKAGE_VERSION@' <<< "$recipe" ||
   ! grep -qF "sha256sums=('@SOURCE_SHA256@'" <<< "$recipe"; then
-  printf 'Cannot read the development version or recipe markers at %s.\n' "$revision" >&2
+  printf 'Cannot read the project version or recipe markers at %s.\n' "$revision" >&2
   exit 1
 fi
 
-count=$(git -C "$repository" rev-list --count "$revision")
-version="${base_version}dev.r$count.g$revision"
+version=$project_version
+if [[ $project_version == *-dev ]]; then
+  if [[ $(git -C "$repository" rev-parse --is-shallow-repository) == true ]]; then
+    printf 'A full Git checkout is needed to compute the development package version.\n' >&2
+    exit 1
+  fi
+  count=$(git -C "$repository" rev-list --count "$revision")
+  version="${project_version%-dev}dev.r$count.g$revision"
+fi
 archive="seaside-$version.tar.gz"
 parent=$(dirname -- "$destination")
 mkdir -p -- "$parent"
