@@ -45,11 +45,8 @@ class IdlePower {
         bool exhausted = false;
     };
     struct Output {
-        Clock::time_point last_activity;
         std::optional<Retry> retry;
         bool sleeping = false;
-        bool inhibited = false;
-        bool visible_protection = false;
     };
 
     IdlePower(Power power, VisibleOutput visible_output, Fullscreen fullscreen, Now now);
@@ -67,8 +64,12 @@ class IdlePower {
     seaside_idle_inhibit *inhibit_ = nullptr;
     std::map<wlr_output *, Output> outputs_;
     std::chrono::minutes timeout_{15};
+    Clock::time_point last_activity_{};
     bool active_ = false;
     bool check_queued_ = false;
+    bool sleeping_ = false;
+    bool inhibited_ = false;
+    bool visible_inhibitor_ = false;
 };
 
 } // namespace seaside

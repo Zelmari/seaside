@@ -265,16 +265,37 @@ TEST_F(IdleTrial, ShortenedExtendedAndDisabledTimeoutUseTheCurrentIdleTime) {
     EXPECT_EQ(changes_.size(), 8u);
 }
 
-TEST_F(IdleTrial, FullscreenOnlyProtectsItsOwnOutputAndFollowsVisibility) {
+TEST_F(IdleTrial, FullscreenOnEitherDisplayProtectsTheWholeSeat) {
     fullscreen_ = &left_;
     ASSERT_NO_FATAL_FAILURE(check());
     ASSERT_NO_FATAL_FAILURE(advance(15min));
-    EXPECT_EQ(changes_, (std::vector<PowerChange>{{&right_, false}}));
+    EXPECT_TRUE(changes_.empty());
     fullscreen_ = &right_;
     ASSERT_NO_FATAL_FAILURE(check());
-    EXPECT_EQ(changes_, (std::vector<PowerChange>{{&right_, false}, {&right_, true}}));
     ASSERT_NO_FATAL_FAILURE(advance(15min));
-    EXPECT_EQ(changes_.back(), (PowerChange{&left_, false}));
+    EXPECT_TRUE(changes_.empty());
+    fullscreen_ = nullptr;
+    ASSERT_NO_FATAL_FAILURE(check());
+    ASSERT_NO_FATAL_FAILURE(advance(15min - 1ms));
+    EXPECT_TRUE(changes_.empty());
+    ASSERT_NO_FATAL_FAILURE(advance(1ms));
+    EXPECT_EQ(std::ranges::count(changes_, PowerChange{&left_, false}), 1);
+    EXPECT_EQ(std::ranges::count(changes_, PowerChange{&right_, false}), 1);
+}
+
+TEST_F(IdleTrial, ReconnectedOutputJoinsExistingDeadline) {
+    idle_->remove(&right_);
+    ASSERT_NO_FATAL_FAILURE(advance(14min));
+    ASSERT_TRUE(idle_->add(&right_));
+    ASSERT_NO_FATAL_FAILURE(advance(1min - 1ms));
+    EXPECT_TRUE(changes_.empty());
+    ASSERT_NO_FATAL_FAILURE(advance(1ms));
+    EXPECT_EQ(changes_.size(), 2u);
+    idle_->remove(&right_);
+    ASSERT_TRUE(idle_->add(&right_));
+    ASSERT_NO_FATAL_FAILURE(check());
+    EXPECT_EQ(std::ranges::count(changes_, PowerChange{&right_, false}), 2);
+    EXPECT_EQ(std::ranges::count(changes_, PowerChange{&left_, false}), 1);
 }
 
 TEST_F(IdleTrial, HiddenProtocolInhibitorAndSurfaceDestructionReconcilePower) {
@@ -300,13 +321,13 @@ TEST_F(IdleTrial, HiddenProtocolInhibitorAndSurfaceDestructionReconcilePower) {
     EXPECT_EQ(std::ranges::count(changes_, PowerChange{&left_, true}), 1);
     EXPECT_EQ(std::ranges::count(changes_, PowerChange{&right_, true}), 1);
     ASSERT_NO_FATAL_FAILURE(advance(30min));
-    EXPECT_EQ(changes_.back(), (PowerChange{&right_, false}));
-    EXPECT_EQ(changes_.size(), 5u);
+    EXPECT_EQ(changes_.size(), 4u);
     surface.reset();
     ASSERT_NO_FATAL_FAILURE(roundtrip());
     ASSERT_NO_FATAL_FAILURE(check());
     ASSERT_NO_FATAL_FAILURE(advance(15min));
-    EXPECT_EQ(changes_.back(), (PowerChange{&left_, false}));
+    EXPECT_EQ(std::ranges::count(changes_, PowerChange{&left_, false}), 2);
+    EXPECT_EQ(std::ranges::count(changes_, PowerChange{&right_, false}), 2);
     EXPECT_EQ(changes_.size(), 6u);
 }
 
@@ -396,27 +417,26 @@ TEST_F(IdleTrial, PausedSeatDoesNotCommitPowerAndResumesIdleDeadline) {
 }
 
 TEST_F(IdleTrial, RejectedPowerTransitionsRetryOnceAndRetainTheAppliedState) {
-    fullscreen_ = &right_;
     rejection_target_ = &left_;
     remaining_rejections_ = 2;
     ASSERT_NO_FATAL_FAILURE(advance(15min));
-    EXPECT_EQ(changes_.size(), 1u);
+    EXPECT_EQ(changes_.size(), 2u);
     ASSERT_NO_FATAL_FAILURE(advance(249ms));
-    EXPECT_EQ(changes_.size(), 1u);
+    EXPECT_EQ(changes_.size(), 2u);
     ASSERT_NO_FATAL_FAILURE(advance(1ms));
-    EXPECT_EQ(changes_.size(), 2u);
+    EXPECT_EQ(changes_.size(), 3u);
     ASSERT_NO_FATAL_FAILURE(advance(1h));
-    EXPECT_EQ(changes_.size(), 2u);
+    EXPECT_EQ(changes_.size(), 3u);
     // No visibility or config change follows the input. The policy must
     // schedule its own check, then arm the remaining idle deadline.
     idle_->activity();
     now_ += 15min - 10ms;
     ASSERT_NO_FATAL_FAILURE(wait_for_check());
-    ASSERT_EQ(changes_.size(), 2u);
+    ASSERT_EQ(changes_.size(), 4u);
     now_ += 10ms;
     ASSERT_NO_FATAL_FAILURE(wait_for_check());
     EXPECT_EQ(std::ranges::count(changes_, PowerChange{&left_, false}), 3);
-    EXPECT_EQ(std::ranges::count(changes_, PowerChange{&right_, false}), 0);
+    EXPECT_EQ(std::ranges::count(changes_, PowerChange{&right_, false}), 2);
 
     remaining_rejections_ = 1;
     idle_->activity();
@@ -424,7 +444,7 @@ TEST_F(IdleTrial, RejectedPowerTransitionsRetryOnceAndRetainTheAppliedState) {
     ASSERT_NO_FATAL_FAILURE(advance(250ms));
     EXPECT_EQ(std::ranges::count(changes_, PowerChange{&left_, true}), 2);
     ASSERT_NO_FATAL_FAILURE(advance(1s));
-    EXPECT_EQ(changes_.size(), 5u);
+    EXPECT_EQ(changes_.size(), 9u);
 }
 
 } // namespace

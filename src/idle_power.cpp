@@ -38,7 +38,7 @@ IdlePower::~IdlePower() {
 }
 
 bool IdlePower::add(wlr_output *output) noexcept try {
-    const bool inserted = outputs_.try_emplace(output, Output{now_(), {}}).second;
+    const bool inserted = outputs_.try_emplace(output).second;
     visibility_changed();
     return inserted;
 } catch (...) {
@@ -70,9 +70,8 @@ void IdlePower::set_active(bool active) noexcept {
         arm(0);
         return;
     }
-    const auto now = now_();
+    last_activity_ = now_();
     for (auto &[output, state] : outputs_) {
-        state.last_activity = now;
         state.retry.reset();
     }
     visibility_changed();
@@ -89,21 +88,18 @@ void IdlePower::activity() noexcept {
     if (!active_) {
         return;
     }
-    const auto now = now_();
+    const auto now = last_activity_ = now_();
+    bool recheck = sleeping_;
     for (auto &[output, state] : outputs_) {
-        state.last_activity = now;
         if (state.retry &&
             (state.retry->sleep || (state.retry->exhausted && now >= state.retry->after))) {
-            if (state.retry->sleep && state.retry->exhausted) {
-                // A display whose sleep retry expired needs a new deadline.
-                visibility_changed();
-            }
+            recheck |= state.retry->exhausted;
             state.retry.reset();
         }
-        if (state.sleeping) {
-            visibility_changed();
-        }
+        recheck |= state.sleeping;
     }
+    if (recheck)
+        visibility_changed();
 }
 
 void IdlePower::inhibitor_changed(void *data) noexcept {
@@ -112,12 +108,7 @@ void IdlePower::inhibitor_changed(void *data) noexcept {
 
 void IdlePower::visit_inhibitor(void *data, wlr_surface *surface) noexcept {
     auto &self = *static_cast<IdlePower *>(data);
-    const auto output = self.outputs_.find(self.visible_output_(surface));
-    // The protocol prevents entering idle. A request made while a display is
-    // already idle takes effect when that display wakes through another path.
-    if (output != self.outputs_.end() && !output->second.sleeping) {
-        output->second.visible_protection = true;
-    }
+    self.visible_inhibitor_ |= self.outputs_.contains(self.visible_output_(surface));
 }
 
 int IdlePower::on_timer(void *data) noexcept try {
@@ -133,44 +124,43 @@ int IdlePower::on_timer(void *data) noexcept try {
 }
 
 void IdlePower::update() {
-    for (auto &[output, state] : outputs_) {
-        state.visible_protection = fullscreen_(output);
-    }
-    seaside_idle_inhibit_each(inhibit_, visit_inhibitor, this);
-
     const auto now = now_();
-    auto next = Clock::time_point::max();
+    visible_inhibitor_ =
+        std::ranges::any_of(outputs_, [&](const auto &entry) { return fullscreen_(entry.first); });
+    // An inhibitor arriving after the seat sleeps takes effect once the seat wakes.
+    if (!sleeping_ || timeout_ == 0min || now < last_activity_ + timeout_) {
+        if (!visible_inhibitor_)
+            seaside_idle_inhibit_each(inhibit_, visit_inhibitor, this);
+        if (inhibited_ && !visible_inhibitor_)
+            last_activity_ = now;
+        if (inhibited_ != visible_inhibitor_) {
+            inhibited_ = visible_inhibitor_;
+            for (auto &[output, state] : outputs_)
+                state.retry.reset();
+        }
+    }
+
+    const auto expires = last_activity_ + timeout_;
+    const bool counts_idle = timeout_ > 0min && !inhibited_;
+    sleeping_ = counts_idle && now >= expires;
+    auto next = counts_idle && !sleeping_ ? expires : Clock::time_point::max();
     for (auto &[output, state] : outputs_) {
-        if (state.inhibited != state.visible_protection) {
-            state.inhibited = state.visible_protection;
-            state.retry.reset();
-            if (!state.inhibited) {
-                // A finished film or a newly hidden inhibitor starts a new idle period.
-                state.last_activity = now;
-            }
-        }
-        const auto expires = state.last_activity + timeout_;
-        const bool counts_idle = timeout_ > 0min && !state.inhibited;
-        const bool sleep = counts_idle && now >= expires;
-        if (counts_idle && expires > now) {
-            next = std::min(next, expires);
-        }
-        if (state.sleeping == sleep) {
+        if (state.sleeping == sleeping_) {
             state.retry.reset();
             continue;
         }
-        if (state.retry && state.retry->sleep != sleep) {
+        if (state.retry && state.retry->sleep != sleeping_) {
             state.retry.reset();
         }
         if (!state.retry || (!state.retry->exhausted && now >= state.retry->after)) {
-            if (power_(output, !sleep)) {
-                state.sleeping = sleep;
+            if (power_(output, !sleeping_)) {
+                state.sleeping = sleeping_;
                 state.retry.reset();
             } else {
                 // Retry once in case the power commit raced a driver transition.
                 // After that, fresh local input or policy can request another attempt.
                 state.retry =
-                    Retry{now + (state.retry ? 1s : 250ms), sleep, state.retry.has_value()};
+                    Retry{now + (state.retry ? 1s : 250ms), sleeping_, state.retry.has_value()};
             }
         }
         if (state.retry && !state.retry->exhausted) {
