@@ -18,23 +18,24 @@ struct WindowView {
     WindowRect clip;
     int border_width = 0;
     std::uint64_t stacking = 0;
+    bool unclipped_move = false;
 };
 
 // Event-loop policy. The caller owns Wayland objects, configure sequencing,
 // output placement, and the projection of these decisions into the scene.
 class WindowManager final {
   public:
-    explicit WindowManager(WorkspaceMode mode, bool tiling = true) noexcept;
-    explicit WindowManager(const Config &config) noexcept;
+    explicit WindowManager(bool tiling = true);
+    explicit WindowManager(const Config &config);
     WindowManager(const WindowManager &) = delete;
     WindowManager &operator=(const WindowManager &) = delete;
 
     bool add_output(std::string_view id, WindowRect bounds, WindowRect usable,
                     bool primary = false);
-    bool remove_output(std::string_view id, std::string_view ranked_fallback = {});
+    bool remove_output(std::string_view id);
     bool update_output(std::string_view id, WindowRect bounds, WindowRect usable);
     bool focus_output(std::string_view id);
-    void set_primary_output(std::string_view id) noexcept;
+    bool set_primary_output(std::string_view id);
     std::optional<std::string_view> primary_output() const noexcept { return primary_output_; }
     bool has_fullscreen(std::string_view id) const;
     bool focus_output_at(double x, double y);
@@ -65,14 +66,13 @@ class WindowManager final {
 
     bool select_workspace(WorkspaceId id);
     bool move_to_workspace(WindowId id, WorkspaceId destination);
-    bool transfer_workspace(std::string_view destination,
-                            std::optional<WorkspaceId> target = std::nullopt);
 
     bool set_maximized(WindowId id, bool enabled);
     bool set_fullscreen(WindowId id, bool enabled);
     bool toggle_pin(WindowId id);
     bool toggle_tiling(WindowId id);
     void apply_layout_config(const Config &config);
+    bool allow_edge_drag() const noexcept { return allow_edge_drag_; }
     bool move_window(WindowId id, Direction direction, int distance = 32);
     bool move_window_by(WindowId id, int dx, int dy);
     bool swap_window(WindowId id, Direction direction);
@@ -88,26 +88,16 @@ class WindowManager final {
     void cancel_move(WindowId id);
 
     const State &state() const noexcept { return state_; }
-    WorkspaceMode workspace_mode() const noexcept { return mode_; }
-    void set_initial_workspace_mode(WorkspaceMode mode) noexcept;
 
   private:
     struct Output {
         WindowRect bounds;
         WindowRect usable;
-        std::optional<WorkspaceId> last_workspace;
-        std::uint64_t last_focused = 0;
         bool connected = false;
-    };
-
-    struct Migration {
-        OutputId origin;
-        bool was_shown;
     };
 
     struct Workspace {
         std::vector<WindowId> focus_history;
-        std::optional<Migration> migration;
         WorkspaceLayout layout;
         std::uint64_t last_shown = 0;
     };
@@ -122,6 +112,7 @@ class WindowManager final {
         std::optional<WindowId> parent;
         std::uint64_t stacking = 0;
         bool positioned = false;
+        bool edge_positioned = false;
         bool maximized = false;
         bool fullscreen = false;
         bool pinned = false;
@@ -141,12 +132,15 @@ class WindowManager final {
         std::uint64_t stacking;
     };
 
-    bool create_workspace(WorkspaceId id);
-    std::optional<WorkspaceId> fresh_workspace();
+    struct FloatingMove {
+        WindowId id;
+        WindowRect geometry;
+    };
+
     bool show_workspace(std::string_view output, WorkspaceId workspace);
-    bool show_fallback(std::string_view output);
+    bool reconcile_workspaces(WorkspaceId previous_workspace);
     bool focus_on_output(std::string_view id, bool restore_workspace_focus = false);
-    bool relocate_window(WindowId id, WorkspaceId workspace);
+    bool relocate_window(WindowId id, WorkspaceId workspace, WorkspaceLayout *prepared = nullptr);
     void remember_focus(WindowId id, WorkspaceId workspace);
     void forget_focus(WindowId id);
     void set_focus(std::optional<WindowId> id, bool remember = true,
@@ -156,9 +150,12 @@ class WindowManager final {
     bool is_visible(WindowId id) const;
     bool is_tiled(WindowId id, const Window &window) const;
     bool has_tile_ancestor(WindowId id) const;
+    bool unclipped_move(WindowId id) const;
     std::optional<WindowId> local_focus(std::string_view output, WorkspaceId workspace) const;
     std::optional<WindowId> fullscreen_on(std::string_view output) const;
     WindowRect geometry(WindowId id, const Window &window) const;
+    void place_floating(WindowId id, WindowRect area, std::int64_t x, std::int64_t y,
+                        bool allow_overhang);
     void position_window(WindowId id, Window &window);
     WorkspaceLayout &layout_for(WindowId id);
     void update_layout_area(WorkspaceId id);
@@ -168,20 +165,22 @@ class WindowManager final {
     void remove_tile(WindowId id);
     void restore_after_removal(std::optional<WindowId> preferred, WorkspaceId workspace);
     void reveal(WindowId id, std::optional<Direction> direction = {});
-    void cancel_tile_move();
+    void cancel_active_move();
 
     State state_;
-    WorkspaceMode mode_;
     bool tiling_;
+    bool allow_edge_drag_ = false;
     LayoutSettings layout_settings_;
     std::map<OutputId, Output, std::less<>> outputs_;
     std::map<WorkspaceId, Workspace> workspaces_;
     std::map<WindowId, Window> windows_;
     std::optional<std::string_view> focused_output_;
     std::optional<std::string_view> primary_output_;
+    WorkspaceId disconnected_workspace_ = 1;
     std::optional<WindowId> focused_window_;
     std::optional<FocusCycle> cycle_;
     std::optional<TileMove> tile_move_;
+    std::optional<FloatingMove> floating_move_;
     std::uint64_t sequence_ = 0;
 };
 

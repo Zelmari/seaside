@@ -46,14 +46,14 @@ struct observation {
     unsigned modifier_changes;
     unsigned keyboard_activity;
     uint8_t modifiers;
-    bool absolute;
+    enum seaside_pointer_motion kind;
     double x, y;
 };
 
-static void record_motion(void *data, bool absolute, double x, double y) {
+static void record_motion(void *data, enum seaside_pointer_motion kind, double x, double y) {
     struct observation *observation = data;
     ++observation->motions;
-    observation->absolute = absolute;
+    observation->kind = kind;
     observation->x = x;
     observation->y = y;
 }
@@ -152,13 +152,13 @@ static void exercise(bool backend_first) {
         .unaccel_dy = -2,
     };
     wl_signal_emit_mutable(&pointer.events.motion, &relative);
-    check(observation.motions == 1 && !observation.absolute && observation.x == 10.5 &&
-              observation.y == -4,
+    check(observation.motions == 1 && observation.kind == SEASIDE_POINTER_RELATIVE &&
+              observation.x == 10.5 && observation.y == -4,
           "relative pointer did not report the accelerated deltas");
     struct wlr_pointer_motion_absolute_event absolute = {.pointer = &pointer, .x = 0.25, .y = 0.75};
     wl_signal_emit_mutable(&pointer.events.motion_absolute, &absolute);
-    check(observation.motions == 2 && observation.absolute && observation.x == 0.25 &&
-              observation.y == 0.75,
+    check(observation.motions == 2 && observation.kind == SEASIDE_POINTER_ABSOLUTE &&
+              observation.x == 0.25 && observation.y == 0.75,
           "absolute pointer did not report the normalized coordinates");
 
     struct wlr_keyboard_key_event event = {.keycode = KEY_ENTER,
@@ -689,6 +689,7 @@ struct pointer_scene {
     struct wlr_surface *surfaces[2];
     double x, y;
     unsigned move_calls, clicks, consumed_releases, cancelled;
+    enum seaside_pointer_motion motion_kind;
     unsigned drag_icons;
     bool locked;
     const char *cursor_shape;
@@ -697,11 +698,12 @@ struct pointer_scene {
     int32_t hotspot_x, hotspot_y;
 };
 
-static void scene_motion(void *data, bool absolute, double x, double y) {
+static void scene_motion(void *data, enum seaside_pointer_motion kind, double x, double y) {
     struct pointer_scene *scene = data;
     ++scene->move_calls;
-    scene->x = absolute ? 200 * x : scene->x + x;
-    scene->y = absolute ? 100 * y : scene->y + y;
+    scene->motion_kind = kind;
+    scene->x = kind == SEASIDE_POINTER_ABSOLUTE ? 200 * x : scene->x + x;
+    scene->y = kind == SEASIDE_POINTER_ABSOLUTE ? 100 * y : scene->y + y;
 }
 
 static bool scene_absolute_delta(void *data, double x, double y, double *dx, double *dy) {
@@ -1174,13 +1176,15 @@ static void exercise_wayland_pointer(void) {
     round_trip(server, right.display);
     check(right.events.confines == 1, "eligible confinement did not activate");
     relative(&pointer, 80, 80);
-    check(scene.x > 125 && scene.x < 130, "relative motion escaped pointer confinement");
+    check(scene.x > 125 && scene.x < 130 && scene.motion_kind == SEASIDE_POINTER_CONFINED,
+          "relative motion escaped pointer confinement");
     struct wlr_pointer_motion_absolute_event absolute = {
         .pointer = &pointer, .time_msec = 16, .x = 0.1, .y = 0.1};
     wl_signal_emit_mutable(&pointer.events.motion_absolute, &absolute);
     wl_signal_emit_mutable(&pointer.events.frame, &pointer);
     round_trip(server, right.display);
-    check(scene.x >= 100 && scene.x < 105 && right.events.unconfines == 0,
+    check(scene.x >= 100 && scene.x < 105 && right.events.unconfines == 0 &&
+              scene.motion_kind == SEASIDE_POINTER_CONFINED,
           "absolute motion escaped pointer confinement");
     zwp_confined_pointer_v1_destroy(confine);
     round_trip(server, right.display);

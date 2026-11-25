@@ -1,6 +1,8 @@
 #ifndef SEASIDE_TTY_INPUT_H
 #define SEASIDE_TTY_INPUT_H
 
+#include "cursor_layout.h"
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -22,8 +24,8 @@ struct seaside_tty_pointer_target {
 };
 
 struct seaside_tty_input_callbacks {
-    /* Absolute coordinates are normalized. Relative values are wlroots deltas. */
-    void (*motion)(void *data, bool absolute, double x, double y);
+    /* Absolute coordinates are normalized. Relative and confined values are deltas. */
+    void (*motion)(void *data, enum seaside_pointer_motion kind, double x, double y);
     /* Escape requests shutdown only in the TTY qualification fixture. */
     void (*exit_requested)(void *data);
     /* An optional exact Super+Return shortcut in the terminal fixture. */

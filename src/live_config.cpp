@@ -5,6 +5,7 @@
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
+#include <deque>
 #include <map>
 #include <sys/inotify.h>
 #include <unistd.h>
@@ -16,6 +17,9 @@ constexpr int debounce_ms = 120;
 // One job can hold its TOML parser, a compressed wallpaper, the decoded
 // image, and codec scratch space. Snapshot jobs reserve their bytes separately.
 constexpr std::size_t reload_reservation = 256 * 1024 * 1024;
+constexpr std::size_t edit_reservation = 64 * 1024 * 1024 + 3 * max_config_bytes;
+constexpr std::size_t max_pending_edits = 8;
+constexpr int edit_apply_timeout_ms = 4000;
 constexpr auto directory_events = IN_ONLYDIR | IN_CLOSE_WRITE | IN_CREATE | IN_DELETE | IN_MODIFY |
                                   IN_MOVED_FROM | IN_MOVED_TO | IN_MOVE_SELF | IN_DELETE_SELF |
                                   IN_ATTRIB;
@@ -45,16 +49,28 @@ struct LiveConfig::Impl {
     // inotify shares a descriptor when several paths name the same directory.
     using Directories = std::map<int, std::vector<Entry>>;
 
+    struct PendingEdit {
+        SettingEdit edit;
+        EditCompletion complete;
+    };
+    struct SavedEdit {
+        std::string text;
+        bool changed;
+    };
+    using EditWork = std::expected<SavedEdit, SettingError>;
+
     Impl(std::unique_ptr<WorkQueue> queue, ConfigStore store, ConfigPaths paths,
          LoadedConfig startup, Prepare prepare, Apply apply, Changed changed)
-        : queue_(std::move(queue)), io_(*queue_, std::move(store)), paths_(std::move(paths)),
-          prepare_(std::move(prepare)), apply_(std::move(apply)), changed_(std::move(changed)),
-          source_(startup.source), accepted_text_(std::move(startup.text)),
-          transaction_(std::move(startup)) {}
+        : queue_(std::move(queue)), io_(*queue_, store), store_(std::move(store)),
+          paths_(std::move(paths)), prepare_(std::move(prepare)), apply_(std::move(apply)),
+          changed_(std::move(changed)), source_(startup.source),
+          accepted_text_(std::move(startup.text)), transaction_(std::move(startup)) {}
 
     ~Impl() {
+        edit_lifetime_->invalidate();
         watch_source_.reset();
         timer_.reset();
+        edit_timer_.reset();
         if (watch_fd_ >= 0)
             close(watch_fd_);
     }
@@ -66,9 +82,10 @@ struct LiveConfig::Impl {
         watch_source_.reset(
             wl_event_loop_add_fd(loop, watch_fd_, WL_EVENT_READABLE, on_watch, this));
         timer_.reset(wl_event_loop_add_timer(loop, on_timer, this));
+        edit_timer_.reset(wl_event_loop_add_timer(loop, on_edit_timeout, this));
         // Recheck once after installing the watches, in case the editor saved
         // between the startup read and session setup.
-        return watch_source_ && timer_ && arm_reload();
+        return watch_source_ && timer_ && edit_timer_ && arm_reload();
     }
 
     void watch_directories(Directories &watches, const std::filesystem::path &path,
@@ -138,6 +155,14 @@ struct LiveConfig::Impl {
         auto &self = *static_cast<Impl *>(data);
         self.due_ = true;
         self.submit_reload();
+        return 0;
+    }
+
+    static int on_edit_timeout(void *data) noexcept {
+        auto &self = *static_cast<Impl *>(data);
+        self.finish_edit(std::unexpected(
+            SettingError{"settings_apply_timeout",
+                         "The saved edit has not been accepted by the running session"}));
         return 0;
     }
 
@@ -291,12 +316,17 @@ struct LiveConfig::Impl {
     void reject(std::uint64_t generation, Diagnostic diagnostic) {
         if (generation != transaction_.generation())
             return;
+        auto conflict = published_edit_
+                            ? std::optional{SettingError{"settings_conflict", diagnostic.message}}
+                            : std::nullopt;
         if (diagnostic.path.empty())
             diagnostic.path = paths_.user.string();
-        if (transaction_.diagnostic() == diagnostic)
-            return;
-        transaction_.reject(generation, std::move(diagnostic));
-        notify(Change::rejected);
+        if (transaction_.diagnostic() != diagnostic) {
+            transaction_.reject(generation, std::move(diagnostic));
+            notify(Change::rejected);
+        }
+        if (conflict)
+            finish_edit(std::unexpected(std::move(*conflict)));
     }
 
     void submit_reload() noexcept {
@@ -361,6 +391,9 @@ struct LiveConfig::Impl {
         if (!result) {
             if (previous_diagnostic != transaction_.diagnostic())
                 notify(Change::rejected);
+            if (published_edit_)
+                finish_edit(
+                    std::unexpected(SettingError{"config_rejected", result.error().message}));
             return;
         }
         source_ = ConfigSource::user;
@@ -369,6 +402,123 @@ struct LiveConfig::Impl {
         notify(Change::committed, item.prepared);
         if (ready_)
             persist();
+        if (published_edit_) {
+            if (accepted_text_ == *published_edit_)
+                finish_edit(true);
+            else
+                finish_edit(std::unexpected(SettingError{
+                    "settings_conflict", "Another configuration save took precedence"}));
+        }
+    }
+
+    void edit(SettingEdit edit, EditCompletion completion) {
+        if (edits_.size() >= max_pending_edits) {
+            completion(std::unexpected(SettingError{"settings_busy", "Settings queue is full"}));
+            return;
+        }
+        edits_.push_back({std::move(edit), std::move(completion)});
+        submit_edit();
+    }
+
+    void submit_edit() noexcept {
+        if (edits_.empty() || writing_edit_ || published_edit_)
+            return;
+        const auto &edit = edits_.front().edit;
+        try {
+            if (source_ != ConfigSource::user || transaction_.diagnostic()) {
+                finish_edit(std::unexpected(SettingError{
+                    "settings_conflict", "Save a valid config.toml before editing settings"}));
+                return;
+            }
+            if (edit.revision && *edit.revision != accepted_generation_) {
+                finish_edit(std::unexpected(
+                    SettingError{"settings_conflict", "The settings revision has changed"}));
+                return;
+            }
+            auto submitted = queue_->submit(
+                0, edit_lifetime_, edit_reservation,
+                [store = store_, path = paths_.user, text = accepted_text_,
+                 active = transaction_.active(), edit](std::stop_token stop) -> WorkResult {
+                    if (stop.stop_requested())
+                        return {{}, 0, WorkError::cancelled};
+                    const auto perform = [&]() -> EditWork {
+                        auto edited = rewrite_setting(text, active, edit);
+                        if (!edited)
+                            return std::unexpected(std::move(edited.error()));
+                        const auto saved = store.replace_user(
+                            path, text, *edited, [&] { return !stop.stop_requested(); });
+                        if (!saved && !saved.error().publication_committed) {
+                            const auto &error = saved.error();
+                            const bool conflict =
+                                error.error == std::errc::resource_unavailable_try_again ||
+                                error.error == std::errc::no_such_file_or_directory;
+                            return std::unexpected(SettingError{
+                                conflict ? "settings_conflict" : "settings_write_failed",
+                                error.path.string() + ": " + error.error.message()});
+                        }
+                        const bool changed = *edited != text;
+                        return SavedEdit{std::move(*edited), changed};
+                    };
+                    return {std::make_shared<EditWork>(perform()), edit_reservation,
+                            WorkError::none};
+                },
+                [this](WorkResult result) { edit_written(std::move(result)); });
+            if (submitted)
+                writing_edit_ = true;
+            else
+                finish_edit(std::unexpected(
+                    SettingError{"settings_busy", "Could not queue configuration edit"}));
+        } catch (...) {
+            finish_edit(std::unexpected(
+                SettingError{"settings_write_failed", "Could not prepare configuration edit"}));
+        }
+    }
+
+    void edit_written(WorkResult result) noexcept {
+        writing_edit_ = false;
+        try {
+            if (result.error != WorkError::none || !result.value) {
+                finish_edit(std::unexpected(
+                    SettingError{"settings_write_failed", "Configuration worker failed"}));
+                return;
+            }
+            const auto &written = *std::static_pointer_cast<const EditWork>(result.value);
+            if (!written) {
+                finish_edit(std::unexpected(written.error()));
+                return;
+            }
+            if (source_ == ConfigSource::user && accepted_text_ == written->text) {
+                finish_edit(written->changed);
+                return;
+            }
+            // Let the ordinary watcher accept the exact saved document.
+            // Its generation check and commit effects are shared by all writes.
+            published_edit_ = written->text;
+            if (watch_source_)
+                drain_watch();
+            if (published_edit_ &&
+                (!arm_reload() ||
+                 wl_event_source_timer_update(edit_timer_.get(), edit_apply_timeout_ms) != 0))
+                watch_failed();
+        } catch (...) {
+            finish_edit(std::unexpected(
+                SettingError{"settings_write_failed", "Could not verify the saved setting"}));
+        }
+    }
+
+    void finish_edit(EditResult result) noexcept {
+        wl_event_source_timer_update(edit_timer_.get(), 0);
+        published_edit_.reset();
+        if (edits_.empty())
+            return;
+        auto complete = std::move(edits_.front().complete);
+        edits_.pop_front();
+        try {
+            complete(std::move(result));
+        } catch (...) {
+            std::fputs("seaside: settings completion failed\n", stderr);
+        }
+        submit_edit();
     }
 
     void session_ready() noexcept {
@@ -402,6 +552,7 @@ struct LiveConfig::Impl {
 
     std::unique_ptr<WorkQueue> queue_;
     AsyncConfigIo io_;
+    ConfigStore store_;
     ConfigPaths paths_;
     Prepare prepare_;
     Apply apply_;
@@ -413,6 +564,10 @@ struct LiveConfig::Impl {
     Directories directories_;
     Source watch_source_{nullptr, wl_event_source_remove};
     Source timer_{nullptr, wl_event_source_remove};
+    Source edit_timer_{nullptr, wl_event_source_remove};
+    std::shared_ptr<WorkLifetime> edit_lifetime_ = std::make_shared<WorkLifetime>();
+    std::deque<PendingEdit> edits_;
+    std::optional<std::string> published_edit_;
     int watch_fd_ = -1;
     int file_watch_ = -1;
     // inotify can coalesce opens and overflow loses records. These counts
@@ -423,12 +578,13 @@ struct LiveConfig::Impl {
     bool ready_ = false;
     bool due_ = false;
     bool loading_ = false;
+    bool writing_edit_ = false;
 };
 
 std::expected<std::unique_ptr<LiveConfig>, std::string>
 LiveConfig::create(wl_event_loop *loop, ConfigStore store, ConfigPaths paths, LoadedConfig startup,
                    Prepare prepare, Apply apply, Changed changed) {
-    const auto budget = reload_reservation + 6 * max_config_bytes;
+    const auto budget = reload_reservation + edit_reservation + 6 * max_config_bytes;
     auto queue =
         WorkQueue::create(loop, {.workers = 1, .max_tasks = 4, .max_retained_bytes = budget});
     if (!queue)
@@ -452,8 +608,12 @@ ConfigSource LiveConfig::source() const noexcept {
     return impl_->source_;
 }
 
-void LiveConfig::set_runtime_night_light(bool enabled) noexcept {
-    impl_->transaction_.set_runtime_night_light(enabled);
+std::uint64_t LiveConfig::revision() const noexcept {
+    return impl_->accepted_generation_;
+}
+
+void LiveConfig::edit(SettingEdit edit, EditCompletion completion) {
+    impl_->edit(std::move(edit), std::move(completion));
 }
 
 void LiveConfig::session_ready() noexcept {

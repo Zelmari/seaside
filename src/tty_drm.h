@@ -1,6 +1,8 @@
 #ifndef SEASIDE_TTY_DRM_H
 #define SEASIDE_TTY_DRM_H
 
+#include "cursor_layout.h"
+
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -94,7 +96,7 @@ void seaside_tty_drm_set_output_callbacks(struct seaside_tty_drm *drm,
  * false for a fatal owner or attachment error. A failing output is disabled
  * individually. Other outputs and the server can keep running. */
 bool seaside_tty_drm_enable_pending(struct seaside_tty_drm *drm, struct wlr_allocator *allocator,
-                                    struct wlr_renderer *renderer);
+                                    struct wlr_renderer *renderer, struct wlr_output *preferred);
 
 /* These handles and the selected mode are borrowed for one loop turn. */
 struct seaside_drm_output_description seaside_tty_drm_describe_output(struct wlr_output *output);
@@ -132,7 +134,8 @@ bool seaside_tty_drm_set_cursor_visible(struct seaside_tty_drm *drm, bool visibl
 bool seaside_tty_drm_set_cursor_shape(struct seaside_tty_drm *drm, const char *shape);
 bool seaside_tty_drm_set_cursor_surface(struct seaside_tty_drm *drm, struct wlr_surface *surface,
                                         int32_t hotspot_x, int32_t hotspot_y);
-bool seaside_tty_drm_move(struct seaside_tty_drm *drm, bool absolute, double x, double y);
+bool seaside_tty_drm_move(struct seaside_tty_drm *drm, enum seaside_pointer_motion kind, double x,
+                          double y);
 bool seaside_tty_drm_change_vt(struct seaside_tty_drm *drm, unsigned vt);
 struct seaside_tty_drm_observation seaside_tty_drm_observation(const struct seaside_tty_drm *drm);
 

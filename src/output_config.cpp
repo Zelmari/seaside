@@ -128,6 +128,7 @@ const OutputConfig::Output *OutputConfig::enabled(wlr_output *handle, bool usabl
     if (output) {
         output->enabled = usable;
         if (usable) {
+            output->disabled_reason.clear();
             seaside_tty_drm_output_status(drm_, handle, &output->status);
         }
     }
@@ -146,14 +147,20 @@ OutputConfig::Output *OutputConfig::connected_output(wlr_output *handle) noexcep
     return nullptr;
 }
 
-std::string_view OutputConfig::ranked_fallback() const noexcept {
-    const Output *best = nullptr;
+wlr_output *OutputConfig::admission_preference(const Config &config) const noexcept {
+    if (!config.monitors.primary) {
+        return nullptr;
+    }
+    wlr_output *preferred = nullptr;
     for (const auto &[id, output] : outputs_) {
-        if (output.enabled && (!best || rank(output) < rank(*best))) {
-            best = &output;
+        if (output.handle && matches(*config.monitors.primary, output.identity, output.connector)) {
+            if (preferred) {
+                return nullptr;
+            }
+            preferred = output.handle;
         }
     }
-    return best ? std::string_view(best->id) : std::string_view{};
+    return preferred;
 }
 
 void OutputConfig::refresh() {
@@ -167,7 +174,7 @@ void OutputConfig::refresh() {
 std::expected<void, Diagnostic> OutputConfig::apply(const Config &config, bool project_geometry) {
     std::vector<LiveOutputIdentity> connected;
     for (const auto &[id, output] : outputs_) {
-        if (output.handle) {
+        if (output.enabled) {
             connected.push_back({output.identity, output.connector});
         }
     }
@@ -177,7 +184,7 @@ std::expected<void, Diagnostic> OutputConfig::apply(const Config &config, bool p
     refresh();
     std::vector<Change> changes;
     for (auto &[id, output] : outputs_) {
-        if (!output.handle) {
+        if (!output.enabled) {
             continue;
         }
         const auto &connector = output.connector;
@@ -214,9 +221,6 @@ std::expected<void, Diagnostic> OutputConfig::apply(const Config &config, bool p
             }
             return failure("monitors.resolution", "Unsupported resolution for " + connector);
         }
-        if (!output.enabled) {
-            continue;
-        }
         if (!seaside_tty_drm_check_settings(output.handle, &next)) {
             return failure("monitors",
                            "Output test rejected mode, scale or rotation for " + connector);
@@ -246,8 +250,8 @@ std::expected<void, Diagnostic> OutputConfig::apply(const Config &config, bool p
     });
     const Output *preferred = configured == changes.end() ? nullptr : configured->output;
     if (!preferred && primary_ && (config.monitors.primary || !configured_primary_)) {
-        // The window manager has already migrated workspaces on removal and
-        // selected a fallback using focus history. Keep that primary stable.
+        // Keep the primary stable across hotplug, including when the only
+        // remaining monitor already took the primary workspace range.
         const auto remembered = primary_->enabled ? std::string_view(primary_->id)
                                                   : desktop_.windows().primary_output();
         const auto previous = std::ranges::find_if(
@@ -325,9 +329,6 @@ std::expected<void, Diagnostic> OutputConfig::apply(const Config &config, bool p
     seaside_tty_drm_reconcile_cursor(drm_);
     primary_ = changes.empty() ? nullptr : changes.front().output;
     configured_primary_ = config.monitors.primary.has_value();
-    if (project_geometry) {
-        set_primary();
-    }
     refresh();
     for (const auto &change : changes) {
         auto &output = *change.output;
@@ -340,6 +341,9 @@ std::expected<void, Diagnostic> OutputConfig::apply(const Config &config, bool p
         if (project_geometry && bounds != desktop_.output_bounds(output.handle)) {
             desktop_.update_output(output.handle, bounds);
         }
+    }
+    if (project_geometry) {
+        set_primary();
     }
     return {};
 }

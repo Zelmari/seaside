@@ -13,7 +13,7 @@ struct wl_event_source;
 
 namespace seaside {
 
-enum class DesktopActionError { no_target, not_found, invalid_state, ambiguous_output };
+enum class DesktopActionError { no_target, not_found, invalid_state };
 
 // Connects the event-loop window policy to the production scene and input seat.
 class Desktop final {
@@ -25,13 +25,11 @@ class Desktop final {
 
     void set_input(seaside_tty_input *input) noexcept;
     void enable_frame_paced_resize() noexcept;
-    bool add_output(wlr_output *output, std::string_view connector, std::string_view identity,
-                    WindowRect bounds, std::string_view id = {}) noexcept;
-    void remove_output(wlr_output *output, std::string_view ranked_fallback = {}) noexcept;
+    bool add_output(wlr_output *output, std::string_view id, WindowRect bounds) noexcept;
+    void remove_output(wlr_output *output) noexcept;
     bool update_output(wlr_output *output, WindowRect bounds) noexcept;
-    void set_primary_output(std::string_view id) noexcept { windows_.set_primary_output(id); }
+    void set_primary_output(std::string_view id) noexcept;
     void apply_config(const Config &config) noexcept;
-    void apply_initial_config(const Config &config) noexcept;
     void on_projection(std::function<void()> notify) { projected_ = std::move(notify); }
     void on_attention(std::function<void(WindowId, WorkspaceId)> notify) {
         attention_ = std::move(notify);
@@ -41,9 +39,9 @@ class Desktop final {
     bool fullscreen_inhibits_idle(wlr_output *output) const noexcept;
     std::optional<WindowId> keyboard_window() const noexcept { return keyboard_window_; }
     bool action(const Action &action, std::uint8_t modifiers = 0) noexcept;
-    std::expected<bool, DesktopActionError>
-    dispatch(const Action &action, std::uint8_t modifiers = 0, std::optional<WindowId> window = {},
-             std::optional<WorkspaceId> workspace = {}) noexcept;
+    std::expected<bool, DesktopActionError> dispatch(const Action &action,
+                                                     std::uint8_t modifiers = 0,
+                                                     std::optional<WindowId> window = {}) noexcept;
     void modifiers_changed(std::uint8_t modifiers) noexcept;
     void finish_focus_cycle() noexcept;
     bool button(WindowId id, std::uint32_t button, bool pressed, std::uint8_t modifiers, double x,
@@ -56,7 +54,7 @@ class Desktop final {
 
   private:
     struct Output {
-        std::string id, connector, identity;
+        std::string id;
         WindowRect work;
     };
     struct PointerPosition {

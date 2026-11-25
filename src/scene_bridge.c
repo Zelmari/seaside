@@ -2213,13 +2213,23 @@ static void project_border(struct scene_view *view, size_t side, struct wlr_box 
     wlr_scene_node_set_enabled(&border->node, true);
 }
 
+static struct wlr_box border_bounds(const struct seaside_scene_window_placement *placement,
+                                    struct seaside_scene_rect clip, int64_t x, int64_t y,
+                                    int64_t width, int64_t height) {
+    if (placement->unclipped_move) {
+        return (struct wlr_box){clamp_coordinate(x), clamp_coordinate(y), clamp_coordinate(width),
+                                clamp_coordinate(height)};
+    }
+    return intersection(clip, x, y, width, height);
+}
+
 static void project_borders(struct scene_view *view) {
     const struct seaside_scene_window_placement *placement = &view->placement;
     const struct seaside_scene_rect clip =
         placement->tiled || has_viewport(placement->clip) ? placement->clip : placement->output;
     const struct seaside_scene_rect box = placement->geometry;
     const int64_t width = placement->border_width;
-    if (width <= 0 || !has_viewport(box) || !has_viewport(clip)) {
+    if (width <= 0 || !has_viewport(box) || (!placement->unclipped_move && !has_viewport(clip))) {
         for (size_t side = 0; side < sizeof(view->borders) / sizeof(view->borders[0]); ++side) {
             project_border(view, side, (struct wlr_box){0});
         }
@@ -2230,10 +2240,10 @@ static void project_borders(struct scene_view *view) {
     const int64_t right = (int64_t)box.x + box.width;
     const int64_t bottom = (int64_t)box.y + box.height;
     const int64_t span = box.width + 2 * width;
-    project_border(view, 0, intersection(clip, left, top, span, width));
-    project_border(view, 1, intersection(clip, left, bottom, span, width));
-    project_border(view, 2, intersection(clip, left, box.y, width, box.height));
-    project_border(view, 3, intersection(clip, right, box.y, width, box.height));
+    project_border(view, 0, border_bounds(placement, clip, left, top, span, width));
+    project_border(view, 1, border_bounds(placement, clip, left, bottom, span, width));
+    project_border(view, 2, border_bounds(placement, clip, left, box.y, width, box.height));
+    project_border(view, 3, border_bounds(placement, clip, right, box.y, width, box.height));
 }
 
 void seaside_scene_place_window(struct seaside_scene_bridge *scene, uint64_t id,

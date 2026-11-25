@@ -105,6 +105,7 @@ struct seaside_scene_window_placement {
     bool fit_resize_buffer;
     bool unconstrained_restore;
     bool interactive_resize;
+    bool unclipped_move;
 };
 
 struct seaside_scene_target {

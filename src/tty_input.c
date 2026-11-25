@@ -645,6 +645,8 @@ static void move_pointer(struct seaside_tty_input *input, uint32_t time_msec, bo
     if (!isfinite(x) || !isfinite(y) || pointer_locked(input)) {
         return;
     }
+    enum seaside_pointer_motion kind =
+        absolute ? SEASIDE_POINTER_ABSOLUTE : SEASIDE_POINTER_RELATIVE;
     if (input->constraint) {
         struct seaside_tty_pointer_target origin = {.surface = input->constraint->surface};
         if (!input->callbacks.pointer_target(input->data, &origin) ||
@@ -661,13 +663,13 @@ static void move_pointer(struct seaside_tty_input *input, uint32_t time_msec, bo
                                     origin.sx + dx, origin.sy + dy, &x, &y)) {
                 return;
             }
-            absolute = false;
+            kind = SEASIDE_POINTER_CONFINED;
             x -= origin.sx;
             y -= origin.sy;
         }
     }
     if (input->callbacks.motion) {
-        input->callbacks.motion(input->data, absolute, x, y);
+        input->callbacks.motion(input->data, kind, x, y);
     }
     update_pointer_target(input, time_msec);
 }

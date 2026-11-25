@@ -11,10 +11,10 @@ struct seaside_cursor_point {
     double x, y;
 };
 
-struct seaside_cursor_gap {
-    struct seaside_cursor_point point;
-    double crossing, gap;
-    bool found;
+enum seaside_pointer_motion {
+    SEASIDE_POINTER_RELATIVE,
+    SEASIDE_POINTER_ABSOLUTE,
+    SEASIDE_POINTER_CONFINED,
 };
 
 #ifdef __cplusplus
@@ -25,14 +25,12 @@ bool seaside_cursor_contains(struct seaside_cursor_box box, struct seaside_curso
 struct seaside_cursor_point seaside_cursor_clamp(struct seaside_cursor_box box,
                                                  struct seaside_cursor_point point);
 
-/* Consider one destination for relative motion beyond an output edge. The
- * caller preserves any target already inside an output before using the
- * accumulated gap result. Geometry uses logical pixels. */
-void seaside_cursor_consider_gap(struct seaside_cursor_box current,
-                                 struct seaside_cursor_box destination,
-                                 struct seaside_cursor_point origin,
-                                 struct seaside_cursor_point requested,
-                                 struct seaside_cursor_gap *best);
+/* Map the full logical height of a side-by-side pair. A NULL destination
+ * represents one active output. All coordinates use logical pixels. */
+struct seaside_cursor_point
+seaside_cursor_route_relative(struct seaside_cursor_box current, struct seaside_cursor_point origin,
+                              struct seaside_cursor_point requested,
+                              const struct seaside_cursor_box *destination);
 
 #ifdef __cplusplus
 }

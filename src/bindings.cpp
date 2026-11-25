@@ -1,4 +1,5 @@
 #include "bindings.hpp"
+#include "state.hpp"
 
 #include <algorithm>
 #include <array>
@@ -24,7 +25,6 @@ constexpr std::array actions{
     ActionName{"swap_window", ActionKind::swap_window},
     ActionName{"workspace", ActionKind::workspace},
     ActionName{"move_to_workspace", ActionKind::move_to_workspace},
-    ActionName{"transfer_workspace", ActionKind::transfer_workspace},
     ActionName{"toggle_window_pin", ActionKind::toggle_window_pin},
     ActionName{"toggle_window_maximize", ActionKind::toggle_window_maximize},
     ActionName{"toggle_window_fullscreen", ActionKind::toggle_window_fullscreen},
@@ -203,23 +203,10 @@ std::expected<Action, Diagnostic> parse_action(std::string_view value, const Cho
     case ActionKind::move_to_workspace: {
         if (tokens.size() != 2)
             break;
-        auto number = positive(tokens[1], std::numeric_limits<std::int32_t>::max());
+        auto number = positive(tokens[1], workspace_count);
         if (!number)
-            return std::unexpected(error("keybinds", "Workspace ID is outside 1..2147483647"));
+            return std::unexpected(error("keybinds", "Workspace ID is outside 1..10"));
         result.argument = *number;
-        return result;
-    }
-    case ActionKind::transfer_workspace: {
-        auto position = value.find(command) + command.size();
-        while (position < value.size() && whitespace(value[position]))
-            ++position;
-        // An opaque selector may contain spaces. Its whole suffix is one
-        // argument; do not impose a whitespace-free identity format here.
-        auto suffix = value.substr(position);
-        auto selector = parse_output_selector(suffix);
-        if (!selector)
-            return std::unexpected(selector.error());
-        result.text = suffix;
         return result;
     }
     case ActionKind::night_light:
@@ -318,6 +305,10 @@ BindingMap default_bindings() {
         std::pair{"Super+Right", "focus right"},
         std::pair{"Super+Up", "focus up"},
         std::pair{"Super+Down", "focus down"},
+        std::pair{"Super+Shift+Left", "move_window left"},
+        std::pair{"Super+Shift+Right", "move_window right"},
+        std::pair{"Super+Shift+Up", "move_window up"},
+        std::pair{"Super+Shift+Down", "move_window down"},
         std::pair{"Alt+Tab", "cycle_focus_mru"},
         std::pair{"Super+MouseLeftDrag", "move_window"},
         std::pair{"Super+MouseRightDrag", "resize_window"},

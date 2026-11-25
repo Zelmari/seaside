@@ -59,10 +59,8 @@ TEST_F(BindingsTest, EveryApprovedKeyboardActionParsesWithItsArguments) {
                         "resize_window up",
                         "resize_window down 1",
                         "workspace 1",
-                        "workspace 2147483647",
+                        "workspace 10",
                         "move_to_workspace 3",
-                        "transfer_workspace connector:DP-1",
-                        "transfer_workspace identity:serial",
                         "toggle_window_pin",
                         "toggle_window_maximize",
                         "toggle_window_fullscreen",
@@ -78,7 +76,7 @@ TEST_F(BindingsTest, EveryApprovedKeyboardActionParsesWithItsArguments) {
         EXPECT_EQ(seaside::parse_action(seaside::format_action(*parsed), chord), parsed);
     }
     EXPECT_EQ(seaside::parse_action("resize_window left", chord).value().argument, 32);
-    EXPECT_EQ(seaside::parse_action("workspace 2147483647", chord).value().argument, 2147483647);
+    EXPECT_EQ(seaside::parse_action("workspace 10", chord).value().argument, 10);
     EXPECT_EQ(seaside::parse_action("night_light off", chord).value().night_light,
               seaside::NightLightAction::off);
 }
@@ -101,6 +99,8 @@ TEST_F(BindingsTest, ArityDirectionsAndIntegerOverflowAreRejected) {
                         "resize_window left 2 extra",
                         "workspace",
                         "workspace 0",
+                        "workspace 11",
+                        "move_to_workspace 11",
                         "workspace -1",
                         "workspace 2147483648",
                         "workspace 999999999999999999999999999999",
@@ -127,7 +127,6 @@ TEST_F(BindingsTest, TypedActionResultsRetainTheirSpecificKindsAndArguments) {
         std::pair{"swap_window up", K::swap_window},
         std::pair{"workspace 7", K::workspace},
         std::pair{"move_to_workspace 8", K::move_to_workspace},
-        std::pair{"transfer_workspace identity:serial", K::transfer_workspace},
         std::pair{"toggle_window_pin", K::toggle_window_pin},
         std::pair{"toggle_window_maximize", K::toggle_window_maximize},
         std::pair{"toggle_window_fullscreen", K::toggle_window_fullscreen},
@@ -161,8 +160,6 @@ TEST_F(BindingsTest, TypedActionResultsRetainTheirSpecificKindsAndArguments) {
     EXPECT_EQ(resize->argument, 99);
     EXPECT_EQ(seaside::parse_action("workspace 7", chord).value().argument, 7);
     EXPECT_EQ(seaside::parse_action("move_to_workspace 8", chord).value().argument, 8);
-    EXPECT_EQ(seaside::parse_action("transfer_workspace identity:serial", chord).value().text,
-              "identity:serial");
     EXPECT_EQ(seaside::parse_action("night_light on", chord).value().night_light,
               seaside::NightLightAction::on);
     EXPECT_EQ(seaside::parse_action("night_light off", chord).value().night_light,
@@ -231,24 +228,14 @@ TEST_F(BindingsTest, SelectorsUseExactPrefixesAndOpaqueValues) {
     }
 }
 
-TEST_F(BindingsTest, TransferWorkspacePreservesTheWholeOpaqueSelectorSuffix) {
-    auto chord = seaside::parse_chord("A").value();
-    for (auto selector : {"identity:Model A", "identity: Model A  ", "connector:Display Name"}) {
-        SCOPED_TRACE(selector);
-        auto parsed = seaside::parse_action(std::string("transfer_workspace ") + selector, chord);
-        ASSERT_TRUE(parsed);
-        EXPECT_EQ(parsed->kind, seaside::ActionKind::transfer_workspace);
-        EXPECT_EQ(parsed->text, selector);
-    }
-    for (auto suffix : {"", "   ", "identity:", "invalid:Model A", "Model A"}) {
-        SCOPED_TRACE(suffix);
-        EXPECT_FALSE(seaside::parse_action(std::string("transfer_workspace ") + suffix, chord));
-    }
+TEST_F(BindingsTest, RetiredWorkspaceTransferIsRejected) {
+    const auto chord = seaside::parse_chord("A").value();
+    EXPECT_FALSE(seaside::parse_action("transfer_workspace identity:Model A", chord));
 }
 
 TEST_F(BindingsTest, DefaultsHaveOnlyTheApprovedBindings) {
     auto map = seaside::default_bindings();
-    ASSERT_EQ(map.size(), 38U);
+    ASSERT_EQ(map.size(), 42U);
     EXPECT_EQ(map.at(seaside::parse_chord("Super+Return").value()).text, "foot");
     const auto &launcher = map.at(seaside::parse_chord("Super+Space").value());
     EXPECT_EQ(launcher.kind, seaside::ActionKind::exec);
@@ -265,6 +252,15 @@ TEST_F(BindingsTest, DefaultsHaveOnlyTheApprovedBindings) {
               seaside::ActionKind::toggle_window_pin);
     EXPECT_EQ(map.at(seaside::parse_chord("Super+Shift+E").value()).kind,
               seaside::ActionKind::exit);
+    for (const auto &[key, direction] : {std::pair{"Left", seaside::Direction::left},
+                                         {"Right", seaside::Direction::right},
+                                         {"Up", seaside::Direction::up},
+                                         {"Down", seaside::Direction::down}}) {
+        const auto chord = seaside::parse_chord(std::string("Super+Shift+") + key).value();
+        const auto &move = map.at(chord);
+        EXPECT_EQ(move.kind, seaside::ActionKind::move_window);
+        EXPECT_EQ(move.direction, direction);
+    }
     for (int workspace = 1; workspace <= 10; ++workspace) {
         const auto digit = std::to_string(workspace % 10);
         const auto &select = map.at(seaside::parse_chord("Super+" + digit).value());

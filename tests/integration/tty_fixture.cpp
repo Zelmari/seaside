@@ -54,10 +54,10 @@ struct Fixture {
     bool terminal_mapped = false;
     bool terminal_exited = false;
 
-    static void move_pointer(void *data, bool absolute, double x, double y) noexcept {
+    static void move_pointer(void *data, seaside_pointer_motion kind, double x, double y) noexcept {
         auto &fixture = *static_cast<Fixture *>(data);
         if (!fixture.stopping) {
-            seaside_tty_drm_move(fixture.drm, absolute, x, y);
+            seaside_tty_drm_move(fixture.drm, kind, x, y);
         }
     }
 

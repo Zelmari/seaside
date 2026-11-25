@@ -312,9 +312,10 @@ def run_night_light(session, state, output):
     else:
         require(on["applied"] is False and on["reason"], "The guest failed to report its night light limit")
 
-    session.edit("[night_light]\ntemperature_kelvin = 5000\n")
+    require(session.ctl("settings", "set", "night_light.temperature_kelvin", "5000")["accepted"],
+            "Night light temperature edit was not accepted")
     session.wait(lambda: status()["temperature_kelvin"] == 5000, "live night light temperature")
-    require(status()["enabled"], "A temperature-only reload lost the runtime night light override")
+    require(status()["enabled"], "A temperature-only edit lost the persisted night light preference")
     size = session.grab(output, "night-light-5000K")
     require(size == (output["mode"]["width"], output["mode"]["height"]),
             f"Unexpected output capture after temperature change: {size}")

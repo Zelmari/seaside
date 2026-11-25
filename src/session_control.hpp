@@ -12,7 +12,6 @@ class Trace;
 struct IpcAction {
     Action action;
     std::optional<WindowId> window;
-    std::optional<WorkspaceId> workspace;
 };
 
 IpcAction decode_ipc_action(std::string_view method, const IpcJson &params);
@@ -54,12 +53,15 @@ class SessionControl {
         float scale;
         bool connected;
         bool enabled;
+        bool primary;
+        bool sleeping;
         bool adaptive_sync;
 
         bool operator==(const OutputState &) const = default;
     };
     struct PublishedOutput {
         std::string connector;
+        std::string disabled_reason;
         OutputState state{};
     };
 

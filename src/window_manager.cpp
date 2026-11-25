@@ -2,12 +2,13 @@
 
 #include <algorithm>
 #include <limits>
+#include <new>
 #include <tuple>
+#include <utility>
 
 namespace seaside {
 namespace {
 
-constexpr WorkspaceId max_workspace_id = 2147483647U;
 constexpr auto fullscreen_priority = std::uint64_t{1} << 63;
 constexpr auto maximized_focus_priority = std::uint64_t{1} << 62;
 constexpr auto floating_priority = std::uint64_t{1} << 61;
@@ -53,29 +54,30 @@ int fit_position(std::int64_t position, int extent, int available) noexcept {
     return static_cast<int>(std::clamp<std::int64_t>(position, 0, std::max(0, available - extent)));
 }
 
+int fit_edge_position(std::int64_t position, int extent, int available) noexcept {
+    constexpr int minimum_visible = 32;
+    const int reachable = std::min({extent, available, minimum_visible});
+    return static_cast<int>(
+        std::clamp<std::int64_t>(position, reachable - extent, available - reachable));
+}
+
 } // namespace
 
-WindowManager::WindowManager(WorkspaceMode mode, bool tiling) noexcept
-    : mode_(mode), tiling_(tiling) {}
+WindowManager::WindowManager(bool tiling) : tiling_(tiling) {
+    for (WorkspaceId id = 1; id <= workspace_count; ++id) {
+        if (!state_.add_workspace(id)) {
+            throw std::bad_alloc{};
+        }
+        workspaces_.try_emplace(id);
+    }
+}
 
-WindowManager::WindowManager(const Config &config) noexcept
-    : mode_(config.workspaces.mode), tiling_(config.window.tiling),
-      layout_settings_(layout_settings(config)) {}
-
-bool WindowManager::create_workspace(WorkspaceId id) {
-    if (id == 0 || id > max_workspace_id) {
-        return false;
+WindowManager::WindowManager(const Config &config) : WindowManager(config.window.tiling) {
+    allow_edge_drag_ = config.window.allow_edge_drag;
+    layout_settings_ = layout_settings(config);
+    for (auto &[id, workspace] : workspaces_) {
+        workspace.layout.set_settings(layout_settings_);
     }
-    auto [workspace, inserted] = workspaces_.try_emplace(id);
-    if (!inserted) {
-        return true;
-    }
-    if (!state_.add_workspace(id)) {
-        workspaces_.erase(workspace);
-        return false;
-    }
-    workspace->second.layout.set_settings(layout_settings_);
-    return true;
 }
 
 WorkspaceLayout &WindowManager::layout_for(WindowId id) {
@@ -132,7 +134,7 @@ void WindowManager::attach_tile(WindowId id) {
 
 void WindowManager::remove_tile(WindowId id) {
     if (tile_move_ && tile_move_->tile.id == id) {
-        cancel_tile_move();
+        cancel_active_move();
     }
     const bool removed = layout_for(id).erase(id).has_value();
     if (tile_move_ && tile_move_->workspace == state_.window(id)->home_workspace) {
@@ -169,54 +171,71 @@ void WindowManager::reveal(WindowId id, std::optional<Direction> direction) {
     }
 }
 
-std::optional<WorkspaceId> WindowManager::fresh_workspace() {
-    WorkspaceId id = 1;
-    for (const auto &[used, workspace] : workspaces_) {
-        if (used != id) {
-            break;
-        }
-        if (id == max_workspace_id) {
-            return {};
-        }
-        ++id;
-    }
-    return create_workspace(id) ? std::optional{id} : std::nullopt;
-}
-
 bool WindowManager::show_workspace(std::string_view output, WorkspaceId workspace) {
     if (!state_.show_workspace(output, workspace)) {
         return false;
     }
     workspaces_.at(workspace).last_shown = ++sequence_;
-    outputs_.find(output)->second.last_workspace = workspace;
     update_layout_area(workspace);
     return true;
 }
 
-bool WindowManager::show_fallback(std::string_view output) {
-    std::optional<WorkspaceId> candidate;
-    std::uint64_t last_shown = 0;
-    for (const auto &[id, workspace] : workspaces_) {
-        if (workspace_output(id) == output && (!candidate || workspace.last_shown > last_shown)) {
-            candidate = id;
-            last_shown = workspace.last_shown;
-        }
+bool WindowManager::reconcile_workspaces(WorkspaceId previous_workspace) {
+    if (!primary_output_) {
+        disconnected_workspace_ = previous_workspace;
+        focused_output_.reset();
+        restore_focus();
+        return true;
     }
-    if (!candidate) {
-        candidate = fresh_workspace();
-        if (!candidate || !state_.assign_workspace(*candidate, output)) {
+    const auto primary = *primary_output_;
+    const auto secondary = std::ranges::find_if(outputs_, [primary](const auto &output) {
+        return output.second.connected && output.first != primary;
+    });
+    const bool split = secondary != outputs_.end();
+    for (const auto &[id, workspace] : workspaces_) {
+        const std::string_view owner =
+            split && id > primary_workspace_count ? std::string_view(secondary->first) : primary;
+        if (!state_.assign_workspace(id, owner)) {
             return false;
         }
     }
-    return show_workspace(output, *candidate);
+
+    const auto show = [&](std::string_view output, WorkspaceId first, WorkspaceId last) {
+        if (previous_workspace >= first && previous_workspace <= last) {
+            return show_workspace(output, previous_workspace);
+        }
+        // The workspace range keeps its own history while a single output
+        // can switch freely between the two ranges.
+        auto recent = first;
+        for (auto id = first + 1; id <= last; ++id) {
+            if (workspaces_.at(id).last_shown > workspaces_.at(recent).last_shown) {
+                recent = id;
+            }
+        }
+        return show_workspace(output, recent);
+    };
+    if (!show(primary, 1, split ? primary_workspace_count : workspace_count) ||
+        (split && !show(secondary->first, primary_workspace_count + 1, workspace_count))) {
+        return false;
+    }
+    for (auto &[id, window] : windows_) {
+        if (state_.window(id)->mapped) {
+            position_window(id, window);
+        }
+    }
+    update_layout_areas();
+    const auto owner = workspace_output(previous_workspace);
+    return owner && focus_on_output(*owner, true);
 }
 
 bool WindowManager::add_output(std::string_view id, WindowRect bounds, WindowRect usable,
                                bool primary) {
-    if (!valid_area(bounds, usable) || id.empty()) {
+    if (!valid_area(bounds, usable) || id.empty() || state_.output_count() >= 2) {
         return false;
     }
-    cancel_tile_move();
+    const auto previous_workspace = focused_workspace().value_or(disconnected_workspace_);
+    cancel_active_move();
+    finish_focus_cycle();
     auto [position, inserted] = outputs_.try_emplace(OutputId{id});
     auto &[name, output] = *position;
     if (output.connected || !state_.add_output(name)) {
@@ -228,115 +247,36 @@ bool WindowManager::add_output(std::string_view id, WindowRect bounds, WindowRec
     output.bounds = bounds;
     output.usable = usable;
     output.connected = true;
-    std::optional<WorkspaceId> restored;
-    for (auto &[workspace_id, workspace] : workspaces_) {
-        const auto &owner = state_.workspace(workspace_id)->owner_or_last_output;
-        if (workspace.migration && workspace.migration->origin == name) {
-            if (!state_.assign_workspace(workspace_id, name)) {
-                return false;
-            }
-            if (workspace.migration->was_shown) {
-                restored = workspace_id;
-            }
-            workspace.migration.reset();
-        } else if (!owner) {
-            if (!state_.assign_workspace(workspace_id, name)) {
-                return false;
-            }
-        } else if (!workspace_output(workspace_id)) {
-            // A different output may be the first to return from zero outputs.
-            // Make disconnected workspaces usable while retaining their origin.
-            if (!workspace.migration) {
-                const auto &previous = outputs_.at(*owner);
-                workspace.migration = Migration{*owner, previous.last_workspace == workspace_id};
-            }
-            if (!state_.assign_workspace(workspace_id, name)) {
-                return false;
-            }
-        }
-    }
-
-    const auto preferred = restored ? restored : output.last_workspace;
-    if (preferred && workspace_output(*preferred) == name) {
-        if (!show_workspace(name, *preferred)) {
-            return false;
-        }
-    } else if (!show_fallback(name)) {
-        return false;
-    }
-
-    // Restoring a formerly migrated visible workspace can leave the remaining
-    // output with nothing shown. Select that output's own most recent fallback.
-    for (const auto &[other, entry] : outputs_) {
-        if (entry.connected && !state_.output(other)->shown && !show_fallback(other)) {
-            return false;
-        }
-    }
-    for (auto &[window_id, window] : windows_) {
-        if (state_.window(window_id)->mapped) {
-            position_window(window_id, window);
-        }
-    }
-    update_layout_areas();
     if (!primary_output_ || primary) {
         primary_output_ = name;
     }
-    if (!focused_output_ || primary) {
-        return focus_on_output(name);
-    }
-    restore_focus();
-    return true;
+    return reconcile_workspaces(previous_workspace);
 }
 
-bool WindowManager::remove_output(std::string_view id, std::string_view ranked_fallback) {
+bool WindowManager::remove_output(std::string_view id) {
     auto position = outputs_.find(id);
     if (position == outputs_.end() || !position->second.connected) {
         return false;
     }
-    cancel_tile_move();
+    const auto previous_workspace = focused_workspace().value_or(disconnected_workspace_);
+    cancel_active_move();
     finish_focus_cycle();
     auto &[name, output] = *position;
-    const auto shown = state_.output(name)->shown;
     if (!state_.remove_output(name)) {
         return false;
     }
     output.connected = false;
-    std::optional<std::string_view> fallback;
-    if (primary_output_ && primary_output_ != name) {
-        fallback = primary_output_;
-    } else {
-        std::uint64_t last_focused = 0;
-        for (const auto &[other, entry] : outputs_) {
-            if (entry.connected && (!fallback || entry.last_focused > last_focused ||
-                                    (!last_focused && other == ranked_fallback))) {
-                fallback = other;
-                last_focused = entry.last_focused;
-            }
-        }
-        primary_output_ = fallback;
+    if (primary_output_ == name) {
+        const auto remaining = std::ranges::find_if(
+            outputs_, [](const auto &record) { return record.second.connected; });
+        primary_output_ = remaining == outputs_.end()
+                              ? std::nullopt
+                              : std::optional(std::string_view(remaining->first));
     }
-
-    if (fallback) {
-        for (auto &[workspace_id, workspace] : workspaces_) {
-            if (state_.workspace(workspace_id)->owner_or_last_output == name) {
-                if (!workspace.migration) {
-                    workspace.migration = Migration{name, shown == workspace_id};
-                }
-                if (!state_.assign_workspace(workspace_id, *fallback)) {
-                    return false;
-                }
-            }
-        }
-    }
-    update_layout_areas();
     if (focused_output_ == name) {
         focused_output_.reset();
-        if (fallback) {
-            return focus_on_output(*fallback);
-        }
     }
-    restore_focus();
-    return true;
+    return reconcile_workspaces(previous_workspace);
 }
 
 bool WindowManager::update_output(std::string_view id, WindowRect bounds, WindowRect usable) {
@@ -344,7 +284,7 @@ bool WindowManager::update_output(std::string_view id, WindowRect bounds, Window
     if (found == outputs_.end() || !found->second.connected || !valid_area(bounds, usable)) {
         return false;
     }
-    cancel_tile_move();
+    cancel_active_move();
     found->second.bounds = bounds;
     found->second.usable = usable;
     update_layout_areas();
@@ -381,27 +321,25 @@ bool WindowManager::focus_on_output(std::string_view id, bool restore_workspace_
     }
     const auto previous = focused_output_;
     if (previous != id) {
-        cancel_tile_move();
+        cancel_active_move();
     }
     focused_output_ = found->first;
-    found->second.last_focused = ++sequence_;
     if (previous != focused_output_ || restore_workspace_focus) {
         restore_focus();
     }
     return true;
 }
 
-void WindowManager::set_primary_output(std::string_view id) noexcept {
+bool WindowManager::set_primary_output(std::string_view id) {
     const auto found = outputs_.find(id);
-    if (found != outputs_.end() && found->second.connected) {
-        primary_output_ = found->first;
+    if (found == outputs_.end() || !found->second.connected || primary_output_ == id) {
+        return false;
     }
-}
-
-void WindowManager::set_initial_workspace_mode(WorkspaceMode mode) noexcept {
-    if (outputs_.empty() && workspaces_.empty() && windows_.empty()) {
-        mode_ = mode;
-    }
+    const auto previous_workspace = focused_workspace().value_or(disconnected_workspace_);
+    cancel_active_move();
+    finish_focus_cycle();
+    primary_output_ = found->first;
+    return reconcile_workspaces(previous_workspace);
 }
 
 bool WindowManager::has_fullscreen(std::string_view id) const {
@@ -442,10 +380,6 @@ std::optional<std::string_view> WindowManager::window_output(WindowId id) const 
 }
 
 std::optional<std::string_view> WindowManager::workspace_owner(WorkspaceId id) const noexcept {
-    const auto entry = workspaces_.find(id);
-    if (entry != workspaces_.end() && entry->second.migration) {
-        return entry->second.migration->origin;
-    }
     const auto *workspace = state_.workspace(id);
     if (workspace && workspace->owner_or_last_output) {
         return *workspace->owner_or_last_output;
@@ -454,75 +388,27 @@ std::optional<std::string_view> WindowManager::workspace_owner(WorkspaceId id) c
 }
 
 bool WindowManager::select_workspace(WorkspaceId id) {
-    if (!focused_output_) {
+    const auto output = workspace_output(id);
+    if (!output) {
         return false;
     }
     if (focused_workspace() != id) {
-        cancel_tile_move();
+        cancel_active_move();
     }
     finish_focus_cycle();
-    if (!create_workspace(id)) {
-        return false;
-    }
-    auto output = workspace_output(id);
-    if (!output) {
-        output = focused_output_;
-        if (!state_.assign_workspace(id, *output)) {
-            return false;
-        }
-    }
     return show_workspace(*output, id) && focus_on_output(*output, true);
 }
 
-bool WindowManager::transfer_workspace(std::string_view destination,
-                                       std::optional<WorkspaceId> target) {
-    const auto workspace = target ? target : focused_workspace();
-    const auto record = workspace ? workspaces_.find(*workspace) : workspaces_.end();
-    const auto source = workspace ? workspace_output(*workspace) : std::nullopt;
-    const bool moves_output = source != destination;
-    // A transfer to the current fallback can make a temporary assignment permanent.
-    if (record == workspaces_.end() || (!moves_output && !record->second.migration) ||
-        !state_.output(destination)) {
-        return false;
-    }
-    const auto *source_state = source ? state_.output(*source) : nullptr;
-    const bool replace_source = moves_output && source_state && source_state->shown == workspace;
-    cancel_tile_move();
-    finish_focus_cycle();
-    if ((moves_output && !state_.assign_workspace(*workspace, destination)) ||
-        !show_workspace(destination, *workspace) || (replace_source && !show_fallback(*source))) {
-        return false;
-    }
-    record->second.migration.reset();
-    return focus_on_output(destination, true);
-}
-
 std::optional<WindowId> WindowManager::create_window(std::optional<WindowId> parent) {
-    std::optional<WorkspaceId> home;
+    auto home = focused_workspace().value_or(disconnected_workspace_);
     if (parent) {
         const auto *parent_state = state_.window(*parent);
         if (!parent_state) {
             return {};
         }
         home = parent_state->home_workspace;
-    } else {
-        home = focused_workspace();
     }
-    if (!home) {
-        // Clients may connect while no output is usable. Reuse the last
-        // workspace when available, and keep it owned by its remembered output.
-        if (workspaces_.empty()) {
-            home = fresh_workspace();
-        } else {
-            const auto latest = std::ranges::max_element(
-                workspaces_, {}, [](const auto &entry) { return entry.second.last_shown; });
-            home = latest->first;
-        }
-    }
-    if (!home) {
-        return {};
-    }
-    auto id = state_.create_window(*home);
+    auto id = state_.create_window(home);
     if (!id) {
         return {};
     }
@@ -605,9 +491,7 @@ bool WindowManager::unmap_window(WindowId id) {
     if (!entry || !entry->mapped) {
         return false;
     }
-    if (tile_move_ && tile_move_->tile.id == id) {
-        cancel_tile_move();
-    }
+    cancel_move(id);
     const auto workspace = entry->home_workspace;
     const auto preferred = focused_window_ == id ? layout_for(id).close_focus(id) : std::nullopt;
     if (!state_.unmap_window(id)) {
@@ -633,9 +517,7 @@ bool WindowManager::destroy_window(WindowId id) {
     if (!entry) {
         return false;
     }
-    if (tile_move_ && tile_move_->tile.id == id) {
-        cancel_tile_move();
-    }
+    cancel_move(id);
     const auto workspace = entry->home_workspace;
     const auto preferred = focused_window_ == id ? layout_for(id).close_focus(id) : std::nullopt;
     const auto parent = windows_.at(id).parent;
@@ -668,9 +550,9 @@ bool WindowManager::is_descendant(WindowId id, WindowId ancestor) const {
     return false;
 }
 
-bool WindowManager::relocate_window(WindowId id, WorkspaceId workspace) {
+bool WindowManager::relocate_window(WindowId id, WorkspaceId workspace, WorkspaceLayout *prepared) {
     if (state_.window(id)->home_workspace != workspace) {
-        cancel_tile_move();
+        cancel_active_move();
     }
     for (const auto &[member, window] : windows_) {
         if (member != id && !is_descendant(member, id)) {
@@ -683,8 +565,13 @@ bool WindowManager::relocate_window(WindowId id, WorkspaceId workspace) {
         if (old != workspace) {
             workspaces_.at(old).layout.erase(member);
             forget_focus(member);
-            attach_tile(member);
+            if (member != id || !prepared) {
+                attach_tile(member);
+            }
         }
+    }
+    if (prepared) {
+        workspaces_.at(workspace).layout = std::move(*prepared);
     }
     return true;
 }
@@ -699,9 +586,7 @@ bool WindowManager::set_parent(WindowId id, std::optional<WindowId> parent) {
     if (window.parent == parent) {
         return true;
     }
-    if (tile_move_ && tile_move_->tile.id == id) {
-        cancel_tile_move();
-    }
+    cancel_move(id);
     if (!parent && window.parent) {
         if (const auto output = window_output(id)) {
             const auto current = geometry(id, window);
@@ -796,6 +681,9 @@ WindowRect WindowManager::geometry(WindowId id, const Window &window) const {
     if (tile_move_ && tile_move_->tile.id == id) {
         return tile_move_->geometry;
     }
+    if (floating_move_ && floating_move_->id == id) {
+        return floating_move_->geometry;
+    }
     const auto &layout = workspaces_.at(state_.window(id)->home_workspace).layout;
     if (const auto tile = layout.geometry(id)) {
         return *tile;
@@ -818,14 +706,15 @@ WindowRect WindowManager::geometry(WindowId id, const Window &window) const {
         y = std::int64_t{anchor.y} - usable.y + (anchor.height - ordinary.height) / 2 +
             window.dialog_dy;
     }
-    if (has_tile_ancestor(id) && layout_settings_.kind == Layout::scrolling) {
+    if (window.parent && (unclipped_move(id) ||
+                          (layout_settings_.kind == Layout::scrolling && has_tile_ancestor(id)))) {
         ordinary.x = coordinate(std::int64_t{usable.x} + x);
         ordinary.y = coordinate(std::int64_t{usable.y} + y);
         return ordinary;
     }
-    ordinary.x = coordinate(std::int64_t{usable.x} + fit_position(x, ordinary.width, usable.width));
-    ordinary.y =
-        coordinate(std::int64_t{usable.y} + fit_position(y, ordinary.height, usable.height));
+    const auto fit = window.edge_positioned ? fit_edge_position : fit_position;
+    ordinary.x = coordinate(std::int64_t{usable.x} + fit(x, ordinary.width, usable.width));
+    ordinary.y = coordinate(std::int64_t{usable.y} + fit(y, ordinary.height, usable.height));
     return ordinary;
 }
 
@@ -924,6 +813,14 @@ bool WindowManager::has_tile_ancestor(WindowId id) const {
     return false;
 }
 
+bool WindowManager::unclipped_move(WindowId id) const {
+    if (!allow_edge_drag_ || (!tile_move_ && !floating_move_)) {
+        return false;
+    }
+    const auto root = tile_move_ ? tile_move_->tile.id : floating_move_->id;
+    return id == root || is_descendant(id, root);
+}
+
 WindowView WindowManager::view(WindowId id) const {
     auto found = windows_.find(id);
     if (found == windows_.end()) {
@@ -935,7 +832,9 @@ WindowView WindowManager::view(WindowId id) const {
     const bool moving = tile_move_ && tile_move_->tile.id == id;
     const bool ordinary = !window.maximized && !window.fullscreen;
     const bool tile_layout = ordinary && layout.contains(id);
-    const bool clipped = ordinary && (tile_layout || moving || has_tile_ancestor(id));
+    const bool preview = ordinary && unclipped_move(id);
+    const bool clipped = ordinary && !preview && (tile_layout || moving || has_tile_ancestor(id));
+    auto clip = clipped ? layout.viewport() : WindowRect{};
     int border = 0;
     if (moving) {
         border = tile_move_->border_width;
@@ -943,10 +842,15 @@ WindowView WindowManager::view(WindowId id) const {
         border = tile_layout ? layout.border_width(id) : layout_settings_.border_width;
     }
     auto stacking = moving ? tile_move_->stacking : window.stacking;
-    if (ordinary && !is_tiled(id, window)) {
+    if (preview) {
+        stacking |= fullscreen_priority | floating_priority;
+    } else if (ordinary && !is_tiled(id, window)) {
         stacking |= floating_priority;
     }
     if (const auto output = window_output(id)) {
+        if (ordinary && !preview && window.edge_positioned && !tile_layout) {
+            clip = outputs_.find(*output)->second.bounds;
+        }
         if (window.fullscreen || window.parent) {
             if (const auto fullscreen = fullscreen_on(*output);
                 fullscreen && (*fullscreen == id || is_descendant(id, *fullscreen))) {
@@ -981,9 +885,10 @@ WindowView WindowManager::view(WindowId id) const {
         .pinned = window.pinned,
         .tiled = is_tiled(id, window),
         .tile_layout = tile_layout,
-        .clip = clipped ? layout.viewport() : WindowRect{},
+        .clip = clip,
         .border_width = border,
         .stacking = stacking,
+        .unclipped_move = preview,
     };
 }
 
@@ -1265,7 +1170,7 @@ bool WindowManager::toggle_pin(WindowId id) {
     if (found == windows_.end() || !state_.window(id)->mapped || found->second.parent) {
         return false;
     }
-    cancel_tile_move();
+    cancel_active_move();
     finish_focus_cycle();
     if (found->second.pinned) {
         const auto output = window_output(id);
@@ -1294,7 +1199,7 @@ bool WindowManager::toggle_tiling(WindowId id) {
         found->second.pinned || found->second.fullscreen || found->second.maximized) {
         return false;
     }
-    cancel_tile_move();
+    cancel_active_move();
     finish_focus_cycle();
     const bool enabled = !is_tiled(id, found->second);
     if (!state_.set_tiling_override(id, enabled)) {
@@ -1313,13 +1218,22 @@ bool WindowManager::toggle_tiling(WindowId id) {
 }
 
 void WindowManager::apply_layout_config(const Config &config) {
+    if (allow_edge_drag_ != config.window.allow_edge_drag) {
+        cancel_active_move();
+        allow_edge_drag_ = config.window.allow_edge_drag;
+        if (!allow_edge_drag_) {
+            for (auto &[id, window] : windows_) {
+                window.edge_positioned = false;
+            }
+        }
+    }
     const auto settings = layout_settings(config);
     const bool rebuild = settings.kind != layout_settings_.kind;
     const bool changed_tiling = config.window.tiling != tiling_;
     if (settings == layout_settings_ && !changed_tiling) {
         return;
     }
-    cancel_tile_move();
+    cancel_active_move();
     if (rebuild || changed_tiling) {
         state_.clear_tiling_overrides();
     }
@@ -1384,7 +1298,7 @@ bool WindowManager::move_window(WindowId id, Direction direction, int step) {
     if (step <= 0) {
         return false;
     }
-    cancel_tile_move();
+    cancel_active_move();
     if (const auto current = view(id); current.tile_layout && current.visible) {
         finish_focus_cycle();
         const bool moved = layout_for(id).move(id, direction);
@@ -1414,10 +1328,12 @@ bool WindowManager::move_window_by(WindowId id, int dx, int dy) {
     if (found == windows_.end() || !output || !state_.window(id)->mapped) {
         return false;
     }
-    if (tile_move_ && tile_move_->tile.id == id) {
-        auto &rect = tile_move_->geometry;
-        rect.x = coordinate(std::int64_t{rect.x} + dx);
-        rect.y = coordinate(std::int64_t{rect.y} + dy);
+    auto *preview = tile_move_ && tile_move_->tile.id == id      ? &tile_move_->geometry
+                    : floating_move_ && floating_move_->id == id ? &floating_move_->geometry
+                                                                 : nullptr;
+    if (preview) {
+        preview->x = coordinate(std::int64_t{preview->x} + dx);
+        preview->y = coordinate(std::int64_t{preview->y} + dy);
         return true;
     }
     auto &window = found->second;
@@ -1427,10 +1343,17 @@ bool WindowManager::move_window_by(WindowId id, int dx, int dy) {
     finish_focus_cycle();
     const auto &area = outputs_.find(*output)->second.usable;
     const auto current = geometry(id, window);
-    const auto target_x =
-        fit_position(std::int64_t{current.x} - area.x + dx, current.width, area.width);
-    const auto target_y =
-        fit_position(std::int64_t{current.y} - area.y + dy, current.height, area.height);
+    place_floating(id, area, std::int64_t{current.x} + dx, std::int64_t{current.y} + dy, false);
+    return true;
+}
+
+void WindowManager::place_floating(WindowId id, WindowRect area, std::int64_t x, std::int64_t y,
+                                   bool allow_overhang) {
+    auto &window = windows_.at(id);
+    const auto current = geometry(id, window);
+    const auto fit = allow_overhang ? fit_edge_position : fit_position;
+    const auto target_x = fit(x - area.x, current.width, area.width);
+    const auto target_y = fit(y - area.y, current.height, area.height);
     if (window.parent) {
         window.dialog_dx =
             coordinate(std::int64_t{window.dialog_dx} + target_x - current.x + area.x);
@@ -1441,11 +1364,14 @@ bool WindowManager::move_window_by(WindowId id, int dx, int dy) {
         window.ordinary.y = target_y;
         window.positioned = true;
     }
-    return true;
+    window.edge_positioned =
+        allow_overhang &&
+        (target_x < 0 || target_y < 0 || std::int64_t{target_x} + current.width > area.width ||
+         std::int64_t{target_y} + current.height > area.height);
 }
 
 bool WindowManager::swap_window(WindowId id, Direction direction) {
-    cancel_tile_move();
+    cancel_active_move();
     if (!view(id).tile_layout || !is_visible(id)) {
         return false;
     }
@@ -1462,7 +1388,7 @@ bool WindowManager::swap_window(WindowId id, Direction direction) {
 }
 
 bool WindowManager::resize_window(WindowId id, Direction direction, int distance) {
-    cancel_tile_move();
+    cancel_active_move();
     if (!view(id).tile_layout || !is_visible(id)) {
         return false;
     }
@@ -1587,10 +1513,14 @@ bool WindowManager::resize_floating(WindowId id, WindowRect start, std::optional
 
 bool WindowManager::begin_move(WindowId id) {
     const auto current = view(id);
-    if (!current.visible || current.maximized || current.fullscreen || tile_move_) {
+    if (!current.visible || current.maximized || current.fullscreen || tile_move_ ||
+        floating_move_) {
         return false;
     }
     if (!current.tile_layout) {
+        if (allow_edge_drag_) {
+            floating_move_.emplace(FloatingMove{id, current.geometry});
+        }
         return true;
     }
     auto &layout = layout_for(id);
@@ -1605,29 +1535,78 @@ bool WindowManager::begin_move(WindowId id) {
 }
 
 bool WindowManager::finish_move(WindowId id, double x, double y) {
-    if (!tile_move_ || tile_move_->tile.id != id) {
+    const bool floating = floating_move_ && floating_move_->id == id;
+    if (!floating && (!tile_move_ || tile_move_->tile.id != id)) {
         return false;
     }
-    auto &layout = layout_for(id);
-    const auto drop = layout.drop_at(x, y);
-    if (!drop || !layout.add(tile_move_->tile, {}, drop)) {
-        cancel_tile_move();
+    const auto source = window_output(id);
+    if (!source) {
+        cancel_move(id);
         return false;
     }
-    tile_move_.reset();
-    if (focused_window_ == id) {
+    auto output = outputs_.find(*source);
+    std::optional<WorkspaceId> destination;
+    if (allow_edge_drag_ && !windows_.at(id).parent) {
+        const auto other = std::ranges::find_if(outputs_, [&](const auto &entry) {
+            return entry.first != *source && entry.second.connected &&
+                   contains(entry.second.bounds, x, y);
+        });
+        if (other != outputs_.end()) {
+            destination = state_.output(other->first)->shown;
+            if (destination) {
+                output = other;
+            }
+        }
+    }
+    if (floating) {
+        const auto position = std::exchange(floating_move_, std::nullopt)->geometry;
+        if (destination && !relocate_window(id, *destination)) {
+            return false;
+        }
+        place_floating(id, output->second.usable, position.x, position.y, true);
+    } else if (destination) {
+        auto layout = workspaces_.at(*destination).layout;
+        if (!layout.add(tile_move_->tile, layout_focus(*destination), layout.drop_at(x, y))) {
+            cancel_move(id);
+            return false;
+        }
+        // The destination layout is ready, and State transfers existing set
+        // nodes for the toplevel and dialogs. Keep the source tile detached.
+        tile_move_.reset();
+        if (!relocate_window(id, *destination, &layout)) {
+            return false;
+        }
+    } else {
+        auto &layout = layout_for(id);
+        const auto drop = layout.drop_at(x, y);
+        if (!drop || !layout.add(tile_move_->tile, {}, drop)) {
+            cancel_move(id);
+            return false;
+        }
+        tile_move_.reset();
+    }
+    if (destination) {
+        focus_on_output(output->first);
+        if (windows_.at(id).pinned || is_visible(id)) {
+            set_focus(id);
+        }
+    } else if (focused_window_ == id) {
         reveal(id);
     }
     return true;
 }
 
 void WindowManager::cancel_move(WindowId id) {
+    if (floating_move_ && floating_move_->id == id) {
+        floating_move_.reset();
+    }
     if (tile_move_ && tile_move_->tile.id == id) {
-        cancel_tile_move();
+        cancel_active_move();
     }
 }
 
-void WindowManager::cancel_tile_move() {
+void WindowManager::cancel_active_move() {
+    floating_move_.reset();
     if (tile_move_) {
         workspaces_.at(tile_move_->workspace).layout = std::move(tile_move_->previous);
         tile_move_.reset();

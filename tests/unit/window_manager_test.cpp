@@ -24,10 +24,8 @@ WindowId open_window(WindowManager &manager, std::optional<WindowId> parent = {}
     return *id;
 }
 
-class WorkspaceModes : public ::testing::TestWithParam<WorkspaceMode> {};
-
-TEST_P(WorkspaceModes, SelectsAndFollowsAcrossOutputsWithoutTransferringDestination) {
-    WindowManager manager(GetParam());
+TEST(WindowManager, SelectsAndFollowsAcrossOutputsWithoutTransferringDestination) {
+    WindowManager manager;
     ASSERT_TRUE(manager.add_output("left", left, left, true));
     const auto left_workspace = manager.focused_workspace();
     ASSERT_TRUE(left_workspace);
@@ -51,7 +49,7 @@ TEST_P(WorkspaceModes, SelectsAndFollowsAcrossOutputsWithoutTransferringDestinat
     EXPECT_FALSE(manager.state().workspace(*left_workspace)->windows.contains(moved));
     EXPECT_TRUE(manager.state().workspace(*right_workspace)->windows.contains(moved));
 
-    ASSERT_TRUE(manager.select_workspace(21));
+    ASSERT_TRUE(manager.select_workspace(3));
     ASSERT_TRUE(manager.focus_output("left"));
     ASSERT_TRUE(manager.select_workspace(*right_workspace));
     EXPECT_EQ(manager.focused_output(), "right");
@@ -59,48 +57,36 @@ TEST_P(WorkspaceModes, SelectsAndFollowsAcrossOutputsWithoutTransferringDestinat
     EXPECT_TRUE(manager.state().valid());
 }
 
-TEST_P(WorkspaceModes, TransferHidesDestinationAndRestoresSourceHistory) {
-    WindowManager manager(GetParam());
-    ASSERT_TRUE(manager.add_output("left", left, left, true));
-    const auto first = manager.focused_workspace();
-    ASSERT_TRUE(first);
-    ASSERT_TRUE(manager.add_output("right", right, right));
-    const auto previous = manager.state().output("right")->shown;
-    ASSERT_TRUE(previous);
-    ASSERT_TRUE(manager.select_workspace(31));
-    const auto window = open_window(manager);
+TEST(WindowManager, KeepsTenWorkspacesAndAdmitsAtMostTwoOutputs) {
+    WindowManager manager;
+    ASSERT_EQ(manager.state().workspaces().size(), workspace_count);
+    for (WorkspaceId id = 1; id <= workspace_count; ++id) {
+        ASSERT_NE(manager.state().workspace(id), nullptr);
+        EXPECT_FALSE(manager.workspace_output(id));
+    }
+    EXPECT_FALSE(manager.select_workspace(1));
+    ASSERT_TRUE(manager.add_output("left", left, left));
+    EXPECT_EQ(manager.focused_workspace(), 1U);
+    for (WorkspaceId id = 1; id <= workspace_count; ++id) {
+        EXPECT_EQ(manager.workspace_output(id), "left");
+    }
+    EXPECT_FALSE(manager.select_workspace(0));
+    EXPECT_FALSE(manager.select_workspace(workspace_count + 1));
 
-    ASSERT_TRUE(manager.transfer_workspace("right"));
-    EXPECT_EQ(manager.state().output("left")->shown, first);
-    EXPECT_EQ(manager.state().output("right")->shown, 31U);
-    EXPECT_EQ(manager.state().workspace(*previous)->owner_or_last_output, "right");
-    EXPECT_EQ(manager.focused_output(), "right");
-    EXPECT_EQ(manager.focused_window(), window);
+    ASSERT_TRUE(manager.add_output("right", right, right));
+    EXPECT_EQ(manager.state().output("left")->shown, 1U);
+    EXPECT_EQ(manager.state().output("right")->shown, primary_workspace_count + 1);
+    for (WorkspaceId id = 1; id <= workspace_count; ++id) {
+        EXPECT_EQ(manager.workspace_output(id), id <= primary_workspace_count ? "left" : "right");
+    }
+    EXPECT_FALSE(manager.add_output("top", top, top, true));
+    EXPECT_EQ(manager.primary_output(), "left");
+    EXPECT_EQ(manager.state().output_count(), 2U);
     EXPECT_TRUE(manager.state().valid());
 }
 
-TEST_P(WorkspaceModes, TransfersAnExplicitHiddenWorkspaceToTheFocusedOutput) {
-    WindowManager manager(GetParam());
-    ASSERT_TRUE(manager.add_output("left", left, left, true));
-    ASSERT_TRUE(manager.select_workspace(31));
-    const auto window = open_window(manager);
-    ASSERT_TRUE(manager.select_workspace(32));
-    ASSERT_TRUE(manager.add_output("right", right, right));
-    ASSERT_TRUE(manager.focus_output("right"));
-    const auto previous = open_window(manager);
-
-    ASSERT_TRUE(manager.transfer_workspace("right", 31));
-    EXPECT_EQ(manager.state().output("left")->shown, 32U);
-    EXPECT_EQ(manager.state().output("right")->shown, 31U);
-    EXPECT_EQ(manager.workspace_owner(31), "right");
-    EXPECT_EQ(manager.focused_window(), window);
-    EXPECT_FALSE(manager.view(previous).visible);
-    EXPECT_FALSE(manager.transfer_workspace("left", 75));
-    EXPECT_TRUE(manager.state().valid());
-}
-
-TEST_P(WorkspaceModes, MovingAPinnedWindowFollowsAndFocusesItOverFullscreen) {
-    WindowManager manager(GetParam());
+TEST(WindowManager, MovingAPinnedWindowFollowsAndFocusesItOverFullscreen) {
+    WindowManager manager;
     ASSERT_TRUE(manager.add_output("left", left, left, true));
     const auto pinned = open_window(manager);
     ASSERT_TRUE(manager.toggle_pin(pinned));
@@ -124,11 +110,8 @@ TEST_P(WorkspaceModes, MovingAPinnedWindowFollowsAndFocusesItOverFullscreen) {
     EXPECT_FALSE(manager.view(pinned).visible);
 }
 
-INSTANTIATE_TEST_SUITE_P(WindowManager, WorkspaceModes,
-                         ::testing::Values(WorkspaceMode::global, WorkspaceMode::per_monitor));
-
 TEST(WindowManager, BackgroundMapDoesNotStealFocusAndRemapRetainsIdentity) {
-    WindowManager manager(WorkspaceMode::global);
+    WindowManager manager;
     ASSERT_TRUE(manager.add_output("left", left, left, true));
     const auto workspace = manager.focused_workspace();
     ASSERT_TRUE(workspace);
@@ -137,7 +120,7 @@ TEST(WindowManager, BackgroundMapDoesNotStealFocusAndRemapRetainsIdentity) {
     ASSERT_TRUE(background);
     EXPECT_FALSE(manager.map_window(*background, client));
     ASSERT_TRUE(manager.initialize_window(*background));
-    ASSERT_TRUE(manager.select_workspace(14));
+    ASSERT_TRUE(manager.select_workspace(4));
     const auto other = open_window(manager);
     ASSERT_TRUE(manager.map_window(*background, client));
     EXPECT_EQ(manager.focused_window(), other);
@@ -163,7 +146,7 @@ TEST(WindowManager, BackgroundMapDoesNotStealFocusAndRemapRetainsIdentity) {
 }
 
 TEST(WindowManager, KeepsHeldMruStableAndSkipsUnmappedWindows) {
-    WindowManager manager(WorkspaceMode::global);
+    WindowManager manager;
     ASSERT_TRUE(manager.add_output("left", left, left, true));
     const auto first = open_window(manager);
     const auto second = open_window(manager);
@@ -179,13 +162,13 @@ TEST(WindowManager, KeepsHeldMruStableAndSkipsUnmappedWindows) {
     manager.finish_focus_cycle();
     ASSERT_TRUE(manager.cycle_focus(false));
     EXPECT_EQ(manager.focused_window(), first);
-    ASSERT_TRUE(manager.select_workspace(19));
+    ASSERT_TRUE(manager.select_workspace(9));
     EXPECT_FALSE(manager.cycle_focus(false));
     EXPECT_FALSE(manager.focused_window());
 }
 
 TEST(WindowManager, FocusRevealsATileWithoutChangingMaximizedOrTiledGeometry) {
-    WindowManager manager(WorkspaceMode::global);
+    WindowManager manager;
     ASSERT_TRUE(manager.add_output("left", left, usable, true));
     const auto tile = open_window(manager);
     const auto browser = open_window(manager);
@@ -208,7 +191,7 @@ TEST(WindowManager, FocusRevealsATileWithoutChangingMaximizedOrTiledGeometry) {
 }
 
 TEST(WindowManager, DirectionalFocusWrapsInTheCurrentWorkspace) {
-    WindowManager manager(WorkspaceMode::global, false);
+    WindowManager manager(false);
     ASSERT_TRUE(manager.add_output("left", left, left, true));
     const auto a = open_window(manager);
     const auto b = open_window(manager);
@@ -225,7 +208,7 @@ TEST(WindowManager, DirectionalFocusWrapsInTheCurrentWorkspace) {
 }
 
 TEST(WindowManager, KeyboardCycleRaisesFloatsAndMappingTilesPreservesTheirStack) {
-    WindowManager manager(WorkspaceMode::global);
+    WindowManager manager;
     ASSERT_TRUE(manager.add_output("left", left, left, true));
     const auto a = open_window(manager);
     ASSERT_TRUE(manager.toggle_tiling(a));
@@ -243,13 +226,13 @@ TEST(WindowManager, KeyboardCycleRaisesFloatsAndMappingTilesPreservesTheirStack)
 }
 
 TEST(WindowManager, KeyboardNavigationAndUnpinFollowVisiblePinnedWindows) {
-    WindowManager manager(WorkspaceMode::global);
+    WindowManager manager;
     ASSERT_TRUE(manager.add_output("left", left, left, true));
     ASSERT_TRUE(manager.add_output("right", right, right));
     const auto pinned = open_window(manager);
     ASSERT_TRUE(manager.toggle_pin(pinned));
     const auto home = manager.focused_workspace().value();
-    ASSERT_TRUE(manager.select_workspace(23));
+    ASSERT_TRUE(manager.select_workspace(3));
     const auto tile = open_window(manager);
     EXPECT_TRUE(manager.focus_direction(Direction::left));
     EXPECT_EQ(manager.focused_window(), pinned);
@@ -261,7 +244,7 @@ TEST(WindowManager, KeyboardNavigationAndUnpinFollowVisiblePinnedWindows) {
     EXPECT_EQ(manager.focused_window(), pinned);
     ASSERT_TRUE(manager.click(pinned));
     ASSERT_TRUE(manager.toggle_pin(pinned));
-    EXPECT_EQ(manager.state().window(pinned)->home_workspace, 23U);
+    EXPECT_EQ(manager.state().window(pinned)->home_workspace, 3U);
     EXPECT_FALSE(manager.state().workspace(home)->windows.contains(pinned));
     EXPECT_TRUE(manager.view(pinned).tiled);
     EXPECT_TRUE(manager.view(pinned).visible);
@@ -272,7 +255,7 @@ TEST(WindowManager, KeyboardNavigationAndUnpinFollowVisiblePinnedWindows) {
 }
 
 TEST(WindowManager, FloatingRaiseAndLayeredGeometryRestore) {
-    WindowManager manager(WorkspaceMode::global, false);
+    WindowManager manager(false);
     ASSERT_TRUE(manager.add_output("left", left, usable, true));
     const auto a = open_window(manager);
     const auto b = open_window(manager);
@@ -295,7 +278,7 @@ TEST(WindowManager, FloatingRaiseAndLayeredGeometryRestore) {
 }
 
 TEST(WindowManager, InitialFullscreenDoesNotSaveItsBoundsAsOrdinaryGeometry) {
-    WindowManager manager(WorkspaceMode::global, false);
+    WindowManager manager(false);
     ASSERT_TRUE(manager.add_output("left", left, usable));
     const auto id = manager.create_window();
     ASSERT_TRUE(id);
@@ -332,7 +315,7 @@ TEST(WindowManager, MaximizedBorderFitsWithinTheWorkAreaWithZeroOuterGap) {
 }
 
 TEST(WindowManager, NewlyFocusedOrdinaryWindowIsVisibleAboveFullscreen) {
-    WindowManager manager(WorkspaceMode::global);
+    WindowManager manager;
     ASSERT_TRUE(manager.add_output("left", left, usable));
     const auto fullscreen = open_window(manager);
     ASSERT_TRUE(manager.set_fullscreen(fullscreen, true));
@@ -349,7 +332,7 @@ TEST(WindowManager, NewlyFocusedOrdinaryWindowIsVisibleAboveFullscreen) {
 }
 
 TEST(WindowManager, PinRetainsOneHomeAndRecoversPriorTiling) {
-    WindowManager manager(WorkspaceMode::global);
+    WindowManager manager;
     ASSERT_TRUE(manager.add_output("left", left, left, true));
     ASSERT_TRUE(manager.add_output("right", right, right));
     const auto right_home = manager.state().output("right")->shown;
@@ -361,11 +344,11 @@ TEST(WindowManager, PinRetainsOneHomeAndRecoversPriorTiling) {
     ASSERT_TRUE(manager.toggle_pin(pinned));
     EXPECT_TRUE(manager.view(pinned).pinned);
     EXPECT_FALSE(manager.view(pinned).tiled);
-    ASSERT_TRUE(manager.select_workspace(44));
+    ASSERT_TRUE(manager.select_workspace(4));
     EXPECT_TRUE(manager.view(pinned).visible);
     EXPECT_EQ(manager.window_output(pinned), "left");
     EXPECT_EQ(manager.state().window(pinned)->home_workspace, *home);
-    EXPECT_FALSE(manager.state().workspace(44)->windows.contains(pinned));
+    EXPECT_FALSE(manager.state().workspace(4)->windows.contains(pinned));
 
     const auto fullscreen = open_window(manager);
     ASSERT_TRUE(manager.set_fullscreen(fullscreen, true));
@@ -381,7 +364,7 @@ TEST(WindowManager, PinRetainsOneHomeAndRecoversPriorTiling) {
 }
 
 TEST(WindowManager, DialogsRemainRelativeAndBackgroundDialogsDoNotTakeFocus) {
-    WindowManager manager(WorkspaceMode::global, false);
+    WindowManager manager(false);
     ASSERT_TRUE(manager.add_output("left", left, left, true));
     const auto parent = open_window(manager, {}, {0, 0, 500, 400});
     const auto foreground = open_window(manager);
@@ -398,8 +381,8 @@ TEST(WindowManager, DialogsRemainRelativeAndBackgroundDialogsDoNotTakeFocus) {
     ASSERT_TRUE(manager.click(parent));
     EXPECT_GT(manager.view(parent).stacking, manager.view(dialog).stacking);
     EXPECT_FALSE(manager.set_parent(parent, dialog));
-    ASSERT_TRUE(manager.move_to_workspace(parent, 17));
-    EXPECT_EQ(manager.state().window(dialog)->home_workspace, 17U);
+    ASSERT_TRUE(manager.move_to_workspace(parent, 7));
+    EXPECT_EQ(manager.state().window(dialog)->home_workspace, 7U);
     EXPECT_TRUE(manager.view(dialog).visible);
     ASSERT_TRUE(manager.destroy_window(parent));
     EXPECT_TRUE(manager.state().window(dialog));
@@ -408,7 +391,7 @@ TEST(WindowManager, DialogsRemainRelativeAndBackgroundDialogsDoNotTakeFocus) {
 }
 
 TEST(WindowManager, ZeroOutputsPreserveExistingAndNewClients) {
-    WindowManager manager(WorkspaceMode::per_monitor);
+    WindowManager manager;
     ASSERT_TRUE(manager.add_output("left", left, usable, true));
     const auto initial = manager.focused_workspace();
     ASSERT_TRUE(initial);
@@ -428,29 +411,51 @@ TEST(WindowManager, ZeroOutputsPreserveExistingAndNewClients) {
     EXPECT_TRUE(manager.state().valid());
 }
 
-TEST_P(WorkspaceModes, RestoresAutomaticMigrationAndHonorsManualReassignment) {
-    WindowManager manager(GetParam());
+TEST(WindowManager, RestoresEachWorkspaceRangeAndFocusAfterHotplug) {
+    WindowManager manager;
     ASSERT_TRUE(manager.add_output("left", left, left, true));
+    ASSERT_TRUE(manager.select_workspace(4));
+    const auto primary_window = open_window(manager);
     ASSERT_TRUE(manager.add_output("right", right, right));
-    ASSERT_TRUE(manager.add_output("top", top, top));
-    ASSERT_TRUE(manager.focus_output("right"));
-    const auto old_home = manager.focused_workspace();
-    ASSERT_TRUE(old_home);
-    const auto window = open_window(manager);
-    ASSERT_TRUE(manager.select_workspace(77));
+    ASSERT_TRUE(manager.select_workspace(8));
+    const auto secondary_window = open_window(manager);
 
     ASSERT_TRUE(manager.remove_output("right"));
     EXPECT_EQ(manager.focused_output(), "left");
-    EXPECT_EQ(manager.state().workspace(*old_home)->owner_or_last_output, "left");
-    ASSERT_TRUE(manager.select_workspace(*old_home));
-    EXPECT_EQ(manager.focused_window(), window);
-    ASSERT_TRUE(manager.transfer_workspace("top"));
+    EXPECT_EQ(manager.focused_workspace(), 8U);
+    EXPECT_EQ(manager.focused_window(), secondary_window);
+    EXPECT_EQ(manager.workspace_output(8), "left");
+    ASSERT_TRUE(manager.add_output("replacement", right, right));
+    EXPECT_EQ(manager.workspace_output(8), "replacement");
+    EXPECT_EQ(manager.state().output("left")->shown, 4U);
+    EXPECT_EQ(manager.state().output("replacement")->shown, 8U);
+    EXPECT_EQ(manager.focused_output(), "replacement");
+    EXPECT_EQ(manager.focused_window(), secondary_window);
+    ASSERT_TRUE(manager.select_workspace(4));
+    EXPECT_EQ(manager.focused_window(), primary_window);
+    EXPECT_TRUE(manager.state().valid());
+}
+
+TEST(WindowManager, PrimaryChangeSwapsTheRangesWithoutChangingWindowHomes) {
+    WindowManager manager;
+    ASSERT_TRUE(manager.add_output("left", left, left));
     ASSERT_TRUE(manager.add_output("right", right, right));
-    EXPECT_EQ(manager.state().workspace(*old_home)->owner_or_last_output, "top");
-    EXPECT_EQ(manager.state().workspace(77)->owner_or_last_output, "right");
-    EXPECT_EQ(manager.state().output("right")->shown, 77U);
-    EXPECT_EQ(manager.focused_output(), "top");
-    EXPECT_EQ(manager.focused_window(), window);
+    ASSERT_TRUE(manager.select_workspace(8));
+    const auto secondary_window = open_window(manager);
+    ASSERT_TRUE(manager.select_workspace(4));
+    const auto primary_window = open_window(manager);
+
+    ASSERT_TRUE(manager.set_primary_output("right"));
+    EXPECT_EQ(manager.primary_output(), "right");
+    EXPECT_EQ(manager.state().output("right")->shown, 4U);
+    EXPECT_EQ(manager.state().output("left")->shown, 8U);
+    EXPECT_EQ(manager.focused_output(), "right");
+    EXPECT_EQ(manager.focused_window(), primary_window);
+    EXPECT_EQ(manager.state().window(primary_window)->home_workspace, 4U);
+    EXPECT_EQ(manager.state().window(secondary_window)->home_workspace, 8U);
+    EXPECT_GE(manager.view(primary_window).geometry.x, right.x);
+    EXPECT_LT(manager.view(secondary_window).geometry.x, right.x);
+    EXPECT_FALSE(manager.set_primary_output("right"));
     EXPECT_TRUE(manager.state().valid());
 }
 

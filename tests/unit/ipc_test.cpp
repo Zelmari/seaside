@@ -324,12 +324,12 @@ TEST_F(IpcFixture, HalfClosedSubscriberReceivesLaterEventsAfterQuietPeriod) {
 
 TEST_F(IpcFixture, DeferredReplyKeepsIdUntilFlushAndUsesCompletionWatermark) {
     std::vector<IpcServer::Completion> pending;
-    auto deferred =
-        make_server("wayland-12",
-                    [&](const IpcJson &, IpcServer::Completion finish) -> std::optional<IpcResult> {
-                        pending.push_back(std::move(finish));
-                        return std::nullopt;
-                    });
+    auto deferred = make_server("wayland-12",
+                                [&](std::string_view, const IpcJson &,
+                                    IpcServer::Completion finish) -> std::optional<IpcResult> {
+                                    pending.push_back(std::move(finish));
+                                    return std::nullopt;
+                                });
     ASSERT_TRUE(deferred);
     server = std::move(*deferred);
     const int fd = connect_to();
@@ -355,14 +355,51 @@ TEST_F(IpcFixture, DeferredReplyKeepsIdUntilFlushAndUsesCompletionWatermark) {
     EXPECT_EQ(receive(fd)["error"]["message"], "export did not finish");
 }
 
+TEST_F(IpcFixture, SettingsUpdatesValidateTypesAndWaitForTheCommitEvent) {
+    IpcServer::Completion completion;
+    auto deferred = make_server("wayland-12",
+                                [&](std::string_view method, const IpcJson &params,
+                                    IpcServer::Completion finish) -> std::optional<IpcResult> {
+                                    EXPECT_EQ(method, "action.settings_update");
+                                    const auto edit = ipc::decode_setting_edit(params);
+                                    EXPECT_TRUE(edit);
+                                    if (edit) {
+                                        EXPECT_EQ(edit->setting, Setting::night_light_enabled);
+                                        EXPECT_EQ(edit->revision, 7);
+                                        EXPECT_EQ(std::get<NightLightAction>(edit->value),
+                                                  NightLightAction::toggle);
+                                    }
+                                    completion = std::move(finish);
+                                    return std::nullopt;
+                                });
+    ASSERT_TRUE(deferred);
+    server = std::move(*deferred);
+    const int fd = connect_to();
+    ASSERT_GE(fd, 0);
+    send_all(
+        fd,
+        request(1, "events.subscribe") +
+            request(2, "action.settings_update",
+                    {{"setting", "idle.display_off_after_minutes"}, {"value", true}}) +
+            request(3, "action.settings_update",
+                    {{"setting", "night_light.enabled"}, {"value", "toggle"}, {"revision", 7}}));
+    EXPECT_EQ(receive(fd)["id"], 1);
+    EXPECT_EQ(receive(fd)["error"]["code"], "invalid_args");
+    ASSERT_TRUE(completion);
+    server->event("settings.changed", {{"revision", 8}});
+    completion(IpcJson{{"accepted", true}, {"revision", 8}});
+    EXPECT_EQ(receive(fd)["event"], "settings.changed");
+    EXPECT_EQ(receive(fd)["result"]["revision"], 8);
+}
+
 TEST_F(IpcFixture, DeferredPipelineStaysBoundedWithoutDisconnectingOrStarvingOtherPeers) {
     std::vector<IpcServer::Completion> pending;
-    auto deferred =
-        make_server("wayland-12",
-                    [&](const IpcJson &, IpcServer::Completion finish) -> std::optional<IpcResult> {
-                        pending.push_back(std::move(finish));
-                        return std::nullopt;
-                    });
+    auto deferred = make_server("wayland-12",
+                                [&](std::string_view, const IpcJson &,
+                                    IpcServer::Completion finish) -> std::optional<IpcResult> {
+                                    pending.push_back(std::move(finish));
+                                    return std::nullopt;
+                                });
     ASSERT_TRUE(deferred);
     server = std::move(*deferred);
     const int fd = connect_to();

@@ -1,6 +1,7 @@
 #ifndef SEASIDE_IPC_PROTOCOL_HPP
 #define SEASIDE_IPC_PROTOCOL_HPP
 
+#include "config_edit.hpp"
 #include "ipc.hpp"
 
 #include <cstddef>
@@ -22,6 +23,7 @@ struct ParsedRecord {
 
 ParsedRecord parse_record(std::string_view record);
 std::optional<IpcError> validate_request(const ParsedRecord &record);
+std::expected<SettingEdit, IpcError> decode_setting_edit(const IpcJson &params);
 // An empty result means serialization would exceed the record limit.
 std::optional<std::string> serialize(const IpcJson &object);
 

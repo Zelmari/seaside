@@ -43,7 +43,6 @@ enum class ActionKind {
     swap_window,
     workspace,
     move_to_workspace,
-    transfer_workspace,
     toggle_window_pin,
     toggle_window_maximize,
     toggle_window_fullscreen,

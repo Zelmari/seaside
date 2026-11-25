@@ -39,6 +39,7 @@ enum {
     CURSOR_SIZE = SEASIDE_DEFAULT_CURSOR_SIZE,
     MAX_CURSOR_IMAGE = 64,
     MAX_CLIENT_CURSOR_TEXTURE = 128,
+    MAX_ACTIVE_OUTPUTS = 2,
     MAX_KMS_CARDS = 64,
     MAX_KMS_PLANES = 256,
     MAX_PLANE_PROPERTIES = 64,
@@ -80,6 +81,7 @@ struct tty_output {
     struct wl_listener commit;
     struct wl_listener present;
     bool pending;
+    bool parked;
     bool rejected;
     bool usable;
     bool cursor_visible;
@@ -811,11 +813,28 @@ static bool ranks_first(const struct tty_output *view, const struct tty_output *
     return strcmp(view->output->name, current->output->name) < 0;
 }
 
-static struct tty_output *next_pending(struct seaside_tty_drm *drm) {
+static unsigned usable_output_count(const struct seaside_tty_drm *drm) {
+    unsigned count = 0;
+    const struct tty_output *view;
+    wl_list_for_each(view, &drm->outputs, link) {
+        if (view->usable && !view->rejected) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+static struct tty_output *next_pending(struct seaside_tty_drm *drm, struct wlr_output *preferred) {
     struct tty_output *next = NULL;
     struct tty_output *view;
     wl_list_for_each(view, &drm->outputs, link) {
-        if (view->pending && ranks_first(view, next)) {
+        if (!view->pending && !view->parked) {
+            continue;
+        }
+        if (view->output == preferred) {
+            return view;
+        }
+        if (ranks_first(view, next)) {
             next = view;
         }
     }
@@ -975,6 +994,7 @@ static bool enable_output(struct tty_output *view, struct wlr_allocator *allocat
     struct seaside_tty_drm *drm = view->owner;
     struct wlr_output *output = view->output;
     view->pending = false;
+    view->parked = false;
     struct wlr_output_mode *mode = initial_mode(output);
     if (!mode || !wlr_output_init_render(output, allocator, renderer) ||
         !set_output_enabled(output, true, mode)) {
@@ -1339,7 +1359,7 @@ void seaside_tty_drm_reject_unpresented_cursors(struct seaside_tty_drm *drm) {
 }
 
 bool seaside_tty_drm_enable_pending(struct seaside_tty_drm *drm, struct wlr_allocator *allocator,
-                                    struct wlr_renderer *renderer) {
+                                    struct wlr_renderer *renderer, struct wlr_output *preferred) {
     if (!drm || !allocator || !renderer || drm->evidence.failed) {
         return false;
     }
@@ -1352,15 +1372,26 @@ bool seaside_tty_drm_enable_pending(struct seaside_tty_drm *drm, struct wlr_allo
             disable_output(view);
         }
     }
-    if (next_pending(drm) && !prepare_cursor_buffers(drm)) {
-        return false;
-    }
-    while ((view = next_pending(drm))) {
+    unsigned active = usable_output_count(drm);
+    while (active < MAX_ACTIVE_OUTPUTS && (view = next_pending(drm, preferred))) {
+        if (!prepare_cursor_buffers(drm)) {
+            return false;
+        }
         if (!enable_output(view, allocator, renderer)) {
             disable_output(view);
             if (drm->evidence.failed) {
                 return false;
             }
+        } else {
+            ++active;
+        }
+    }
+    wl_list_for_each(view, &drm->outputs, link) {
+        if (view->pending) {
+            view->pending = false;
+            view->parked = true;
+            view->disabled_reason = "two-display limit";
+            disable_output(view);
         }
     }
     if (!available(drm->pointer_output)) {
@@ -1377,7 +1408,7 @@ struct wlr_output *seaside_tty_drm_enable(struct seaside_tty_drm *drm,
         return NULL;
     }
     drm->fixture_mode = true;
-    struct tty_output *view = next_pending(drm);
+    struct tty_output *view = next_pending(drm, NULL);
     if (!view) {
         fail(drm, "DRM backend announced no connected desktop output with modes");
         return NULL;
@@ -1584,40 +1615,36 @@ bool seaside_tty_drm_set_cursor_surface(struct seaside_tty_drm *drm, struct wlr_
     return displayed;
 }
 
-static struct seaside_cursor_point cross_output_gap(const struct seaside_tty_drm *drm,
-                                                    struct seaside_cursor_point target) {
+static struct seaside_cursor_point route_relative_cursor(const struct seaside_tty_drm *drm,
+                                                         struct seaside_cursor_point target) {
     const struct seaside_cursor_box current = cursor_box(drm->pointer_output);
     if (seaside_cursor_contains(current, target)) {
         return target;
     }
     const struct seaside_cursor_point origin = {drm->cursor_x, drm->cursor_y};
-    struct seaside_cursor_gap best = {0};
     const struct tty_output *view;
     wl_list_for_each(view, &drm->outputs, link) {
-        if (!available(view) || view == drm->pointer_output) {
-            continue;
+        if (available(view) && view != drm->pointer_output) {
+            const struct seaside_cursor_box destination = cursor_box(view);
+            return seaside_cursor_route_relative(current, origin, target, &destination);
         }
-        const struct seaside_cursor_box destination = cursor_box(view);
-        if (seaside_cursor_contains(destination, target)) {
-            return target;
-        }
-        seaside_cursor_consider_gap(current, destination, origin, target, &best);
     }
-    return best.found ? best.point : seaside_cursor_clamp(current, target);
+    return seaside_cursor_route_relative(current, origin, target, NULL);
 }
 
-bool seaside_tty_drm_move(struct seaside_tty_drm *drm, bool absolute, double x, double y) {
+bool seaside_tty_drm_move(struct seaside_tty_drm *drm, enum seaside_pointer_motion kind, double x,
+                          double y) {
     if (!drm || drm->evidence.failed || !drm->evidence.active || !available(drm->pointer_output) ||
         !isfinite(x) || !isfinite(y)) {
         return false;
     }
-    if (absolute && !seaside_tty_drm_absolute_delta(drm, x, y, &x, &y)) {
+    if (kind == SEASIDE_POINTER_ABSOLUTE && !seaside_tty_drm_absolute_delta(drm, x, y, &x, &y)) {
         return false;
     }
     struct seaside_cursor_point target = {drm->cursor_x + clamp(x, -INT_MAX, INT_MAX),
                                           drm->cursor_y + clamp(y, -INT_MAX, INT_MAX)};
-    if (!absolute) {
-        target = cross_output_gap(drm, target);
+    if (kind == SEASIDE_POINTER_RELATIVE) {
+        target = route_relative_cursor(drm, target);
     }
     return move_cursor(drm, target.x, target.y, true);
 }
@@ -1639,9 +1666,11 @@ struct seaside_tty_drm_observation seaside_tty_drm_observation(const struct seas
         result.cursor_presented = pointer->cursor_presented;
     }
     if (result.active) {
+        const bool slot_available = usable_output_count(drm) < MAX_ACTIVE_OUTPUTS;
         struct tty_output *view;
         wl_list_for_each(view, &drm->outputs, link) {
-            if (view->pending || view->rejected || (!has_pointer && available(view))) {
+            if (view->pending || view->rejected || (view->parked && slot_available) ||
+                (!has_pointer && available(view))) {
                 result.output_pending = true;
                 break;
             }

@@ -28,10 +28,10 @@ class IpcServer final {
   public:
     using Handler = std::function<IpcResult(std::string_view method, const IpcJson &params)>;
     using Completion = std::function<void(IpcResult)>;
-    // Handles trace.export. Return an immediate result, or call the completion
-    // once on the event-loop thread when the deferred result is available.
-    using DeferredHandler =
-        std::function<std::optional<IpcResult>(const IpcJson &params, Completion)>;
+    // Return an immediate result, or call the completion once on the
+    // event-loop thread when the deferred result is available.
+    using DeferredHandler = std::function<std::optional<IpcResult>(
+        std::string_view method, const IpcJson &params, Completion)>;
 
     // The exit callback requests event-loop termination after the acknowledgement
     // has been written or its deadline expires.

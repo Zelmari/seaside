@@ -1,6 +1,7 @@
 #include "ipc_protocol.hpp"
 
 #include "bindings.hpp"
+#include "state.hpp"
 
 #include <algorithm>
 #include <array>
@@ -49,7 +50,6 @@ enum Parameter : unsigned {
     direction = 1 << 0,
     workspace = 1 << 1,
     window = 1 << 2,
-    selector = 1 << 3,
     delta = 1 << 4,
     enabled = 1 << 5,
 };
@@ -70,11 +70,11 @@ constexpr std::array methods{
     Method{"query.config"},
     Method{"query.diagnostics"},
     Method{"query.night_light"},
+    Method{"query.settings"},
     Method{"action.focus", direction},
     Method{"action.cycle_focus_mru"},
     Method{"action.workspace_select", workspace},
     Method{"action.window_to_workspace", workspace, window},
-    Method{"action.workspace_transfer", selector, workspace},
     Method{"action.window_toggle_tiling", 0, window},
     Method{"action.window_toggle_pin", 0, window},
     Method{"action.window_toggle_maximize", 0, window},
@@ -84,6 +84,7 @@ constexpr std::array methods{
     Method{"action.window_swap", direction, window},
     Method{"action.window_resize", direction, window | delta},
     Method{"action.night_light_set", enabled},
+    Method{"action.settings_update"},
     Method{"action.exit"},
     Method{"trace.start"},
     Method{"trace.stop"},
@@ -99,9 +100,8 @@ struct Field {
 
 constexpr std::array fields{
     Field{"direction", direction, "Expected direction left, right, up or down"},
-    Field{"workspace_id", workspace, "Expected workspace_id in 1..2147483647"},
+    Field{"workspace_id", workspace, "Expected workspace_id in 1..10"},
     Field{"window_id", window, "Expected window_id in 1..9007199254740991"},
-    Field{"selector", selector, "Expected selector identity:<value> or connector:<name>"},
     Field{"delta", delta, "Expected delta in 1..2147483647 logical pixels"},
     Field{"enabled", enabled, "Expected enabled to be a boolean"},
 };
@@ -119,12 +119,11 @@ bool valid_field(Parameter field, const IpcJson &value) {
     case direction:
         return value == "left" || value == "right" || value == "up" || value == "down";
     case workspace:
+        return integer_in_range(value, 1, workspace_count);
     case delta:
         return integer_in_range(value, 1, logical_limit);
     case window:
         return integer_in_range(value, 1, id_limit);
-    case selector:
-        return value.is_string() && parse_output_selector(value.get_ref<const std::string &>());
     case enabled:
         return value.is_boolean();
     }
@@ -210,6 +209,11 @@ std::optional<IpcError> validate_request(const ParsedRecord &record) {
     if (method == methods.end()) {
         return IpcError{"unknown_method", "Method is outside the Seaside IPC allowlist"};
     }
+    if (name == "action.settings_update") {
+        if (const auto decoded = decode_setting_edit(object["params"]); !decoded)
+            return decoded.error();
+        return {};
+    }
 
     unsigned received = 0;
     for (const auto &[key, value] : object["params"].items()) {
@@ -226,6 +230,74 @@ std::optional<IpcError> validate_request(const ParsedRecord &record) {
         return IpcError{"invalid_args", "Required parameter is missing"};
     }
     return {};
+}
+
+std::expected<SettingEdit, IpcError> decode_setting_edit(const IpcJson &params) {
+    const auto invalid = [](std::string message) {
+        return std::unexpected(IpcError{"invalid_args", std::move(message)});
+    };
+    for (const auto &[field, _] : params.items()) {
+        if (field != "setting" && field != "value" && field != "chord" && field != "revision")
+            return invalid("Unexpected parameter for a settings update");
+    }
+    if (!params.contains("setting") || !params["setting"].is_string() || !params.contains("value"))
+        return invalid("Expected a setting name and value");
+    const auto setting = parse_setting(params["setting"].get_ref<const std::string &>());
+    if (!setting)
+        return invalid("Unknown setting");
+    SettingEdit edit{*setting};
+    if (params.contains("revision")) {
+        if (!integer_in_range(params["revision"], 0, id_limit))
+            return invalid("Expected a nonnegative settings revision");
+        edit.revision = params["revision"].get<std::uint64_t>();
+    }
+    if (params.contains("chord")) {
+        if (*setting != Setting::keybinds || !params["chord"].is_string())
+            return invalid("Only keybinds accept a chord string");
+        const auto chord = parse_chord(params["chord"].get_ref<const std::string &>());
+        if (!chord)
+            return invalid(chord.error().message);
+        edit.chord = *chord;
+    }
+    const auto &value = params["value"];
+    switch (*setting) {
+    case Setting::keybinds:
+        if (value.is_string() && edit.chord) {
+            auto action = value.get<std::string>();
+            if (const auto valid = parse_action(action, *edit.chord); !valid)
+                return invalid(valid.error().message);
+            edit.value = std::move(action);
+        } else if (!value.is_null()) {
+            return invalid("Expected a chord and action string, or null to remove or reset");
+        }
+        break;
+    case Setting::night_light_enabled:
+    case Setting::allow_edge_drag:
+        if (value.is_boolean())
+            edit.value = value.get<bool>();
+        else if (*setting == Setting::night_light_enabled && value == "toggle")
+            edit.value = NightLightAction::toggle;
+        else
+            return invalid("Expected a boolean or, for night light, toggle");
+        break;
+    case Setting::night_light_temperature:
+        if (!integer_in_range(value, 1000, 10000))
+            return invalid("Expected temperature_kelvin in 1000..10000");
+        edit.value = value.get<int>();
+        break;
+    case Setting::idle_minutes:
+        if (!integer_in_range(value, 0, 1440))
+            return invalid("Expected display_off_after_minutes in 0..1440");
+        edit.value = value.get<int>();
+        break;
+    case Setting::power_profile:
+        if (value == "saver" || value == "balanced" || value == "performance")
+            edit.value = value.get<std::string>();
+        else if (!value.is_null())
+            return invalid("Expected saver, balanced, performance, or null for system policy");
+        break;
+    }
+    return edit;
 }
 
 std::optional<std::string> serialize(const IpcJson &object) {

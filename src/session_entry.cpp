@@ -1,5 +1,6 @@
 #include "build_info.hpp"
 #include "idle_power.hpp"
+#include "ipc_protocol.hpp"
 #include "output_capture.h"
 #include "satellite.hpp"
 #include "scene.hpp"
@@ -249,7 +250,9 @@ class Session {
         idle_ = seaside::IdlePower::create(
             loop_, server_.display(),
             [this](wlr_output *output, bool on) {
-                return seaside_tty_drm_set_output_power(drm_, output, on);
+                const bool changed = seaside_tty_drm_set_output_power(drm_, output, on);
+                idle_power_changed_ |= changed;
+                return changed;
             },
             [this](wlr_surface *surface) { return scene_.visible_output(surface); },
             [this](wlr_output *output) { return desktop_.fullscreen_inhibits_idle(output); });
@@ -262,7 +265,8 @@ class Session {
                                           seaside_output_capture_copy_manager(capture_.get()))) {
             return false;
         }
-        if (!seaside_tty_drm_enable_pending(drm_, server_.allocator(), server_.renderer())) {
+        if (!seaside_tty_drm_enable_pending(drm_, server_.allocator(), server_.renderer(),
+                                            outputs_.admission_preference(config.config))) {
             return false;
         }
         if (auto applied = outputs_.apply(config.config, false); !applied) {
@@ -292,7 +296,7 @@ class Session {
             }
         }
         startup_commands_ = config.config.autostart.commands;
-        desktop_.apply_initial_config(config.config);
+        desktop_.apply_config(config.config);
         seaside_tty_input_set_sensitivity(input_, config.config.input.mouse.sensitivity);
         seaside_tty_input_set_inverse_scroll(input_, config.config.input.mouse.scroll_direction ==
                                                          seaside::ScrollDirection::inverse);
@@ -357,13 +361,32 @@ class Session {
                 return request(method, params);
             },
             [this] { stop_requested(); },
-            [this](const IpcJson &,
+            [this](std::string_view method, const IpcJson &params,
                    seaside::IpcServer::Completion done) -> std::optional<IpcResult> {
                 if (!ready_ || stopping_ || ipc_exiting_) {
                     return std::unexpected(
                         IpcError{"not_ready", "The session is not accepting actions"});
                 }
-                return trace_->export_completed(std::move(done));
+                if (method == "trace.export")
+                    return trace_->export_completed(std::move(done));
+                auto edit = method == "action.night_light_set"
+                                ? seaside::SettingEdit{seaside::Setting::night_light_enabled,
+                                                       params.at("enabled").get<bool>()}
+                                : seaside::ipc::decode_setting_edit(params);
+                if (!edit)
+                    return std::unexpected(std::move(edit.error()));
+                config_->edit(std::move(*edit), [this, done = std::move(done)](
+                                                    LiveConfig::EditResult result) {
+                    if (!result) {
+                        done(std::unexpected(IpcError{std::move(result.error().code),
+                                                      std::move(result.error().message)}));
+                        return;
+                    }
+                    auto reply = seaside::ipc_action_result(*result);
+                    reply["revision"] = config_->revision();
+                    done(std::move(reply));
+                });
+                return std::nullopt;
             });
         if (!ipc) {
             std::fprintf(stderr, "seaside: control socket: %s\n", ipc.error().c_str());
@@ -482,10 +505,11 @@ class Session {
         session.trace_->drop_sample();
     }
 
-    static void pointer_motion(void *data, bool absolute, double x, double y) noexcept {
+    static void pointer_motion(void *data, seaside_pointer_motion kind, double x,
+                               double y) noexcept {
         auto &session = *static_cast<Session *>(data);
         if (!session.stopping_ && !session.ipc_exiting_) {
-            seaside_tty_drm_move(session.drm_, absolute, x, y);
+            seaside_tty_drm_move(session.drm_, kind, x, y);
             seaside_output_capture_cursor_changed(session.capture_.get());
             if (seaside_tty_drm_cursor_position(session.drm_, &x, &y)) {
                 session.desktop_.motion(x, y);
@@ -603,8 +627,7 @@ class Session {
   private:
     std::expected<bool, DesktopActionError>
     act(const Action &action, std::uint8_t modifiers = 0,
-        std::optional<seaside::WindowId> window = {},
-        std::optional<seaside::WorkspaceId> workspace = {}) noexcept {
+        std::optional<seaside::WindowId> window = {}) noexcept {
         switch (action.kind) {
         case ActionKind::exit:
             desktop_.finish_focus_cycle();
@@ -614,18 +637,21 @@ class Session {
             desktop_.finish_focus_cycle();
             launch(action.text);
             return true;
-        case ActionKind::night_light: {
+        case ActionKind::night_light:
             desktop_.finish_focus_cycle();
-            const auto before = config_->transaction().runtime_night_light();
-            const auto enabled = action.night_light == seaside::NightLightAction::toggle
-                                     ? !before
-                                     : action.night_light == seaside::NightLightAction::on;
-            config_->set_runtime_night_light(enabled);
-            apply_render_policy();
-            return before != enabled;
-        }
+            try {
+                config_->edit({seaside::Setting::night_light_enabled, action.night_light},
+                              [](LiveConfig::EditResult result) {
+                                  if (!result)
+                                      std::fprintf(stderr, "seaside: night light: %s\n",
+                                                   result.error().message.c_str());
+                              });
+                return true;
+            } catch (...) {
+                return std::unexpected(DesktopActionError::invalid_state);
+            }
         default:
-            return desktop_.dispatch(action, modifiers, window, workspace);
+            return desktop_.dispatch(action, modifiers, window);
         }
     }
 
@@ -669,6 +695,8 @@ class Session {
                 }
                 append_preferences_status(*result);
             }
+            if (result && method == "query.settings")
+                (*result)["power"] = power_status();
             return result;
         }
         if (method == "action.exit") {
@@ -691,8 +719,7 @@ class Session {
             return trace_->stop();
         }
         const auto decoded = seaside::decode_ipc_action(method, params);
-        return seaside::desktop_action_result(
-            act(decoded.action, 0, decoded.window, decoded.workspace));
+        return seaside::desktop_action_result(act(decoded.action, 0, decoded.window));
     }
 
     std::expected<void, seaside::Diagnostic> apply_config(const seaside::Config &active,
@@ -753,8 +780,7 @@ class Session {
         const auto &transaction = config_->transaction();
         const auto &config = transaction.active();
         scene_.set_render_policy(config.render.direct_scanout, config.render.allow_tearing,
-                                 transaction.runtime_night_light(),
-                                 config.night_light.temperature_kelvin);
+                                 config.night_light.enabled, config.night_light.temperature_kelvin);
         scene_.set_blur(config.render.blur.enabled, config.render.blur.strength,
                         config.render.blur.passes);
     }
@@ -794,13 +820,16 @@ class Session {
         result["appearance"] = {
             {"color_scheme",
              active.appearance.color_scheme == seaside::ColorScheme::dark ? "dark" : "light"}};
+        result["power"] = power_status();
+    }
+
+    IpcJson power_status() const {
+        const auto &profile = config_->transaction().active().power.profile;
         const auto &power = power_.status();
-        result["power"] = {{"requested", active.power.profile
-                                             ? seaside::power_profile_name(*active.power.profile)
-                                             : "system"},
-                           {"effective", power.effective ? IpcJson(*power.effective) : nullptr},
-                           {"available", power.available},
-                           {"state", power.state}};
+        return {{"requested", profile ? seaside::power_profile_name(*profile) : "system"},
+                {"effective", power.effective ? IpcJson(*power.effective) : nullptr},
+                {"available", power.available},
+                {"state", power.state}};
     }
 
     void config_changed(LiveConfig::Change change) {
@@ -814,6 +843,7 @@ class Session {
                 scene_.set_config_error(std::nullopt);
             }
             ipc_->event("config.recovered", {{"source", "user"}});
+            ipc_->event("settings.changed", {{"revision", config_->revision()}});
             publish();
         } else if (change == LiveConfig::Change::rejected && transaction.diagnostic()) {
             show_config_error(*transaction.diagnostic());
@@ -838,7 +868,7 @@ class Session {
     }
 
     void publish() noexcept try {
-        if (!applying_config_ && ipc_ && !stopping_) {
+        if (!applying_config_ && !output_config_pending_ && ipc_ && !stopping_) {
             outputs_.sync_fullscreen(config_->transaction().active());
             outputs_.refresh();
             control_.publish(*ipc_);
@@ -1138,8 +1168,7 @@ class Session {
 
     bool attach_desktop_output(const seaside::OutputConfig::Output &output,
                                seaside::WindowRect bounds) noexcept {
-        if (!desktop_.add_output(output.handle, output.connector, output.identity, bounds,
-                                 output.id)) {
+        if (!desktop_.add_output(output.handle, output.id, bounds)) {
             return false;
         }
         if (!seaside_output_capture_add_output(capture_.get(), output.handle, bounds.x, bounds.y)) {
@@ -1170,11 +1199,11 @@ class Session {
 
     static void output_removed(void *data, wlr_output *output, const char *) noexcept {
         auto &session = *static_cast<Session *>(data);
+        session.output_config_pending_ = !session.attaching_startup_;
         session.idle_->remove(output);
         session.outputs_.enabled(output, false);
         seaside_output_capture_remove_output(session.capture_.get(), output);
-        session.desktop_.remove_output(output, session.outputs_.ranked_fallback());
-        session.output_config_pending_ = !session.attaching_startup_;
+        session.desktop_.remove_output(output);
     }
 
     static void output_observed(void *data, wlr_output *output, const char *connector,
@@ -1183,7 +1212,7 @@ class Session {
         try {
             session.outputs_.observe(output, connector, identity ? identity : "", connected,
                                      reason);
-            session.publish();
+            session.output_config_pending_ = !session.attaching_startup_;
         } catch (...) {
             session.fail("output-status");
         }
@@ -1226,8 +1255,9 @@ class Session {
             return 0;
         }
         if (display.output_pending &&
-            !seaside_tty_drm_enable_pending(session.drm_, session.server_.allocator(),
-                                            session.server_.renderer())) {
+            !seaside_tty_drm_enable_pending(
+                session.drm_, session.server_.allocator(), session.server_.renderer(),
+                session.outputs_.admission_preference(session.config_->transaction().active()))) {
             session.fail("output-cursor-capture-setup");
             return 0;
         }
@@ -1262,6 +1292,9 @@ class Session {
             session.power_.tick(display.active);
         }
         session.idle_->set_active(session.ready_ && display.active);
+        if (std::exchange(session.idle_power_changed_, false)) {
+            session.publish();
+        }
         session.commands_->reap();
         if (!session.stopping_ &&
             wl_event_source_timer_update(session.timer_.get(), session.ready_ ? 100 : 25) < 0) {
@@ -1309,6 +1342,7 @@ class Session {
     bool attaching_startup_ = true;
     bool applying_config_ = false;
     bool output_config_pending_ = false;
+    bool idle_power_changed_ = false;
     bool config_error_visible_ = false;
     bool ipc_exiting_ = false;
     bool clean_exit_ = false;

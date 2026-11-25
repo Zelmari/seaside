@@ -62,6 +62,8 @@ class ReadLease {
         return {};
     }
 
+    bool intact() const noexcept { return fcntl(fd_, F_GETLEASE) == F_RDLCK; }
+
     ~ReadLease() {
         release();
         if (!blocked_)
@@ -102,13 +104,16 @@ std::expected<std::string, std::error_code> read_bytes(int fd, off_t size, Stora
     }
     return text;
 }
-bool same_file(const struct stat &a, const struct stat &b) {
-    return a.st_dev == b.st_dev && a.st_ino == b.st_ino && a.st_size == b.st_size &&
-           a.st_mtim.tv_sec == b.st_mtim.tv_sec && a.st_mtim.tv_nsec == b.st_mtim.tv_nsec &&
-           a.st_ctim.tv_sec == b.st_ctim.tv_sec && a.st_ctim.tv_nsec == b.st_ctim.tv_nsec;
-}
 bool same_inode(const struct stat &a, const struct stat &b) {
     return a.st_dev == b.st_dev && a.st_ino == b.st_ino;
+}
+bool same_contents(const struct stat &a, const struct stat &b) {
+    return same_inode(a, b) && a.st_size == b.st_size && a.st_mtim.tv_sec == b.st_mtim.tv_sec &&
+           a.st_mtim.tv_nsec == b.st_mtim.tv_nsec;
+}
+bool same_file(const struct stat &a, const struct stat &b) {
+    return same_contents(a, b) && a.st_ctim.tv_sec == b.st_ctim.tv_sec &&
+           a.st_ctim.tv_nsec == b.st_ctim.tv_nsec;
 }
 
 } // namespace
@@ -231,6 +236,24 @@ ConfigStore::read(const std::filesystem::path &path, bool private_state,
 std::expected<PublishResult, StorageError>
 ConfigStore::publish(const std::filesystem::path &path, std::string_view text, PublishMode mode,
                      const std::function<bool()> &still_current) const {
+    return publish_at(path, text, mode, still_current);
+}
+
+std::expected<PublishResult, StorageError>
+ConfigStore::replace_user(const std::filesystem::path &path, std::string_view expected,
+                          std::string_view text, const std::function<bool()> &still_current) const {
+    std::error_code error;
+    const auto resolved = std::filesystem::canonical(path, error);
+    if (error)
+        return std::unexpected(failure(StorageStep::open_read, path, error));
+    return publish_at(resolved, text, PublishMode::replace_snapshot, still_current, &path,
+                      expected);
+}
+
+std::expected<PublishResult, StorageError>
+ConfigStore::publish_at(const std::filesystem::path &path, std::string_view text, PublishMode mode,
+                        const std::function<bool()> &still_current,
+                        const std::filesystem::path *user_link, std::string_view expected) const {
     std::unique_lock publication_lock(publication_->mutex, std::defer_lock);
     if (!publication_lock.try_lock()) {
         // Main-loop callers enqueue work instead of entering this function.
@@ -255,12 +278,27 @@ ConfigStore::publish(const std::filesystem::path &path, std::string_view text, P
     const auto parent = path.has_parent_path() ? path.parent_path() : std::filesystem::path(".");
     if (auto error = io_->check(StorageStep::open_directory))
         return std::unexpected(failure(StorageStep::open_directory, path, error));
-    if (auto prepared = prepare_storage_directory(parent, *io_); !prepared)
-        return std::unexpected(std::move(prepared.error()));
+    if (!user_link) {
+        if (auto prepared = prepare_storage_directory(parent, *io_); !prepared)
+            return std::unexpected(std::move(prepared.error()));
+    }
     StorageFd directory(::open(parent.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC));
     if (directory.get() < 0)
         return std::unexpected(failure(StorageStep::open_directory, path));
     const auto name = path.filename().string();
+    StorageFd original(user_link ? ::openat(directory.get(), name.c_str(),
+                                            O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
+                                 : -1);
+    struct stat original_stat{};
+    const auto conflict = std::make_error_code(std::errc::resource_unavailable_try_again);
+    if (user_link) {
+        if (original.get() < 0 || ::fstat(original.get(), &original_stat) < 0)
+            return std::unexpected(failure(StorageStep::open_read, *user_link));
+        if (!S_ISREG(original_stat.st_mode) || original_stat.st_uid != ::getuid() ||
+            ::faccessat(directory.get(), name.c_str(), W_OK, AT_EACCESS) < 0)
+            return std::unexpected(failure(StorageStep::open_read, *user_link,
+                                           std::make_error_code(std::errc::permission_denied)));
+    }
     std::string temporary;
     int raw = -1;
     for (unsigned attempt = 0; attempt < 16; ++attempt) {
@@ -300,6 +338,8 @@ ConfigStore::publish(const std::filesystem::path &path, std::string_view text, P
     };
     if (::fstat(file.get(), &authored) < 0)
         return abort_write(StorageStep::create_temporary, system_error());
+    if (user_link && ::fchmod(file.get(), original_stat.st_mode & 0777) < 0)
+        return abort_write(StorageStep::create_temporary, system_error());
     for (std::size_t offset = 0; offset < text.size();) {
         if (auto error = io_->check(StorageStep::write))
             return abort_write(StorageStep::write, error);
@@ -328,6 +368,84 @@ ConfigStore::publish(const std::filesystem::path &path, std::string_view text, P
                            std::make_error_code(std::errc::operation_canceled));
     if (auto error = io_->check(StorageStep::publish))
         return abort_write(StorageStep::publish, error);
+
+    if (user_link) {
+        ReadLease lease(original.get());
+        auto check = io_->check(StorageStep::check_writer);
+        if (!check)
+            check = lease.acquire();
+        if (check)
+            return abort_write(StorageStep::check_writer, check);
+        auto current_text = read_bytes(original.get(), original_stat.st_size, *io_);
+        if (!current_text)
+            return abort_write(StorageStep::read, current_text.error());
+        struct stat current{};
+        std::error_code path_error;
+        if (*current_text != expected || ::fstat(original.get(), &current) < 0 ||
+            !same_file(current, original_stat) ||
+            std::filesystem::canonical(*user_link, path_error) != path ||
+            ::stat(user_link->c_str(), &current) < 0 || !same_file(current, original_stat) ||
+            stale() || !lease.intact())
+            return abort_write(StorageStep::publish, conflict);
+        if (text == expected) {
+            if (const auto cleanup = remove_temporary())
+                return std::unexpected(failure(StorageStep::cleanup, path, cleanup));
+            return PublishResult::already_exists;
+        }
+
+        // Exchange retains an editor's replacement even if its rename wins
+        // the race between validation and publication.
+        if (::renameat2(directory.get(), temporary.c_str(), directory.get(), name.c_str(),
+                        RENAME_EXCHANGE) < 0)
+            return abort_write(StorageStep::publish, system_error());
+
+        const auto sync = [&]() {
+            if (auto error = io_->check(StorageStep::sync_directory))
+                return error;
+            return ::fsync(directory.get()) < 0 ? system_error() : std::error_code{};
+        };
+        struct stat displaced{}, published{};
+        const bool same_original =
+            ::fstatat(directory.get(), temporary.c_str(), &displaced, AT_SYMLINK_NOFOLLOW) == 0 &&
+            same_inode(displaced, original_stat);
+        const bool observed =
+            ::fstatat(directory.get(), name.c_str(), &published, AT_SYMLINK_NOFOLLOW) == 0 &&
+            same_inode(published, authored);
+        auto publication_error = same_original && observed ? sync() : conflict;
+        if (!publication_error && (::stat(user_link->c_str(), &current) < 0 ||
+                                   !same_file(current, published) || !lease.intact()))
+            publication_error = conflict;
+        if (!publication_error) {
+            if (const auto cleanup = remove_temporary())
+                return std::unexpected(
+                    failure(StorageStep::cleanup, path, cleanup, false, true, true));
+            return PublishResult::written;
+        }
+
+        // Roll back only our publication. If another editor renamed again,
+        // preserve both saves rather than overwrite either one.
+        const auto quarantine = temporary + ".rollback";
+        bool restored = false;
+        if (::fstatat(directory.get(), name.c_str(), &current, AT_SYMLINK_NOFOLLOW) == 0 &&
+            observed && same_file(current, published) && !io_->check(StorageStep::rollback) &&
+            ::renameat2(directory.get(), name.c_str(), directory.get(), quarantine.c_str(),
+                        RENAME_NOREPLACE) == 0) {
+            struct stat moved{};
+            const bool ours =
+                ::fstatat(directory.get(), quarantine.c_str(), &moved, AT_SYMLINK_NOFOLLOW) == 0 &&
+                same_contents(moved, published);
+            const auto &restore = ours ? temporary : quarantine;
+            if (::renameat2(directory.get(), restore.c_str(), directory.get(), name.c_str(),
+                            RENAME_NOREPLACE) == 0 &&
+                ours) {
+                (void)remove_private(quarantine);
+                restored = ::fsync(directory.get()) == 0;
+            }
+        }
+        return std::unexpected(failure(publication_error == conflict ? StorageStep::publish
+                                                                     : StorageStep::sync_directory,
+                                       path, publication_error, !restored, false, !restored));
+    }
 
     // Keep the old inode until directory synchronization confirms publication.
     // A failed post-rename sync can then restore the previous recovery file.

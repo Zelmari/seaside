@@ -358,7 +358,7 @@ test('part3-tty-terminal-child', tty_terminal_test, suite: ['unit', 'part3'], ti
 
 config_foundation = static_library(
   'seaside-config-foundation',
-  ['src/config.cpp', 'src/bindings.cpp', 'src/config_store.cpp',
+  ['src/config.cpp', 'src/bindings.cpp', 'src/config_edit.cpp', 'src/config_store.cpp',
    'src/config_transaction.cpp', 'src/live_config.cpp', 'src/state.cpp'],
   include_directories: include_directories('src'),
   dependencies: [tomlplusplus, xkbcommon, wayland_server, threads],

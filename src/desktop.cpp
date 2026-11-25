@@ -117,11 +117,8 @@ wlr_output *Desktop::window_output_handle(WindowId id) const noexcept {
     return found == outputs_.end() ? nullptr : found->first;
 }
 
-bool Desktop::add_output(wlr_output *output, std::string_view connector, std::string_view identity,
-                         WindowRect bounds, std::string_view id) noexcept try {
-    auto [record, inserted] =
-        outputs_.try_emplace(output, Output{std::string(id.empty() ? connector : id),
-                                            std::string(connector), std::string(identity), bounds});
+bool Desktop::add_output(wlr_output *output, std::string_view id, WindowRect bounds) noexcept try {
+    auto [record, inserted] = outputs_.try_emplace(output, Output{std::string(id), bounds});
     if (!inserted) {
         return false;
     }
@@ -130,13 +127,13 @@ bool Desktop::add_output(wlr_output *output, std::string_view connector, std::st
         outputs_.erase(record);
         return false;
     }
+    discard_drag();
     if (!windows_.add_output(record->second.id, bounds, bounds)) {
         scene_.remove_output(output);
         outputs_.erase(record);
         cancel_drag();
         return false;
     }
-    discard_drag();
     project();
     return true;
 } catch (...) {
@@ -144,12 +141,14 @@ bool Desktop::add_output(wlr_output *output, std::string_view connector, std::st
     return false;
 }
 
-void Desktop::remove_output(wlr_output *output, std::string_view ranked_fallback) noexcept try {
+void Desktop::remove_output(wlr_output *output) noexcept try {
     auto record = outputs_.find(output);
     if (record != outputs_.end()) {
         discard_drag();
         scene_.remove_output(output);
-        windows_.remove_output(record->second.id, ranked_fallback);
+        if (!windows_.remove_output(record->second.id)) {
+            failed_ = true;
+        }
         outputs_.erase(record);
         project();
     }
@@ -179,13 +178,26 @@ bool Desktop::update_output(wlr_output *output, WindowRect bounds) noexcept try 
     return false;
 }
 
-void Desktop::apply_initial_config(const Config &config) noexcept {
-    windows_.set_initial_workspace_mode(config.workspaces.mode);
-    apply_config(config);
+void Desktop::set_primary_output(std::string_view id) noexcept try {
+    if (windows_.primary_output() == id) {
+        return;
+    }
+    discard_drag();
+    if (!windows_.set_primary_output(id)) {
+        failed_ = true;
+        return;
+    }
+    scene_.select_layer(nullptr);
+    project();
+} catch (...) {
+    failed_ = true;
 }
 
 void Desktop::apply_config(const Config &config) noexcept try {
     auto bindings = config.keybinds;
+    if (config.window.allow_edge_drag != windows_.allow_edge_drag()) {
+        discard_drag();
+    }
     if (bindings != bindings_) {
         discard_drag();
         finish_focus_cycle();
@@ -344,6 +356,7 @@ void Desktop::project(WindowId resize, bool geometry_only) {
                     dragged &&
                     (drag_->window == id || (fitted && view.tile_layout &&
                                              state.home_workspace == dragged->home_workspace)),
+                .unclipped_move = view.unclipped_move,
             });
         if (view.visible) {
             presented_[id] = geometry;
@@ -676,9 +689,10 @@ bool Desktop::action(const Action &action, std::uint8_t modifiers) noexcept {
     return true;
 }
 
-std::expected<bool, DesktopActionError>
-Desktop::dispatch(const Action &action, std::uint8_t modifiers, std::optional<WindowId> target,
-                  std::optional<WorkspaceId> workspace) noexcept try {
+std::expected<bool, DesktopActionError> Desktop::dispatch(const Action &action,
+                                                          std::uint8_t modifiers,
+                                                          std::optional<WindowId> target) noexcept
+    try {
     using Error = DesktopActionError;
     const auto focused = windows_.focused_window();
     const auto id = target.value_or(keyboard_window_.value_or(0));
@@ -715,6 +729,9 @@ Desktop::dispatch(const Action &action, std::uint8_t modifiers, std::optional<Wi
         changed = focused != windows_.focused_window();
         break;
     case ActionKind::workspace: {
+        if (action.argument <= 0 || action.argument > workspace_count) {
+            return std::unexpected(Error::invalid_state);
+        }
         const auto destination = static_cast<WorkspaceId>(action.argument);
         if (!current_workspace) {
             return std::unexpected(Error::no_target);
@@ -724,35 +741,6 @@ Desktop::dispatch(const Action &action, std::uint8_t modifiers, std::optional<Wi
         }
         discard_drag();
         changed = windows_.select_workspace(destination);
-        break;
-    }
-    case ActionKind::transfer_workspace: {
-        const auto selected = workspace ? workspace : current_workspace;
-        if (!selected || !windows_.state().workspace(*selected)) {
-            return std::unexpected(workspace ? Error::not_found : Error::no_target);
-        }
-        const auto selector = parse_output_selector(action.text);
-        if (!selector) {
-            return std::unexpected(Error::not_found);
-        }
-        std::optional<std::string_view> destination;
-        for (const auto &[handle, output] : outputs_) {
-            const auto &value =
-                selector->kind == SelectorKind::connector ? output.connector : output.identity;
-            if (selector->value == value) {
-                if (destination) {
-                    return std::unexpected(Error::ambiguous_output);
-                }
-                destination = output.id;
-            }
-        }
-        if (!destination) {
-            return std::unexpected(Error::not_found);
-        }
-        changed = windows_.transfer_workspace(*destination, selected);
-        if (changed) {
-            discard_drag();
-        }
         break;
     }
     case ActionKind::night_light:
@@ -772,6 +760,9 @@ Desktop::dispatch(const Action &action, std::uint8_t modifiers, std::optional<Wi
         discard_drag();
         switch (action.kind) {
         case ActionKind::move_to_workspace: {
+            if (action.argument <= 0 || action.argument > workspace_count) {
+                return std::unexpected(Error::invalid_state);
+            }
             const auto destination = static_cast<WorkspaceId>(action.argument);
             const bool would_change = entry->home_workspace != destination || id != focused ||
                                       current_workspace != destination;

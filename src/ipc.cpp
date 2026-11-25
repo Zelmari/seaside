@@ -103,7 +103,7 @@ struct IpcServer::Impl {
         void ready(std::uint32_t mask);
         void consume();
         void request(std::string_view wire);
-        void defer(std::uint64_t id, const IpcJson &params);
+        void defer(std::uint64_t id, std::string_view method, const IpcJson &params);
         bool queue(Pending next);
         void respond(std::optional<std::uint64_t> id, bool reservation, IpcResult result,
                      bool exit = false, bool already_counted = false);
@@ -400,8 +400,9 @@ void IpcServer::Impl::Peer::request(std::string_view wire) {
         subscribed = !closed;
         return;
     }
-    if (method == "trace.export" && server.deferred) {
-        defer(*id, record.object["params"]);
+    if (server.deferred && (method == "trace.export" || method == "action.settings_update" ||
+                            method == "action.night_light_set")) {
+        defer(*id, method, record.object["params"]);
         return;
     }
 
@@ -418,7 +419,8 @@ void IpcServer::Impl::Peer::request(std::string_view wire) {
     }
 }
 
-void IpcServer::Impl::Peer::defer(std::uint64_t id, const IpcJson &params) {
+void IpcServer::Impl::Peer::defer(std::uint64_t id, std::string_view method,
+                                  const IpcJson &params) {
     auto complete = [peer = weak_from_this(), once = std::make_shared<bool>(false),
                      id](IpcResult result) noexcept {
         if (std::exchange(*once, true)) {
@@ -437,11 +439,11 @@ void IpcServer::Impl::Peer::defer(std::uint64_t id, const IpcJson &params) {
     };
     ++requests;
     try {
-        if (auto immediate = server.deferred(params, complete)) {
+        if (auto immediate = server.deferred(method, params, complete)) {
             complete(std::move(*immediate));
         }
     } catch (...) {
-        complete(std::unexpected(IpcError{"internal_error", "Could not start trace export"}));
+        complete(std::unexpected(IpcError{"internal_error", "Could not start the IPC action"}));
     }
 }
 

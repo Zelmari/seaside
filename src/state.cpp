@@ -29,7 +29,7 @@ std::expected<void, StateError> State::remove_output(std::string_view id) noexce
     return {};
 }
 std::expected<void, StateError> State::add_workspace(WorkspaceId id) noexcept {
-    if (id == 0 || id > 2147483647U) {
+    if (id == 0 || id > workspace_count) {
         return std::unexpected(StateError::invalid_id);
     }
     try {
@@ -49,6 +49,9 @@ std::expected<void, StateError> State::assign_workspace(WorkspaceId workspace_id
     }
     if (!outputs_.contains(output_id)) {
         return std::unexpected(StateError::missing_output);
+    }
+    if (workspace->second.owner_or_last_output == output_id) {
+        return {};
     }
     try {
         std::optional<OutputId> owner{output_id};

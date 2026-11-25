@@ -70,10 +70,6 @@ std::string bounded_utf8(const char *value, std::size_t limit) {
     return result;
 }
 
-std::string_view workspace_mode(WorkspaceMode mode) {
-    return mode == WorkspaceMode::global ? "global" : "per-monitor";
-}
-
 Json config_status(const LiveConfig &config, std::string_view path) {
     const auto &transaction = config.transaction();
     const auto &active = transaction.active();
@@ -82,9 +78,6 @@ Json config_status(const LiveConfig &config, std::string_view path) {
             {"source", sources[static_cast<unsigned>(config.source())]},
             {"active_layout", active.window.layout == Layout::dwindle ? "dwindle" : "scrolling"},
             {"active_tiling", active.window.tiling},
-            {"active_workspace_mode", workspace_mode(active.workspaces.mode)},
-            {"requested_workspace_mode", workspace_mode(transaction.requested().workspaces.mode)},
-            {"pending_restart", transaction.restart_pending()},
             {"recovery_persisted", transaction.recovery_persisted()},
             {"error",
              transaction.diagnostic() ? ipc_diagnostic(*transaction.diagnostic()) : Json(nullptr)}};
@@ -122,9 +115,6 @@ IpcResult desktop_action_result(std::expected<bool, DesktopActionError> result) 
         return std::unexpected(IpcError{"not_found", "The requested target is unavailable"});
     case DesktopActionError::invalid_state:
         return std::unexpected(IpcError{"invalid_state", "The target cannot perform this action"});
-    case DesktopActionError::ambiguous_output:
-        return std::unexpected(
-            IpcError{"ambiguous_output", "The output selector matches more than one output"});
     }
     return std::unexpected(IpcError{"internal_error", "Unknown desktop action result"});
 }
@@ -134,7 +124,6 @@ IpcAction decode_ipc_action(std::string_view method, const IpcJson &params) {
         {"action.focus", ActionKind::focus},
         {"action.cycle_focus_mru", ActionKind::cycle_focus_mru},
         {"action.workspace_select", ActionKind::workspace},
-        {"action.workspace_transfer", ActionKind::transfer_workspace},
         {"action.window_to_workspace", ActionKind::move_to_workspace},
         {"action.window_toggle_tiling", ActionKind::toggle_window_tiling},
         {"action.window_toggle_pin", ActionKind::toggle_window_pin},
@@ -144,7 +133,6 @@ IpcAction decode_ipc_action(std::string_view method, const IpcJson &params) {
         {"action.window_move", ActionKind::move_window},
         {"action.window_swap", ActionKind::swap_window},
         {"action.window_resize", ActionKind::resize_window},
-        {"action.night_light_set", ActionKind::night_light},
         {"action.exit", ActionKind::exit},
     };
     const auto selected =
@@ -171,18 +159,10 @@ IpcAction decode_ipc_action(std::string_view method, const IpcJson &params) {
         request.window = params.at("window_id").get<WindowId>();
     }
     if (params.contains("workspace_id")) {
-        request.workspace = params.at("workspace_id").get<WorkspaceId>();
-        request.action.argument = *request.workspace;
+        request.action.argument = params.at("workspace_id").get<WorkspaceId>();
     }
     if (request.action.kind == ActionKind::resize_window) {
         request.action.argument = params.value("delta", 32);
-    }
-    if (params.contains("selector")) {
-        request.action.text = params.at("selector").get<std::string>();
-    }
-    if (params.contains("enabled")) {
-        request.action.night_light =
-            params.at("enabled").get<bool>() ? NightLightAction::on : NightLightAction::off;
     }
     return request;
 }
@@ -266,6 +246,7 @@ IpcJson SessionControl::output_rows() const {
             {"connector", output.connector},
             {"connected", output.handle != nullptr},
             {"enabled", output.enabled},
+            {"primary", output.enabled && desktop_.windows().primary_output() == id},
             {"power_state", !output.enabled || !output.handle ? "disabled"
                             : output.status.sleeping          ? "asleep"
                                                               : "awake"},
@@ -303,7 +284,7 @@ IpcJson SessionControl::night_light(const ConfigTransaction &config) const {
         outputs.push_back(std::move(cap));
     }
     return {{"configured_enabled", config.active().night_light.enabled},
-            {"enabled", config.runtime_night_light()},
+            {"enabled", config.active().night_light.enabled},
             {"temperature_kelvin", config.active().night_light.temperature_kelvin},
             {"outputs", std::move(outputs)}};
 }
@@ -368,6 +349,15 @@ IpcResult SessionControl::query(std::string_view method, const LiveConfig &confi
     if (method == "query.night_light") {
         return night_light(config.transaction());
     }
+    if (method == "query.settings") {
+        const auto &active = config.transaction().active();
+        return Json{
+            {"revision", config.revision()},
+            {"keybinds", bindings(active.keybinds)["bindings"]},
+            {"night_light", night_light(config.transaction())},
+            {"idle", {{"display_off_after_minutes", active.idle.display_off_after_minutes}}},
+            {"window", {{"allow_edge_drag", active.window.allow_edge_drag}}}};
+    }
     return std::unexpected(IpcError{"unknown_method", "Unknown query"});
 }
 
@@ -403,16 +393,24 @@ void SessionControl::publish(IpcServer &ipc) {
             .scale = state.scale,
             .connected = output.handle != nullptr,
             .enabled = output.enabled,
+            .primary = output.enabled && desktop.primary_output() == id,
+            .sleeping = output.enabled && output.status.sleeping,
             .adaptive_sync = output.status.adaptive_sync,
         };
         auto [previous, inserted] = published_outputs_.try_emplace(id);
         auto &published = previous->second;
-        if (inserted || published.state != next || published.connector != output.connector) {
+        if (inserted || published.state != next || published.connector != output.connector ||
+            published.disabled_reason != output.disabled_reason) {
             ipc.event("output.changed", {{"output_id", output.id},
                                          {"connected", next.connected},
-                                         {"enabled", next.enabled}});
+                                         {"enabled", next.enabled},
+                                         {"primary", next.primary},
+                                         {"power_state", !next.enabled   ? "disabled"
+                                                         : next.sleeping ? "asleep"
+                                                                         : "awake"}});
             published.state = next;
             published.connector = output.connector;
+            published.disabled_reason = output.disabled_reason;
         }
     }
     for (const auto &[id, workspace] : desktop.state().workspaces()) {

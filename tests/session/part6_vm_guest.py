@@ -11,6 +11,7 @@ import struct
 import subprocess
 import tempfile
 import time
+import tomllib
 import zlib
 
 
@@ -30,6 +31,8 @@ mode = 'per-monitor'
 [window]
 layout = 'dwindle'
 gaps_outer = 28
+[night_light]
+enabled = true
 [keybinds]
 "Super+F2" = "exec foot"
 """
@@ -175,6 +178,9 @@ class Session:
     def config(self):
         return self.ctl("status")["result"]["config"]
 
+    def night_light_enabled(self):
+        return self.ctl("night-light", "status")["result"]["configured_enabled"]
+
     def windows(self):
         rows = self.ctl("windows")["result"]["windows"]
         ids = [row["id"] for row in rows]
@@ -280,11 +286,11 @@ class Events:
 
 
 def check_completed_saves(session, events, target, snapshot, initial, selected):
-    def accepted(text, pending):
+    def accepted(text, night_light):
         events.expect("config.recovered")
         session.wait(lambda: session.config()["recovery_persisted"], "completed save snapshot")
         status = session.config()
-        require(not status["error"] and status["pending_restart"] == pending and
+        require(not status["error"] and session.night_light_enabled() == night_light and
                 snapshot.read_text() == text, "Completed save lost live state or snapshot bytes")
 
     stage = target.with_suffix(".stage")
@@ -325,7 +331,7 @@ def check_completed_saves(session, events, target, snapshot, initial, selected):
         deadline = time.monotonic() + .65
         while time.monotonic() < deadline:
             status = session.config()
-            require(not status["error"] and not status["pending_restart"] and
+            require(not status["error"] and not session.night_light_enabled() and
                     snapshot.read_text() == initial, "Overflow published an open writer's prefix")
             time.sleep(.05)
         writer.write("# complete\n")
@@ -352,7 +358,7 @@ def run_live(repo, directory, result_dir, state):
     files = directory / "files"
     profiles.mkdir()
     files.mkdir()
-    selected = initial + "\n[workspaces]\nmode = 'per-monitor'\n"
+    selected = initial + "\n[workspaces]\nmode = 'per-monitor'\n[night_light]\nenabled = true\n"
     (files / "work").write_text(initial)
     (files / "home").write_text(selected)
     (profiles / "active").symlink_to("../files/work")
@@ -368,7 +374,7 @@ def run_live(repo, directory, result_dir, state):
             (profiles / "next").replace(profiles / "active")
             events.expect("config.recovered")
             session.wait(lambda: session.config()["recovery_persisted"], "switched profile snapshot")
-            require(session.config()["pending_restart"] and snapshot.read_text() == selected,
+            require(session.night_light_enabled() and snapshot.read_text() == selected,
                     "Retargeting the intermediate link did not apply the selected profile")
             (files / "home").write_text(bad_config)
             events.expect("config.error")
@@ -377,7 +383,7 @@ def run_live(repo, directory, result_dir, state):
             (files / "home").write_text(initial)
             events.expect("config.recovered")
             session.wait(lambda: session.config()["recovery_persisted"], "repaired profile snapshot")
-            require(not session.config()["pending_restart"] and snapshot.read_text() == initial,
+            require(not session.night_light_enabled() and snapshot.read_text() == initial,
                     "A subsequent edit of the new target did not repair the profile")
             (profiles / "next").symlink_to(".")
             (profiles / "next").replace(profiles / "active")
@@ -402,19 +408,29 @@ def run_live(repo, directory, result_dir, state):
             session.wait(lambda: any(w["id"] == first and w["fullscreen"] for w in session.windows()),
                          "the first terminal's fullscreen state")
             output = session.focused_output()
+            workspaces = session.ctl("workspaces")["result"]["workspaces"]
+            require([workspace["id"] for workspace in workspaces] == list(range(1, 11)) and
+                    all(workspace["output_id"] == output["id"] for workspace in workspaces),
+                    "The single display did not own workspaces 1–10")
+            state["workspace_count"] = len(workspaces)
             position = output["position"]
             region = f'{position["x"] + output["mode"]["width"] - 132},{position["y"]} 128x12'
             clean = session.strip(region)
             state["screen"] = session.screenshot(result_dir, "clean")
 
             session.ctl("night-light", "on")
-            require(session.ctl("night-light", "status")["result"]["enabled"],
-                    "Runtime night light did not change")
+            events.expect("config.recovered")
+            session.wait(lambda: session.config()["recovery_persisted"], "night-light recovery snapshot")
+            night_light_saved = config.read_text()
+            require(session.night_light_enabled() and config.is_symlink() and
+                    tomllib.loads(night_light_saved)["night_light"]["enabled"] and
+                    snapshot.read_text() == night_light_saved,
+                    "Night-light change did not update the linked user file and the recovery snapshot")
             replace(config, bad_config)
             invalid = events.expect("config.error")
             rejected = session.config()
             require(rejected["error"]["field"] == "window.gaps_outer" and
-                    rejected["error"]["line"] == 2 and snapshot.read_text() == initial,
+                    rejected["error"]["line"] == 2 and snapshot.read_text() == night_light_saved,
                     "Invalid edit lost its diagnostic or replaced last-good TOML")
             session.wait(lambda: session.strip(region) != clean, "visible fullscreen error banner")
             session.screenshot(result_dir, "error")
@@ -426,27 +442,24 @@ def run_live(repo, directory, result_dir, state):
             with config.open("w") as writer:
                 writer.write(prefix)
                 writer.flush()
-                # The prefix is valid TOML with a different workspace mode.
+                # The prefix is valid TOML with a different gaps setting.
                 # Hold it open across the debounce window and query live state.
                 deadline = time.monotonic() + .65
                 while time.monotonic() < deadline:
                     staged = session.config()
                     require(staged["error"] and staged["error"]["message"] ==
-                            missing["data"]["message"] and not staged["pending_restart"] and
-                            snapshot.read_text() == initial,
+                            missing["data"]["message"] and
+                            snapshot.read_text() == night_light_saved,
                             "An unfinished recreated config changed active state or last-good TOML")
                     time.sleep(.05)
                 writer.write("[keybinds]" + bindings)
             recovered = events.expect("config.recovered")
             session.wait(lambda: session.config()["recovery_persisted"], "new recovery snapshot")
             accepted = session.config()
-            require(not accepted["error"] and accepted["pending_restart"] and
-                    accepted["active_workspace_mode"] == "global" and
-                    accepted["requested_workspace_mode"] == "per-monitor" and
-                    snapshot.read_text() == repair, "Valid edit lost live or restart-only state")
+            require(not accepted["error"] and snapshot.read_text() == repair,
+                    "Valid edit lost live state or snapshot bytes")
             state["partial_recreation"] = "held-until-close"
-            require(session.ctl("night-light", "status")["result"]["enabled"],
-                    "An unrelated edit cleared the night-light override")
+            require(session.night_light_enabled(), "The repaired file did not retain night light")
             session.wait(lambda: session.strip(region) == clean, "banner removal after repair")
             session.screenshot(result_dir, "recovered")
 
@@ -490,7 +503,6 @@ def run_live(repo, directory, result_dir, state):
                                        "mode_rejected": mode_rejected["seq"], "position_applied": moved["seq"],
                                        "workspace": workspace["seq"], "remapped": remapped["seq"],
                                        "focused": focused["seq"], "query": events.query_watermark()}
-            state["pending_restart"] = accepted["requested_workspace_mode"]
             require(first_autostart.read_text().splitlines() == [str(session.path)] and
                     not second_autostart.exists(), "Reload reran autostart commands")
             target = remapped["data"]["window_id"]
@@ -511,11 +523,9 @@ def run_live(repo, directory, result_dir, state):
         recovered = session.config()
         require(recovered["source"] == "last_good" and
                 recovered["error"]["field"] == "monitors.resolution" and
-                not recovered["pending_restart"] and recovered["active_workspace_mode"] == "per-monitor" and
                 snapshot.read_text() == moved_config and config.read_text() == unsupported_config,
                 "An unsupported boot mode did not recover the last-good configuration")
-        require(not session.ctl("night-light", "status")["result"]["enabled"],
-                "Restart restored a transient night-light override")
+        require(session.night_light_enabled(), "Restart did not restore the saved night-light setting")
         session.wait(second_autostart.is_file, "the restart autostart command")
         require(second_autostart.read_text().splitlines() == [str(session.path)],
                 "Recovery did not start the persisted launch command with the current socket")
@@ -527,7 +537,7 @@ def run_live(repo, directory, result_dir, state):
         session.wait(lambda: session.strip(f"{right},{top} 128x12") !=
                      session.strip(f"{right},{top + 150} 128x12"), "visible startup error banner")
         session.screenshot(result_dir, "startup-error")
-        state["restarted_mode"] = recovered["active_workspace_mode"]
+        state["night_light_persisted"] = True
         state["startup_source"] = recovered["source"]
         session.exit()
 
@@ -635,8 +645,8 @@ def run_preflight(repo, directory, result_dir, state):
                 status = session.ctl("status")["result"]
                 require(status["ready"] and status["integrations"]["pipewire"]["state"] == "checking",
                         "The Wayland session did not become usable during its PipeWire probe")
-                mutation = session.request("action.workspace_select", {"workspace_id": 41})
-                require(mutation["ok"] and session.ctl("focus")["result"]["workspace_id"] == 41,
+                mutation = session.request("action.workspace_select", {"workspace_id": 9})
+                require(mutation["ok"] and session.ctl("focus")["result"]["workspace_id"] == 9,
                         "Workspace selection did not work during the silent PipeWire probe")
                 session.wait(marker.is_file, "autostart during the PipeWire probe")
                 session.exit()

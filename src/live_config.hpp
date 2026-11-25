@@ -1,6 +1,7 @@
 #ifndef SEASIDE_LIVE_CONFIG_HPP
 #define SEASIDE_LIVE_CONFIG_HPP
 
+#include "config_edit.hpp"
 #include "config_transaction.hpp"
 
 struct wl_event_loop;
@@ -30,7 +31,10 @@ class LiveConfig final {
 
     const ConfigTransaction &transaction() const noexcept;
     ConfigSource source() const noexcept;
-    void set_runtime_night_light(bool enabled) noexcept;
+    std::uint64_t revision() const noexcept;
+    using EditResult = std::expected<bool, SettingError>;
+    using EditCompletion = std::function<void(EditResult)>;
+    void edit(SettingEdit edit, EditCompletion completion);
     void session_ready() noexcept;
 
   private:

@@ -28,12 +28,13 @@ constexpr std::string_view usage =
     "Usage: seasidectl status|bindings|outputs|workspaces|windows|exit|events\n"
     "       seasidectl focus [left|right|up|down]\n"
     "       seasidectl workspace ID\n"
-    "       seasidectl workspace transfer ID SELECTOR\n"
     "       seasidectl window toggle-tiling|toggle-pin|toggle-maximize|toggle-fullscreen|close\n"
     "       seasidectl window move|swap DIR\n"
     "       seasidectl window resize DIR [DELTA]\n"
     "       seasidectl window to-workspace ID\n"
-    "       seasidectl night-light status|on|off\n"
+    "       seasidectl night-light status|on|off|toggle\n"
+    "       seasidectl settings [set SETTING VALUE]\n"
+    "       seasidectl keybind set CHORD ACTION | unset CHORD | reset\n"
     "       seasidectl debug render\n"
     "       seasidectl trace start|stop|export\n"
     "       seasidectl --help | --version\n";
@@ -83,6 +84,42 @@ std::optional<Command> window_command(Args args) {
     return {};
 }
 
+Command settings_update(std::string_view name, IpcJson value) {
+    return {"action.settings_update", {{"setting", name}, {"value", std::move(value)}}};
+}
+
+std::optional<Command> settings_command(Args args) {
+    if (args.size() != 3 || std::string_view(args[0]) != "set")
+        return {};
+    const std::string_view name = args[1], value = args[2];
+    const auto setting = seaside::parse_setting(name);
+    if (!setting || *setting == seaside::Setting::keybinds)
+        return {};
+    switch (*setting) {
+    case seaside::Setting::idle_minutes:
+    case seaside::Setting::night_light_temperature:
+        return settings_update(name, integer(value));
+    case seaside::Setting::power_profile:
+        return settings_update(name, value == "system" ? IpcJson(nullptr) : IpcJson(value));
+    default:
+        if (value == "true" || value == "false")
+            return settings_update(name, value == "true");
+        return settings_update(name, value);
+    }
+}
+
+std::optional<Command> keybind_command(Args args) {
+    const std::string_view operation = args[0];
+    if (args.size() == 1 && operation == "reset")
+        return settings_update("keybinds", nullptr);
+    if ((args.size() == 3 && operation == "set") || (args.size() == 2 && operation == "unset")) {
+        auto result = settings_update("keybinds", operation == "set" ? IpcJson(args[2]) : nullptr);
+        result.second["chord"] = args[1];
+        return result;
+    }
+    return {};
+}
+
 std::optional<Command> command(Args args) {
     if (args.empty()) {
         return {};
@@ -92,6 +129,7 @@ std::optional<Command> command(Args args) {
         {"outputs", "query.outputs"},   {"workspaces", "query.workspaces"},
         {"windows", "query.windows"},   {"focus", "query.focus"},
         {"events", "events.subscribe"}, {"exit", "action.exit"},
+        {"settings", "query.settings"},
     };
     const std::string_view group = args[0];
     if (args.size() == 1) {
@@ -105,11 +143,11 @@ std::optional<Command> command(Args args) {
     if (group == "window") {
         return window_command(args.subspan(1));
     }
+    if (group == "settings")
+        return settings_command(args.subspan(1));
+    if (group == "keybind")
+        return keybind_command(args.subspan(1));
     const std::string_view operation = args[1];
-    if (group == "workspace" && args.size() == 4 && operation == "transfer") {
-        return Command{"action.workspace_transfer",
-                       IpcJson{{"workspace_id", integer(args[2])}, {"selector", args[3]}}};
-    }
     if (args.size() != 2) {
         return {};
     }
@@ -125,6 +163,8 @@ std::optional<Command> command(Args args) {
     if (group == "night-light" && (operation == "on" || operation == "off")) {
         return Command{"action.night_light_set", IpcJson{{"enabled", operation == "on"}}};
     }
+    if (group == "night-light" && operation == "toggle")
+        return settings_update("night_light.enabled", "toggle");
     if (group == "debug" && operation == "render") {
         return Command{"query.diagnostics", IpcJson::object()};
     }

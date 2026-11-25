@@ -32,9 +32,9 @@ class StateTest : public testing::Test {
 TEST_F(StateTest, ValidatesWorkspaceBoundsAndOpaqueOutputIdentity) {
     State state;
     expect_error(state.add_workspace(0), StateError::invalid_id);
-    expect_error(state.add_workspace(2147483648U), StateError::invalid_id);
-    ASSERT_TRUE(state.add_workspace(2147483647U));
-    expect_error(state.add_workspace(2147483647U), StateError::duplicate);
+    expect_error(state.add_workspace(seaside::workspace_count + 1), StateError::invalid_id);
+    ASSERT_TRUE(state.add_workspace(seaside::workspace_count));
+    expect_error(state.add_workspace(seaside::workspace_count), StateError::duplicate);
     expect_error(state.add_output(""), StateError::invalid_id);
     ASSERT_TRUE(state.add_output("output:opaque-1"));
     expect_error(state.add_output("output:opaque-1"), StateError::duplicate);

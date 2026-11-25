@@ -784,8 +784,7 @@ bool run_part4(const Fixture &fixture) {
     auto &desktop = fixture.desktop;
     auto output = fixture.output();
     REQUIRE(output);
-    REQUIRE(desktop.add_output(part3_output_handle(output.get()), "headless", "stable-headless",
-                               output_bounds));
+    REQUIRE(desktop.add_output(part3_output_handle(output.get()), "headless", output_bounds));
     const auto &windows = desktop.windows();
     const auto original_workspace = windows.focused_workspace();
     REQUIRE(original_workspace);
@@ -838,9 +837,9 @@ bool run_part4(const Fixture &fixture) {
     REQUIRE(connection.attach(second, second.configured.width, second.configured.height));
     REQUIRE(windows.view(*b).geometry == ordinary);
 
-    REQUIRE(desktop.action(action(ActionKind::move_to_workspace, 42)));
-    REQUIRE(windows.focused_window() == b && windows.focused_workspace() == 42);
-    REQUIRE(windows.state().window(*b)->home_workspace == 42 && !windows.view(*a).visible);
+    REQUIRE(desktop.action(action(ActionKind::move_to_workspace, 4)));
+    REQUIRE(windows.focused_window() == b && windows.focused_workspace() == 4);
+    REQUIRE(windows.state().window(*b)->home_workspace == 4 && !windows.view(*a).visible);
     REQUIRE(desktop.action(action(ActionKind::workspace, *original_workspace)));
     REQUIRE(connection.wait(first, [&] { return first.configured.activated; }));
     REQUIRE(connection.wait(second, [&] { return !second.configured.activated; }));
@@ -857,14 +856,14 @@ bool run_part4(const Fixture &fixture) {
         REQUIRE(scene.window_at(x, y, target));
         REQUIRE(target.id == a && target.surface != scene.window_surface(*a));
         REQUIRE(target.sx == 2.0 && target.sy == 2.0);
-        REQUIRE(desktop.action(action(ActionKind::workspace, 42)));
+        REQUIRE(desktop.action(action(ActionKind::workspace, 4)));
         REQUIRE(connection.wait(first, [&] { return popup.dismissed; }));
         REQUIRE(!windows.view(*a).visible);
         REQUIRE(desktop.action(action(ActionKind::workspace, *original_workspace)));
     }
 
     REQUIRE(desktop.action(action(ActionKind::toggle_window_pin)));
-    REQUIRE(desktop.action(action(ActionKind::workspace, 42)));
+    REQUIRE(desktop.action(action(ActionKind::workspace, 4)));
     REQUIRE(windows.view(*a).visible && windows.view(*a).pinned);
     REQUIRE(windows.state().window(*a)->home_workspace == *original_workspace);
     REQUIRE(windows.focused_window() == b);
@@ -877,9 +876,8 @@ bool run_part4(const Fixture &fixture) {
 
     output = fixture.output();
     REQUIRE(output);
-    REQUIRE(desktop.add_output(part3_output_handle(output.get()), "headless", "stable-headless",
-                               output_bounds));
-    REQUIRE(windows.focused_workspace() == 42 && windows.focused_window() == b);
+    REQUIRE(desktop.add_output(part3_output_handle(output.get()), "headless", output_bounds));
+    REQUIRE(windows.focused_workspace() == 4 && windows.focused_window() == b);
     REQUIRE(windows.view(*a).visible && windows.view(*b).visible);
     REQUIRE(hit(scene, ordinary, *b));
     auto *frame = wl_surface_frame(second.surface);
@@ -916,7 +914,7 @@ bool run_part4(const Fixture &fixture) {
     return true;
 }
 
-bool run_workspace_reassignment(const Fixture &fixture) {
+bool run_workspace_topology(const Fixture &fixture) {
     auto &desktop = fixture.desktop;
     const auto &windows = desktop.windows();
     auto left = fixture.output();
@@ -924,30 +922,45 @@ bool run_workspace_reassignment(const Fixture &fixture) {
     REQUIRE(left && right);
     const WindowRect right_bounds{output_bounds.width, 0, output_bounds.width,
                                   output_bounds.height};
-    REQUIRE(desktop.add_output(part3_output_handle(left.get()), "left", "", output_bounds));
-    REQUIRE(desktop.add_output(part3_output_handle(right.get()), "right", "", right_bounds));
-    const auto migrated = windows.state().output("right")->shown;
-    REQUIRE(migrated);
+    REQUIRE(desktop.add_output(part3_output_handle(left.get()), "left", output_bounds));
+    REQUIRE(desktop.add_output(part3_output_handle(right.get()), "right", right_bounds));
+    REQUIRE(windows.state().workspaces().size() == seaside::workspace_count);
+    REQUIRE(windows.state().output("left")->shown == 1);
+    REQUIRE(windows.state().output("right")->shown == 6);
+    REQUIRE(desktop.dispatch(action(ActionKind::workspace, 8)).value_or(false));
+    REQUIRE(windows.focused_output() == "right");
+    Connection connection(fixture.display);
+    Client client;
+    REQUIRE(connection.connect(client) && connection.open(client));
+    REQUIRE(connection.attach(client, ordinary_width, ordinary_height));
+    const auto window = desktop.keyboard_window();
+    REQUIRE(window);
+    REQUIRE(windows.view(*window).geometry.x >= right_bounds.x);
 
     desktop.remove_output(part3_output_handle(right.get()));
     right.reset();
-    REQUIRE(windows.workspace_output(*migrated) == "left");
-    REQUIRE(windows.workspace_owner(*migrated) == "right");
-    auto transfer = action(ActionKind::transfer_workspace);
-    transfer.text = "connector:left";
-    const auto changed = desktop.dispatch(transfer, 0, {}, migrated);
-    REQUIRE(changed && *changed);
-    REQUIRE(windows.workspace_owner(*migrated) == "left");
-    REQUIRE(windows.focused_workspace() == migrated);
-    const auto current = desktop.dispatch(transfer, 0, {}, migrated);
-    REQUIRE(current && !*current);
+    REQUIRE(windows.workspace_output(8) == "left");
+    REQUIRE(windows.workspace_owner(8) == "left");
+    REQUIRE(windows.focused_workspace() == 8);
+    REQUIRE(windows.focused_output() == "left");
+    REQUIRE(desktop.keyboard_window() == window);
 
     right = fixture.output();
     REQUIRE(right);
-    REQUIRE(desktop.add_output(part3_output_handle(right.get()), "right", "", right_bounds));
-    REQUIRE(windows.workspace_output(*migrated) == "left");
-    REQUIRE(windows.state().output("left")->shown == migrated);
-    REQUIRE(windows.focused_workspace() == migrated);
+    REQUIRE(desktop.add_output(part3_output_handle(right.get()), "right", right_bounds));
+    REQUIRE(windows.workspace_output(8) == "right");
+    REQUIRE(windows.state().output("left")->shown == 1);
+    REQUIRE(windows.focused_workspace() == 8);
+    REQUIRE(windows.focused_output() == "right");
+    REQUIRE(windows.view(*window).geometry.x >= right_bounds.x);
+    desktop.set_primary_output("right");
+    REQUIRE(windows.state().output("right")->shown == 1);
+    REQUIRE(windows.state().output("left")->shown == 8);
+    REQUIRE(windows.focused_output() == "left");
+    REQUIRE(windows.focused_workspace() == 8);
+    REQUIRE(desktop.keyboard_window() == window);
+    REQUIRE(windows.view(*window).geometry.x < right_bounds.x);
+    REQUIRE(hit(fixture.scene, windows.view(*window).geometry, *window));
     REQUIRE(windows.state().valid() && !desktop.failed() && !fixture.scene.snapshot().failed);
     desktop.remove_output(part3_output_handle(right.get()));
     desktop.remove_output(part3_output_handle(left.get()));
@@ -997,6 +1010,47 @@ bool wait_pixel(Connection &connection, Client &client, part3_output *output, un
     return ready;
 }
 
+bool run_edge_drag(const Fixture &fixture) {
+    auto left = fixture.output();
+    auto right = fixture.output();
+    REQUIRE(left && right);
+    constexpr WindowRect right_bounds{160, 0, 160, 90};
+    auto &desktop = fixture.desktop;
+    REQUIRE(desktop.add_output(part3_output_handle(left.get()), "left", output_bounds));
+    REQUIRE(desktop.add_output(part3_output_handle(right.get()), "right", right_bounds));
+    const auto &windows = desktop.windows();
+    Connection connection(fixture.display);
+    Client client;
+    WindowId tiled{};
+    REQUIRE(map_tiled(fixture, connection, client, tiled, 160, 90, 0, red));
+
+    REQUIRE(begin_drag(fixture, tiled, BTN_LEFT, 100, 45));
+    desktop.motion(185, 45);
+    REQUIRE(windows.state().window(tiled)->home_workspace == 1);
+    REQUIRE(windows.view(tiled).unclipped_move);
+    REQUIRE(wait_pixel(connection, client, right.get(), 30, 45, red));
+    seaside_scene_target preview{};
+    REQUIRE(fixture.scene.window_at(190, 45, preview) && preview.id == tiled);
+
+    desktop.button(0, BTN_LEFT, false, super, 185, 45);
+    REQUIRE(windows.state().window(tiled)->home_workspace == 6);
+    REQUIRE(windows.focused_window() == tiled && windows.focused_output() == "right");
+    REQUIRE(windows.view(tiled).tile_layout && windows.view(tiled).geometry == right_bounds);
+    REQUIRE(wait_tiled(connection, client, 160, 90));
+    REQUIRE(connection.attach_configured(client, red));
+
+    REQUIRE(begin_drag(fixture, tiled, BTN_LEFT, 220, 45));
+    desktop.motion(145, 45);
+    desktop.cancel_drag();
+    desktop.button(0, BTN_LEFT, false, super, 145, 45);
+    REQUIRE(windows.state().window(tiled)->home_workspace == 6);
+    REQUIRE(windows.view(tiled).tile_layout && windows.view(tiled).geometry == right_bounds);
+    REQUIRE(!desktop.failed() && !fixture.scene.snapshot().failed);
+    desktop.remove_output(part3_output_handle(right.get()));
+    desktop.remove_output(part3_output_handle(left.get()));
+    return true;
+}
+
 bool pump_frames(Connection &connection, Client &client) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(35);
     while (std::chrono::steady_clock::now() < deadline) {
@@ -1032,7 +1086,7 @@ bool run_opening_transaction(const Fixture &fixture) {
     auto &desktop = fixture.desktop;
     auto output = fixture.output();
     REQUIRE(output);
-    REQUIRE(desktop.add_output(part3_output_handle(output.get()), "main", "main", output_bounds));
+    REQUIRE(desktop.add_output(part3_output_handle(output.get()), "main", output_bounds));
     Connection connection(fixture.display);
     Client first, second;
     WindowId left{};
@@ -1117,8 +1171,7 @@ bool run_opening_transaction(const Fixture &fixture) {
 bool run_workspace_during_opening(const Fixture &fixture) {
     auto &desktop = fixture.desktop;
     auto output = fixture.output();
-    REQUIRE(output &&
-            desktop.add_output(part3_output_handle(output.get()), "main", "", output_bounds));
+    REQUIRE(output && desktop.add_output(part3_output_handle(output.get()), "main", output_bounds));
     Connection connection(fixture.display);
     Client first, second, third;
     WindowId left{};
@@ -1142,7 +1195,7 @@ bool run_workspace_during_opening(const Fixture &fixture) {
     REQUIRE(connection.connect(third) && connection.open(third) &&
             connection.attach_configured(third, blue));
     REQUIRE(desktop.keyboard_window() == right);
-    const auto switched = desktop.dispatch(action(ActionKind::workspace, 42));
+    const auto switched = desktop.dispatch(action(ActionKind::workspace, 4));
     REQUIRE(switched && *switched && !desktop.keyboard_window());
     seaside_scene_target empty{};
     REQUIRE(!fixture.scene.window_at(110, 55, empty));
@@ -1154,8 +1207,7 @@ bool run_workspace_during_opening(const Fixture &fixture) {
 bool run_floating_delayed_commits(const Fixture &fixture) {
     auto &desktop = fixture.desktop;
     auto output = fixture.output();
-    REQUIRE(output &&
-            desktop.add_output(part3_output_handle(output.get()), "main", "", output_bounds));
+    REQUIRE(output && desktop.add_output(part3_output_handle(output.get()), "main", output_bounds));
     Connection connection(fixture.display);
     Client client;
     REQUIRE(connection.connect(client) && connection.open(client));
@@ -1188,8 +1240,7 @@ bool run_floating_delayed_commits(const Fixture &fixture) {
 bool run_floating_resize_edges(const Fixture &fixture) {
     auto &desktop = fixture.desktop;
     auto output = fixture.output();
-    REQUIRE(output &&
-            desktop.add_output(part3_output_handle(output.get()), "main", "", output_bounds));
+    REQUIRE(output && desktop.add_output(part3_output_handle(output.get()), "main", output_bounds));
     Connection connection(fixture.display);
     Client client;
     REQUIRE(connection.connect(client) && connection.open(client));
@@ -1236,8 +1287,7 @@ bool run_floating_resize_edges(const Fixture &fixture) {
 bool run_floating_resize_limits(const Fixture &fixture) {
     auto &desktop = fixture.desktop;
     auto output = fixture.output();
-    REQUIRE(output &&
-            desktop.add_output(part3_output_handle(output.get()), "main", "", output_bounds));
+    REQUIRE(output && desktop.add_output(part3_output_handle(output.get()), "main", output_bounds));
     Connection connection(fixture.display);
     Client client;
     REQUIRE(connection.connect(client) && connection.open(client));
@@ -1303,8 +1353,8 @@ bool run_floating_resize_limits(const Fixture &fixture) {
 bool run_floating_resize_dialogs(const Fixture &fixture) {
     auto output = fixture.output();
     auto &desktop = fixture.desktop;
-    REQUIRE(output && desktop.add_output(part3_output_handle(output.get()), "headless", "headless",
-                                         output_bounds));
+    REQUIRE(output &&
+            desktop.add_output(part3_output_handle(output.get()), "headless", output_bounds));
     Connection connection(fixture.display);
     Client parent, child, nested;
     REQUIRE(connection.connect(parent) && connection.open(parent));
@@ -1348,7 +1398,7 @@ bool run_floating_borders(const Fixture &fixture) {
     auto &desktop = fixture.desktop;
     auto output = fixture.output();
     REQUIRE(output);
-    REQUIRE(desktop.add_output(part3_output_handle(output.get()), "headless", "", output_bounds));
+    REQUIRE(desktop.add_output(part3_output_handle(output.get()), "headless", output_bounds));
     Connection connection(fixture.display);
     Client first, second;
     REQUIRE(connection.connect(first) && connection.open(first));
@@ -1467,7 +1517,7 @@ template <bool outside_click> bool run_popup_shutdown(const Fixture &fixture) {
     auto output = fixture.output();
     REQUIRE(output);
     auto *handle = part3_output_handle(output.get());
-    REQUIRE(fixture.desktop.add_output(handle, "main", "", output_bounds));
+    REQUIRE(fixture.desktop.add_output(handle, "main", output_bounds));
     LayerSeat seat(fixture);
     REQUIRE(seat.start());
     Connection connection(fixture.display);
@@ -1499,8 +1549,7 @@ template <bool outside_click> bool run_popup_shutdown(const Fixture &fixture) {
 bool run_tile_popup(const Fixture &fixture) {
     auto &desktop = fixture.desktop;
     auto output = fixture.output();
-    REQUIRE(output &&
-            desktop.add_output(part3_output_handle(output.get()), "main", "", output_bounds));
+    REQUIRE(output && desktop.add_output(part3_output_handle(output.get()), "main", output_bounds));
     LayerSeat seat(fixture);
     REQUIRE(seat.start());
     Connection connection(fixture.display);
@@ -1577,8 +1626,8 @@ bool run_pending_opening_focus(const Fixture &fixture) {
     REQUIRE(left && right);
     auto right_bounds = output_bounds;
     right_bounds.x = output_bounds.width;
-    REQUIRE(desktop.add_output(part3_output_handle(left.get()), "left", "", output_bounds));
-    REQUIRE(desktop.add_output(part3_output_handle(right.get()), "right", "", right_bounds));
+    REQUIRE(desktop.add_output(part3_output_handle(left.get()), "left", output_bounds));
+    REQUIRE(desktop.add_output(part3_output_handle(right.get()), "right", right_bounds));
     LayerSeat seat(fixture);
     REQUIRE(seat.start());
 
@@ -1645,8 +1694,8 @@ bool run_fullscreen_idle_focus(const Fixture &fixture) {
     REQUIRE(left && right);
     auto *left_output = part3_output_handle(left.get());
     auto *right_output = part3_output_handle(right.get());
-    REQUIRE(desktop.add_output(left_output, "left", "", output_bounds));
-    REQUIRE(desktop.add_output(right_output, "right", "", {160, 0, 160, 90}));
+    REQUIRE(desktop.add_output(left_output, "left", output_bounds));
+    REQUIRE(desktop.add_output(right_output, "right", {160, 0, 160, 90}));
     LayerSeat seat(fixture);
     REQUIRE(seat.start());
 
@@ -1694,8 +1743,8 @@ template <OpeningFinish finish> bool run_overlapping_openings(const Fixture &fix
     auto left = fixture.output();
     auto right = fixture.output();
     REQUIRE(left && right);
-    REQUIRE(desktop.add_output(part3_output_handle(left.get()), "left", "", output_bounds));
-    REQUIRE(desktop.add_output(part3_output_handle(right.get()), "right", "", {160, 0, 160, 90}));
+    REQUIRE(desktop.add_output(part3_output_handle(left.get()), "left", output_bounds));
+    REQUIRE(desktop.add_output(part3_output_handle(right.get()), "right", {160, 0, 160, 90}));
     Connection connection(fixture.display);
     Client a, b, c, d;
     WindowId left_old{}, right_old{};
@@ -1753,7 +1802,7 @@ bool run_client_gestures(const Fixture &fixture) {
     auto &desktop = fixture.desktop;
     auto output = fixture.output();
     REQUIRE(output);
-    REQUIRE(desktop.add_output(part3_output_handle(output.get()), "main", "main", output_bounds));
+    REQUIRE(desktop.add_output(part3_output_handle(output.get()), "main", output_bounds));
     LayerSeat seat(fixture);
     REQUIRE(seat.start());
     Connection connection(fixture.display);
@@ -1870,8 +1919,8 @@ bool run_layer_shell(const Fixture &fixture) {
     auto other = fixture.output();
     auto *first = part3_output_handle(primary.get());
     auto *second = part3_output_handle(other.get());
-    REQUIRE(first && second && desktop.add_output(first, "HEADLESS-1", "", output_bounds) &&
-            desktop.add_output(second, "HEADLESS-2", "", {160, 0, 160, 90}));
+    REQUIRE(first && second && desktop.add_output(first, "HEADLESS-1", output_bounds) &&
+            desktop.add_output(second, "HEADLESS-2", {160, 0, 160, 90}));
     LayerSeat seat(fixture);
     REQUIRE(seat.start());
     Connection connection(fixture.display);
@@ -2079,7 +2128,7 @@ bool run_fullscreen_aspect(const Fixture &fixture) {
     auto &scene = fixture.scene;
     auto output = fixture.output();
     auto *handle = part3_output_handle(output.get());
-    REQUIRE(handle && desktop.add_output(handle, "HEADLESS-1", "", output_bounds));
+    REQUIRE(handle && desktop.add_output(handle, "HEADLESS-1", output_bounds));
 
     Connection connection(fixture.display);
     Client client;
@@ -2169,7 +2218,7 @@ bool run_dwindle(const Fixture &fixture) {
     auto &desktop = fixture.desktop;
     auto output = fixture.output();
     REQUIRE(output);
-    REQUIRE(desktop.add_output(part3_output_handle(output.get()), "main", "main", output_bounds));
+    REQUIRE(desktop.add_output(part3_output_handle(output.get()), "main", output_bounds));
     const auto &windows = desktop.windows();
     Connection connection(fixture.display);
     Client first, second;
@@ -2287,10 +2336,9 @@ bool run_scrolling(const Fixture &fixture) {
     auto primary = fixture.output();
     auto neighbor = fixture.output();
     REQUIRE(primary && neighbor);
-    REQUIRE(desktop.add_output(part3_output_handle(primary.get()), "main", "main", output_bounds));
+    REQUIRE(desktop.add_output(part3_output_handle(primary.get()), "main", output_bounds));
     constexpr WindowRect adjacent{160, 0, 160, 90};
-    REQUIRE(
-        desktop.add_output(part3_output_handle(neighbor.get()), "adjacent", "adjacent", adjacent));
+    REQUIRE(desktop.add_output(part3_output_handle(neighbor.get()), "adjacent", adjacent));
     const auto &windows = desktop.windows();
     const auto workspace = windows.focused_workspace();
     REQUIRE(workspace);
@@ -2341,7 +2389,7 @@ bool run_scrolling(const Fixture &fixture) {
     const auto custom_column = windows.view(b).geometry;
     REQUIRE(width_a == 80 && width_c == 80 && custom_column.width == 120);
 
-    REQUIRE(desktop.action(action(ActionKind::workspace, 42)));
+    REQUIRE(desktop.action(action(ActionKind::workspace, 4)));
     REQUIRE(!windows.view(a).visible && !windows.view(b).visible && !windows.view(c).visible);
     REQUIRE(desktop.action(action(ActionKind::workspace, *workspace)));
     REQUIRE(windows.focused_window() == b && windows.view(b).geometry == custom_column);
@@ -2363,8 +2411,7 @@ bool run_attention(const Fixture &fixture) {
     auto &desktop = fixture.desktop;
     auto output = fixture.output();
     REQUIRE(output);
-    REQUIRE(desktop.add_output(part3_output_handle(output.get()), "headless", "stable-headless",
-                               output_bounds));
+    REQUIRE(desktop.add_output(part3_output_handle(output.get()), "headless", output_bounds));
     const auto &windows = desktop.windows();
     const auto original_workspace = windows.focused_workspace();
     REQUIRE(original_workspace);
@@ -2384,7 +2431,7 @@ bool run_attention(const Fixture &fixture) {
     REQUIRE(connection.attach(second, ordinary_width, ordinary_height));
     const auto second_id = windows.focused_window();
     REQUIRE(second_id && second_id != first_id);
-    REQUIRE(desktop.action(action(ActionKind::move_to_workspace, 42)));
+    REQUIRE(desktop.action(action(ActionKind::move_to_workspace, 4)));
     REQUIRE(!windows.view(*first_id).visible);
 
     struct Attention {
@@ -2409,7 +2456,7 @@ bool run_attention(const Fixture &fixture) {
     REQUIRE(connection.roundtrip(first));
     REQUIRE(attention->count == 1 && attention->target == *first_id &&
             attention->workspace == *original_workspace);
-    REQUIRE(windows.focused_window() == second_id && windows.focused_workspace() == 42);
+    REQUIRE(windows.focused_window() == second_id && windows.focused_workspace() == 4);
     xdg_activation_v1_activate(first.activation, token.c_str(), first.surface);
     REQUIRE(connection.roundtrip(first) && attention->count == 1);
     desktop.on_attention({});
@@ -2445,7 +2492,7 @@ bool run_binding_reload(const Fixture &fixture) {
     const auto &windows = desktop.windows();
     auto output = fixture.output();
     REQUIRE(output);
-    REQUIRE(desktop.add_output(part3_output_handle(output.get()), "reload", {}, output_bounds));
+    REQUIRE(desktop.add_output(part3_output_handle(output.get()), "reload", output_bounds));
     Connection connection(fixture.display);
     Client first, second;
     WindowId a{}, b{};
@@ -2501,7 +2548,7 @@ int main(int argc, char **argv) {
     if (argc == 1) {
         config.window.tiling = false;
         return run_fixture(config, run_part4) && run_fixture(config, run_sparse_view_ids) &&
-                       run_fixture(config, run_workspace_reassignment) &&
+                       run_fixture(config, run_workspace_topology) &&
                        run_fixture(config, run_floating_borders) &&
                        run_fixture(config, run_floating_resize_dialogs) &&
                        run_fixture(config, run_floating_resize_limits) &&
@@ -2541,9 +2588,12 @@ int main(int argc, char **argv) {
         transaction.window.gaps_outer = 0;
         transaction.window.gaps_inner = 0;
         transaction.window.border_width = 0;
+        auto edge_drag = transaction;
+        edge_drag.window.allow_edge_drag = true;
         config.window.gaps_outer = 4;
         config.window.gaps_inner = 6;
-        return run_fixture(config, run_dwindle) && run_fixture(transaction, run_tile_popup) &&
+        return run_fixture(config, run_dwindle) && run_fixture(edge_drag, run_edge_drag) &&
+                       run_fixture(transaction, run_tile_popup) &&
                        run_fixture(transaction, run_opening_transaction) &&
                        run_fixture(transaction, run_workspace_during_opening) &&
                        run_fixture(transaction, run_pending_opening_focus) &&

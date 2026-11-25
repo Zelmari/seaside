@@ -1,9 +1,11 @@
 #include "config.hpp"
+#include "state.hpp"
 
 #include <algorithm>
 #include <array>
 #include <charconv>
 #include <cmath>
+#include <cstdio>
 #include <limits>
 #include <set>
 #include <toml++/toml.hpp>
@@ -22,6 +24,52 @@ std::string bounded(std::string_view text, std::size_t size) {
     while (end && end < text.size() && (static_cast<unsigned char>(text[end]) & 0xc0U) == 0x80U)
         --end;
     return std::string(text.substr(0, end));
+}
+
+bool retired_workspace_binding(std::string_view text, Chord chord) {
+    if (chord.kind != ChordKind::keyboard || text.find('\0') != text.npos)
+        return false;
+    constexpr std::string_view whitespace = " \t\r\n";
+    const auto begin = text.find_first_not_of(whitespace);
+    if (begin == text.npos)
+        return false;
+    text.remove_prefix(begin);
+    const auto separator = text.find_first_of(whitespace);
+    if (separator == text.npos)
+        return false;
+    const auto command = text.substr(0, separator);
+    const auto argument = text.find_first_not_of(whitespace, separator);
+    if (argument == text.npos)
+        return false;
+    text.remove_prefix(argument);
+    if (command == "transfer_workspace")
+        return parse_output_selector(text).has_value();
+    if (command != "workspace" && command != "move_to_workspace")
+        return false;
+    text = text.substr(0, text.find_last_not_of(whitespace) + 1);
+    WorkspaceId id = 0;
+    const auto [end, error] = std::from_chars(text.begin(), text.end(), id);
+    return error == std::errc{} && end == text.end() && id > workspace_count &&
+           id <= std::numeric_limits<std::int32_t>::max();
+}
+
+void upgrade_stock_bindings(std::string_view text, BindingMap &bindings) {
+    if (!text.contains(legacy_move_binding_example) || bindings.empty())
+        return;
+
+    auto old = default_bindings();
+    BindingMap added;
+    for (const auto *key : {"Left", "Right", "Up", "Down"}) {
+        auto chord = parse_chord(std::string("Super+Shift+") + key).value();
+        added.insert(old.extract(chord));
+    }
+    for (const auto *key : {"Super+S", "Super+Shift+S"}) {
+        const auto chord = parse_chord(key).value();
+        if (!bindings.contains(chord))
+            old.erase(chord);
+    }
+    if (old == bindings)
+        bindings.merge(added);
 }
 
 // toml++ bounds nested values, but not arbitrarily long dotted table paths.
@@ -459,11 +507,13 @@ std::expected<Config, Diagnostic> parse_config(std::string_view text, std::strin
         }
         if (auto *table = v.table(parsed, "window", "window")) {
             v.keys(*table,
-                   {"tiling", "titlebars", "layout", "gaps_outer", "gaps_inner", "border_width",
-                    "active_border_color", "inactive_border_color"},
+                   {"tiling", "titlebars", "allow_edge_drag", "layout", "gaps_outer", "gaps_inner",
+                    "border_width", "active_border_color", "inactive_border_color"},
                    "window");
             v.boolean(*table, "tiling", "window.tiling", config.window.tiling);
             v.boolean(*table, "titlebars", "window.titlebars", config.window.titlebars);
+            v.boolean(*table, "allow_edge_drag", "window.allow_edge_drag",
+                      config.window.allow_edge_drag);
             v.enumeration<Layout>(*table, "layout", "window.layout", config.window.layout,
                                   {{"dwindle", Layout::dwindle}, {"scrolling", Layout::scrolling}});
             v.integer(*table, "gaps_outer", "window.gaps_outer", config.window.gaps_outer, 0, 512);
@@ -499,9 +549,10 @@ std::expected<Config, Diagnostic> parse_config(std::string_view text, std::strin
         }
         if (auto *table = v.table(parsed, "workspaces", "workspaces")) {
             v.keys(*table, {"mode"}, "workspaces");
-            v.enumeration<WorkspaceMode>(
-                *table, "mode", "workspaces.mode", config.workspaces.mode,
-                {{"global", WorkspaceMode::global}, {"per-monitor", WorkspaceMode::per_monitor}});
+            if (const auto mode = v.string(table->get("mode"), "workspaces.mode");
+                mode && *mode != "global" && *mode != "per-monitor")
+                v.fail(table->get("mode"), "workspaces.mode",
+                       "Unrecognized retired workspace mode");
         }
         if (auto *table = v.table(parsed, "monitors", "monitors"))
             parse_monitors(v, *table, config.monitors);
@@ -575,6 +626,8 @@ std::expected<Config, Diagnostic> parse_config(std::string_view text, std::strin
         }
         if (auto *table = v.table(parsed, "keybinds", "keybinds")) {
             config.keybinds.clear();
+            bool retired = false;
+            std::set<Chord> chords;
             for (const auto &[key, node] : *table) {
                 auto action_text = v.string(&node, "keybinds");
                 if (!action_text)
@@ -584,16 +637,25 @@ std::expected<Config, Diagnostic> parse_config(std::string_view text, std::strin
                     v.fail(&node, "keybinds", chord.error().message);
                     break;
                 }
-                auto action = parse_action(*action_text, *chord);
-                if (!action) {
-                    v.fail(&node, "keybinds", action.error().message);
-                    break;
-                }
-                if (!config.keybinds.emplace(*chord, std::move(*action)).second) {
+                if (!chords.insert(*chord).second) {
                     v.fail(&node, "keybinds", "Duplicate normalized chord");
                     break;
                 }
+                auto action = parse_action(*action_text, *chord);
+                if (!action) {
+                    if (retired_workspace_binding(*action_text, *chord)) {
+                        retired = true;
+                        continue;
+                    }
+                    v.fail(&node, "keybinds", action.error().message);
+                    break;
+                }
+                config.keybinds.emplace(*chord, std::move(*action));
             }
+            if (retired && !v.failure)
+                std::fputs("seaside: ignored retired workspace bindings in the configuration\n",
+                           stderr);
+            upgrade_stock_bindings(text, config.keybinds);
         }
         if (v.failure)
             return std::unexpected(std::move(*v.failure));

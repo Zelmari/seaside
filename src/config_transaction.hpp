@@ -37,7 +37,6 @@ std::expected<ConfigCandidate, Diagnostic> load_config_candidate(const ConfigSto
 
 struct ConfigEffects {
     bool reset_tiling_overrides = false;
-    bool restart_pending = false;
     bool night_light_changed = false;
 };
 
@@ -52,13 +51,7 @@ class ConfigTransaction {
                                                     const Prepare &prepare);
     void reject(std::uint64_t generation, Diagnostic diagnostic);
     void persisted(std::uint64_t generation, std::optional<StorageError> error);
-    void set_runtime_night_light(bool enabled);
     const Config &active() const noexcept { return active_; }
-    const Config &requested() const noexcept { return requested_; }
-    bool runtime_night_light() const noexcept { return runtime_night_light_; }
-    bool restart_pending() const noexcept {
-        return requested_.workspaces.mode != active_.workspaces.mode;
-    }
     bool recovery_persisted() const noexcept { return recovery_persisted_; }
     std::uint64_t generation() const noexcept { return generation_; }
     const std::optional<Diagnostic> &diagnostic() const noexcept { return diagnostic_; }
@@ -68,8 +61,7 @@ class ConfigTransaction {
 
   private:
     std::thread::id owner_ = std::this_thread::get_id();
-    Config active_, requested_;
-    bool runtime_night_light_ = false;
+    Config active_;
     bool recovery_persisted_ = false;
     std::uint64_t generation_ = 0;
     std::uint64_t committed_generation_ = 0;

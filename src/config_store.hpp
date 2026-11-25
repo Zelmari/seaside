@@ -74,8 +74,18 @@ class ConfigStore {
     std::expected<PublishResult, StorageError>
     publish(const std::filesystem::path &path, std::string_view text, PublishMode mode,
             const std::function<bool()> &still_current = {}) const;
+    // Replace a completed user save only if its contents still match the
+    // configuration the session accepted. A dotfile symlink stays in place.
+    std::expected<PublishResult, StorageError>
+    replace_user(const std::filesystem::path &path, std::string_view expected,
+                 std::string_view text, const std::function<bool()> &still_current = {}) const;
 
   private:
+    std::expected<PublishResult, StorageError>
+    publish_at(const std::filesystem::path &path, std::string_view text, PublishMode mode,
+               const std::function<bool()> &still_current,
+               const std::filesystem::path *user_link = nullptr,
+               std::string_view expected = {}) const;
     std::shared_ptr<StorageIo> io_;
     struct PublicationState;
     std::shared_ptr<PublicationState> publication_;

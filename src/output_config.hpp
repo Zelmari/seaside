@@ -32,7 +32,7 @@ class OutputConfig {
     void refresh();
     const auto &outputs() const noexcept { return outputs_; }
     const Output *primary() const noexcept { return primary_; }
-    std::string_view ranked_fallback() const noexcept;
+    wlr_output *admission_preference(const Config &config) const noexcept;
 
   private:
     Output *connected_output(wlr_output *handle) noexcept;

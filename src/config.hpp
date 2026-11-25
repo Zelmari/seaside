@@ -14,8 +14,9 @@
 namespace seaside {
 
 inline constexpr std::size_t max_config_bytes = 1024 * 1024;
+inline constexpr std::string_view legacy_move_binding_example =
+    "# \"Super+Shift+Left\" = \"move_window left\"";
 enum class Layout { dwindle, scrolling };
-enum class WorkspaceMode { global, per_monitor };
 enum class Insertion { focused, largest };
 enum class AdaptiveSync { off, fullscreen, always };
 enum class FullscreenAspect { preserve, stretch };
@@ -64,6 +65,7 @@ struct Config {
     struct Window {
         bool tiling = true;
         bool titlebars = true;
+        bool allow_edge_drag = false;
         Layout layout = Layout::dwindle;
         std::int32_t gaps_outer = 10;
         std::int32_t gaps_inner = 5;
@@ -85,10 +87,6 @@ struct Config {
         std::optional<PowerProfile> profile;
         bool operator==(const Power &) const = default;
     } power;
-    struct Workspaces {
-        WorkspaceMode mode = WorkspaceMode::global;
-        bool operator==(const Workspaces &) const = default;
-    } workspaces;
     struct Monitors {
         std::optional<OutputSelector> primary;
         MonitorSettings defaults;

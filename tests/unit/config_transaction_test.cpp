@@ -27,26 +27,6 @@ auto schema_only = [](const Config &, const Config &) -> std::expected<void, Dia
     return {};
 };
 
-TEST(ConfigTransaction, RestartOnlyRequestedModeAndNightLightOverrides) {
-    ConfigTransaction transaction(startup());
-    transaction.set_runtime_night_light(true);
-    auto generation = transaction.begin_reload().value();
-    auto result = transaction.commit(
-        candidate(generation, "[workspaces]\nmode='per-monitor'\n[window]\ngaps_outer=14\n"),
-        schema_only);
-    ASSERT_TRUE(result);
-    EXPECT_TRUE(result->restart_pending);
-    EXPECT_FALSE(result->reset_tiling_overrides);
-    EXPECT_EQ(transaction.active().workspaces.mode, WorkspaceMode::global);
-    EXPECT_EQ(transaction.requested().workspaces.mode, WorkspaceMode::per_monitor);
-    EXPECT_EQ(transaction.active().window.gaps_outer, 14);
-    EXPECT_TRUE(transaction.runtime_night_light());
-    // A new process activates the persisted requested mode.
-    ConfigTransaction restarted(startup("[workspaces]\nmode='per-monitor'\n"));
-    EXPECT_EQ(restarted.active().workspaces.mode, WorkspaceMode::per_monitor);
-    EXPECT_FALSE(restarted.restart_pending());
-    EXPECT_FALSE(restarted.runtime_night_light());
-}
 TEST(ConfigTransaction, OnlyCommittedLayoutOrTilingChangesResetOverrides) {
     ConfigTransaction transaction(startup());
     auto generation = transaction.begin_reload().value();
@@ -106,21 +86,21 @@ TEST(ConfigTransaction, SnapshotFailureKeepsCommittedStateAndSeparateDiagnostic)
     EXPECT_TRUE(transaction.persistence_error());
     EXPECT_EQ(transaction.active().window.gaps_inner, 21);
 }
-TEST(ConfigTransaction, UnchangedConfiguredNightLightPreservesSessionOverride) {
+TEST(ConfigTransaction, CommitsPersistedNightLightAndUnrelatedEditsTogether) {
     ConfigTransaction transaction(startup());
-    transaction.set_runtime_night_light(true);
     auto g = transaction.begin_reload().value();
-    ASSERT_TRUE(transaction.commit(candidate(g, "[night_light]\nenabled=true\n"), schema_only));
-    transaction.set_runtime_night_light(false);
+    auto enabled = transaction.commit(candidate(g, "[night_light]\nenabled=true\n"), schema_only);
+    ASSERT_TRUE(enabled);
+    EXPECT_TRUE(enabled->night_light_changed);
+    EXPECT_TRUE(transaction.active().night_light.enabled);
+
     g = transaction.begin_reload().value();
-    ASSERT_TRUE(transaction.commit(
-        candidate(g, "[night_light]\nenabled=true\ntemperature_kelvin=5000\n"), schema_only));
-    EXPECT_FALSE(transaction.runtime_night_light());
-    g = transaction.begin_reload().value();
-    auto changed = transaction.commit(candidate(g, "[night_light]\nenabled=false\n"), schema_only);
-    ASSERT_TRUE(changed);
-    EXPECT_TRUE(changed->night_light_changed);
-    EXPECT_FALSE(transaction.runtime_night_light());
+    auto temperature = transaction.commit(
+        candidate(g, "[night_light]\nenabled=true\ntemperature_kelvin=5000\n"), schema_only);
+    ASSERT_TRUE(temperature);
+    EXPECT_FALSE(temperature->night_light_changed);
+    EXPECT_TRUE(transaction.active().night_light.enabled);
+    EXPECT_EQ(transaction.active().night_light.temperature_kelvin, 5000);
 }
 TEST(ConfigTransaction, PreparationExceptionsAndReentrantGenerationDoNotCommit) {
     ConfigTransaction transaction(startup());
@@ -141,13 +121,9 @@ TEST(ConfigTransaction, PreparationExceptionsAndReentrantGenerationDoNotCommit) 
 TEST(ConfigTransaction, NonOwnerMutationsAreRejectedAndParsingDoesNotExecuteCommands) {
     ConfigTransaction transaction(startup());
     bool rejected = false;
-    std::jthread worker([&] {
-        rejected = !transaction.begin_reload();
-        transaction.set_runtime_night_light(true);
-    });
+    std::jthread worker([&] { rejected = !transaction.begin_reload(); });
     worker.join();
     EXPECT_TRUE(rejected);
-    EXPECT_FALSE(transaction.runtime_night_light());
     seaside::test::Directory directory;
     auto sentinel = directory.path() / "must-not-exist";
     auto g = transaction.begin_reload().value();
@@ -253,7 +229,7 @@ TEST_F(AsyncConfigTest, RealLoadCommitStateEffectAndSnapshotThroughMainLoop) {
     }));
     ASSERT_TRUE(pump_until(complete));
     EXPECT_TRUE(transaction.recovery_persisted());
-    EXPECT_TRUE(transaction.restart_pending());
+    EXPECT_EQ(transaction.active().window.layout, Layout::scrolling);
     auto *window = state.window(id.value());
     ASSERT_NE(window, nullptr);
     EXPECT_FALSE(window->tiling_override);

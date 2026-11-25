@@ -14,6 +14,8 @@ namespace seaside {
 using WindowId = std::uint64_t;
 using WorkspaceId = std::uint32_t;
 using OutputId = std::string;
+inline constexpr WorkspaceId workspace_count = 10;
+inline constexpr WorkspaceId primary_workspace_count = workspace_count / 2;
 
 enum class StateError {
     invalid_id,

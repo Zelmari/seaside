@@ -16,9 +16,46 @@ struct seaside_cursor_point seaside_cursor_clamp(struct seaside_cursor_box box,
                                          fmax(box.y, fmin(bottom, point.y))};
 }
 
+static bool map_side(struct seaside_cursor_box current, struct seaside_cursor_box destination,
+                     struct seaside_cursor_point origin, struct seaside_cursor_point requested,
+                     struct seaside_cursor_point *mapped) {
+    const double source_right = (double)current.x + current.width;
+    const double source_bottom = (double)current.y + current.height;
+    const double destination_right = (double)destination.x + destination.width;
+    const double destination_bottom = (double)destination.y + destination.height;
+    const bool right = requested.x >= source_right && destination.x >= source_right;
+    const bool left = requested.x < current.x && destination_right <= current.x;
+    if ((!left && !right) || current.y >= destination_bottom || destination.y >= source_bottom ||
+        requested.x == origin.x) {
+        return false;
+    }
+
+    const double source_edge = right ? source_right : current.x;
+    const double destination_edge = right ? destination.x : destination_right;
+    const double crossing = (source_edge - origin.x) / (requested.x - origin.x);
+    const double seam_y = origin.y + crossing * (requested.y - origin.y);
+    if (crossing < 0 || crossing > 1 || seam_y < current.y || seam_y > source_bottom) {
+        return false;
+    }
+
+    const double y_fraction = (seam_y - current.y) / current.height;
+    const struct seaside_cursor_point target = {
+        .x = destination_edge + (requested.x - source_edge),
+        .y = destination.y + y_fraction * destination.height + (requested.y - seam_y),
+    };
+    *mapped = seaside_cursor_clamp(destination, target);
+    return true;
+}
+
+struct cursor_gap {
+    struct seaside_cursor_point point;
+    double crossing, gap;
+    bool found;
+};
+
 static void consider_axis(struct seaside_cursor_box current, struct seaside_cursor_box destination,
                           struct seaside_cursor_point origin, struct seaside_cursor_point requested,
-                          bool horizontal, struct seaside_cursor_gap *best) {
+                          bool horizontal, struct cursor_gap *best) {
     const double along = horizontal ? requested.x : requested.y;
     const double near = horizontal ? current.x : current.y;
     const double far = near + (horizontal ? current.width : current.height);
@@ -49,16 +86,26 @@ static void consider_axis(struct seaside_cursor_box current, struct seaside_curs
     // Cross an aligned edge without shifting the pointer along the other axis.
     if (!best->found || crossing < best->crossing ||
         (crossing == best->crossing && gap < best->gap)) {
-        *best = (struct seaside_cursor_gap){seaside_cursor_clamp(destination, point), crossing, gap,
-                                            true};
+        *best = (struct cursor_gap){seaside_cursor_clamp(destination, point), crossing, gap, true};
     }
 }
 
-void seaside_cursor_consider_gap(struct seaside_cursor_box current,
-                                 struct seaside_cursor_box destination,
-                                 struct seaside_cursor_point origin,
-                                 struct seaside_cursor_point requested,
-                                 struct seaside_cursor_gap *best) {
-    consider_axis(current, destination, origin, requested, true, best);
-    consider_axis(current, destination, origin, requested, false, best);
+struct seaside_cursor_point
+seaside_cursor_route_relative(struct seaside_cursor_box current, struct seaside_cursor_point origin,
+                              struct seaside_cursor_point requested,
+                              const struct seaside_cursor_box *destination) {
+    if (!destination || seaside_cursor_contains(current, requested)) {
+        return seaside_cursor_clamp(current, requested);
+    }
+    struct seaside_cursor_point mapped;
+    if (map_side(current, *destination, origin, requested, &mapped)) {
+        return mapped;
+    }
+    if (seaside_cursor_contains(*destination, requested)) {
+        return requested;
+    }
+    struct cursor_gap gap = {0};
+    consider_axis(current, *destination, origin, requested, true, &gap);
+    consider_axis(current, *destination, origin, requested, false, &gap);
+    return gap.found ? gap.point : seaside_cursor_clamp(current, requested);
 }

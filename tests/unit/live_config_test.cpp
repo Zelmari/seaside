@@ -72,6 +72,20 @@ class LiveConfigTest : public testing::Test {
 
     const ConfigTransaction &transaction() const { return live->transaction(); }
 
+    std::string user_config() const {
+        const auto read = store.read(paths.user);
+        EXPECT_TRUE(read && *read);
+        return read && *read ? **read : "";
+    }
+
+    LiveConfig::EditResult update(SettingEdit edit) {
+        auto result = std::make_shared<std::optional<LiveConfig::EditResult>>();
+        live->edit(std::move(edit), [result](auto value) { result->emplace(std::move(value)); });
+        if (!pump_until([&] { return result->has_value(); }))
+            return std::unexpected(SettingError{"test_timeout", "Edit completion timed out"});
+        return std::move(**result);
+    }
+
     test::Directory directory;
     const ConfigPaths paths{directory.path() / "config/seaside/config.toml",
                             directory.path() / "state/seaside/last-good-config.toml"};
@@ -83,21 +97,137 @@ class LiveConfigTest : public testing::Test {
     std::unique_ptr<LiveConfig> live;
 };
 
-TEST_F(LiveConfigTest, EditorReplacementAndRepairPreserveLastGoodAndRuntimeOverrides) {
+TEST_F(LiveConfigTest, SettingsWriteAndActivateTheSameRevision) {
+    const std::string text = "# keep this\r\n[night_light] # temperatures\r\n"
+                             "enabled = false # switch\r\n[window]\r\ngaps_outer = 17\r\n";
+    ASSERT_TRUE(store.publish(paths.user, text, PublishMode::create_user_file));
+    ASSERT_NO_FATAL_FAILURE(start());
+    const auto revision = live->revision();
+    const auto edit = update({Setting::night_light_enabled, true, {}, revision});
+    ASSERT_TRUE(edit) << edit.error().message;
+    EXPECT_TRUE(*edit);
+    EXPECT_TRUE(transaction().active().night_light.enabled);
+    EXPECT_GT(live->revision(), revision);
+    auto changed = text;
+    changed.replace(changed.find("false"), 5, "true");
+    EXPECT_EQ(user_config(), changed);
+    EXPECT_TRUE(load_startup_config(store, paths).config.night_light.enabled);
+    EXPECT_EQ(update({Setting::night_light_enabled, true}).value(), false);
+    const auto stale = update({Setting::night_light_enabled, false, {}, revision});
+    ASSERT_FALSE(stale);
+    EXPECT_EQ(stale.error().code, "settings_conflict");
+    EXPECT_EQ(user_config(), changed);
+}
+
+TEST_F(LiveConfigTest, SettingsRetainDotfileSymlinksAndExplicitEmptyBindings) {
+    const auto target = directory.path() / "my-config.toml";
+    ASSERT_TRUE(store.publish(target,
+                              "keybinds.'Super+B' = 'exec café' # my shortcut\n"
+                              "night_light = { enabled = true } # manual\n",
+                              PublishMode::create_user_file));
+    std::filesystem::create_directories(paths.user.parent_path());
+    std::filesystem::create_symlink(target, paths.user);
+    ASSERT_NO_FATAL_FAILURE(start());
+    const auto chord = parse_chord("Super+B").value();
+    const auto removed = update({Setting::keybinds, {}, chord});
+    ASSERT_TRUE(removed) << removed.error().message;
+    EXPECT_TRUE(transaction().active().keybinds.empty());
+    EXPECT_TRUE(user_config().starts_with("# my shortcut\n"));
+    EXPECT_TRUE(update({Setting::night_light_temperature, 5130}).value());
+    EXPECT_EQ(transaction().active().night_light.temperature_kelvin, 5130);
+    EXPECT_NE(user_config().find("} # manual\n"), std::string::npos);
+    EXPECT_TRUE(update({Setting::keybinds}).value());
+    EXPECT_EQ(transaction().active().keybinds, default_bindings());
+    EXPECT_EQ(std::filesystem::read_symlink(paths.user), target);
+}
+
+TEST_F(LiveConfigTest, SettingsDoNotReplaceAnOpenEditorSaveOrActivateAFailedWrite) {
+    ASSERT_NO_FATAL_FAILURE(start());
+    ASSERT_TRUE(pump_until([&] { return transaction().recovery_persisted(); }));
+    {
+        std::ofstream editor(paths.user, std::ios::app);
+        ASSERT_TRUE(editor);
+        editor << "\n# editor change\n" << std::flush;
+        const auto conflict = update({Setting::idle_minutes, 12});
+        ASSERT_FALSE(conflict);
+        EXPECT_EQ(conflict.error().code, "settings_conflict");
+        EXPECT_EQ(transaction().active().idle.display_off_after_minutes, 15);
+    }
+    ASSERT_TRUE(pump_until([&] { return snapshot().ends_with("# editor change\n"); }));
+    const auto original = user_config();
+    io->fail = true;
+    const auto failed = update({Setting::idle_minutes, 12});
+    ASSERT_FALSE(failed);
+    EXPECT_EQ(failed.error().code, "settings_write_failed");
+    EXPECT_EQ(user_config(), original);
+    EXPECT_EQ(transaction().active().idle.display_off_after_minutes, 15);
+}
+
+TEST_F(LiveConfigTest, UnsettingMigratedStockBindingsKeepsRemainingChordsAndSurvivesRestart) {
+    auto stock = default_bindings();
+    std::vector<Chord> directional;
+    for (const auto *key : {"Left", "Right", "Up", "Down"}) {
+        const auto chord = parse_chord(std::string("Super+Shift+") + key).value();
+        directional.push_back(chord);
+        stock.erase(chord);
+    }
+    std::string text = "[keybinds]\n";
+    for (const auto &[chord, binding] : stock)
+        text += '"' + format_chord(chord) + "\" = \"" + format_action(binding) + "\"\n";
+    text += std::string(legacy_move_binding_example) + "\n# keep this\n";
+    ASSERT_TRUE(store.publish(paths.user, text, PublishMode::create_user_file));
+    ASSERT_NO_FATAL_FAILURE(start());
+    auto expected = default_bindings();
+    ASSERT_EQ(transaction().active().keybinds, expected);
+    for (const auto &chord : directional) {
+        const auto result = update({Setting::keybinds, {}, chord});
+        ASSERT_TRUE(result) << result.error().message;
+        EXPECT_TRUE(*result);
+        expected.erase(chord);
+        EXPECT_EQ(transaction().active().keybinds, expected);
+    }
+    EXPECT_TRUE(user_config().ends_with("\n# keep this\n"));
+    EXPECT_EQ(load_startup_config(store, paths).config.keybinds, stock);
+}
+
+TEST_F(LiveConfigTest, QueuedTogglesUseTheSettingAcceptedByThePreviousEdit) {
+    ASSERT_NO_FATAL_FAILURE(start());
+    std::vector<std::pair<LiveConfig::EditResult, bool>> replies;
+    const auto finished = [&](LiveConfig::EditResult result) {
+        replies.emplace_back(std::move(result), transaction().active().night_light.enabled);
+    };
+    live->edit({Setting::night_light_enabled, NightLightAction::toggle}, finished);
+    live->edit({Setting::night_light_enabled, NightLightAction::toggle}, finished);
+    ASSERT_TRUE(pump_until([&] { return replies.size() == 2; }));
+    ASSERT_TRUE(replies[0].first) << replies[0].first.error().message;
+    ASSERT_TRUE(replies[1].first) << replies[1].first.error().message;
+    EXPECT_TRUE(replies[0].second);
+    EXPECT_FALSE(replies[1].second);
+    EXPECT_FALSE(load_startup_config(store, paths).config.night_light.enabled);
+}
+
+TEST_F(LiveConfigTest, SettingsNoOpDoesNotAcknowledgeOrReplaceAnInvalidFile) {
+    ASSERT_NO_FATAL_FAILURE(start());
+    const std::string malformed = "[night_light]\nenabled =";
+    ASSERT_NO_FATAL_FAILURE(replace(malformed));
+    const auto result = update({Setting::night_light_enabled, false});
+    ASSERT_FALSE(result);
+    EXPECT_EQ(result.error().code, "settings_conflict");
+    EXPECT_EQ(user_config(), malformed);
+    EXPECT_FALSE(transaction().active().night_light.enabled);
+}
+
+TEST_F(LiveConfigTest, EditorReplacementAndRepairPreserveLastGood) {
     ASSERT_NO_FATAL_FAILURE(start());
     ASSERT_TRUE(pump_until([&] { return transaction().recovery_persisted(); }));
     EXPECT_EQ(snapshot(), default_template());
     const std::string valid = "[workspaces]\nmode='per-monitor'\n[window]\ngaps_outer=24\n"
                               "[keybinds]\n";
     ASSERT_NO_FATAL_FAILURE(replace(valid));
-    live->set_runtime_night_light(true);
     ASSERT_TRUE(pump_until([&] {
         return transaction().active().window.gaps_outer == 24 && transaction().recovery_persisted();
     }));
     EXPECT_TRUE(transaction().active().keybinds.empty());
-    EXPECT_TRUE(transaction().runtime_night_light());
-    EXPECT_EQ(transaction().active().workspaces.mode, WorkspaceMode::global);
-    EXPECT_EQ(transaction().requested().workspaces.mode, WorkspaceMode::per_monitor);
     EXPECT_EQ(snapshot(), valid);
 
     ASSERT_NO_FATAL_FAILURE(replace("[window]\ngaps_outer='broken'\n"));
@@ -109,7 +239,7 @@ TEST_F(LiveConfigTest, EditorReplacementAndRepairPreserveLastGoodAndRuntimeOverr
     ASSERT_NO_FATAL_FAILURE(replace(valid));
     ASSERT_TRUE(pump_until(
         [&] { return !transaction().diagnostic() && transaction().recovery_persisted(); }));
-    EXPECT_EQ(load_startup_config(store, paths).config.workspaces.mode, WorkspaceMode::per_monitor);
+    EXPECT_EQ(load_startup_config(store, paths).config.window.gaps_outer, 24);
 }
 
 TEST_F(LiveConfigTest, InvalidStartupUsesRecoveryAndRepairsOnSave) {

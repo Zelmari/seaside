@@ -108,7 +108,7 @@ The canonical example explains the settings and their defaults. The package
 also installs it at `/usr/share/doc/seaside/config.example.toml`. Change one
 existing value, such as `gaps_inner` in `[window]`, and save. A valid live
 change applies to the running session. Most settings take effect this way.
-`workspaces.mode` and the autostart command list take effect on the next start.
+The autostart command list takes effect on the next start.
 [Canonical TOML](SEASIDE_CONFIG_EXAMPLE.toml)
 
 If an edit is invalid, Seaside keeps the active settings and displays an error
@@ -170,6 +170,7 @@ until it observes a completed save.
 | Super+1 through Super+9, Super+0 | Switch to workspaces 1 through 9, then 10 |
 | Super+Shift+1 through Super+Shift+9, Super+Shift+0 | Move the focused window to workspaces 1 through 9, then 10, and follow it |
 | Super+arrow keys | Focus a window in that direction |
+| Super+Shift+arrow keys | Move the focused tile in that direction. Scrolling columns move left or right. |
 | Alt+Tab | Cycle through the current workspace's recent focus history |
 | Super+left mouse drag | Move a window |
 | Super+right mouse drag | Resize from a side or corner, or move a shared tile boundary |
@@ -191,13 +192,16 @@ uncomment and save.
 Run `seasidectl bindings` to see the shortcuts the running session is using.
 [Binding examples and action names](SEASIDE_CONFIG_EXAMPLE.toml)
 
-The default pointer is a black arrow with a white outline. Apps can request
-their own pointer shapes. Tiled, floating, and maximized windows use
+The default pointer is a 16-pixel black arrow with a white outline. Seaside
+passes that size to apps that read `XCURSOR_SIZE` unless the session already
+has a value. Apps can request their own pointer shapes. Tiled, floating, and maximized windows use
 `window.border_width`. A brighter border marks the focused window, and
 fullscreen windows are borderless. Focus navigation brings a selected tile
 in front of a maximized window that covers it and preserves that window's
 maximized state. To move or resize a floating
 window, drag its title bar or resize handles where the app provides them.
+Set `allow_edge_drag = true` in `[window]` to move floating windows partly
+past the edge and drop windows onto the other monitor's visible workspace.
 During a resize, Seaside can briefly scale the app's last drawn frame to keep
 the window aligned with the pointer while the app redraws.
 
@@ -214,11 +218,16 @@ for each display. Use that value in a `[[monitors.output]]` override to set
 mode, scale, rotation or position for one monitor. The example shows how to
 write an override. Seaside selects the closest advertised refresh at the
 requested resolution within 0.5 Hz. For example, 60 Hz can select 59.951 Hz.
-The `power_state` field shows whether the monitor is
-awake, asleep, or disabled. A sleeping monitor stays logically enabled so
-its workspace remains assigned. Keyboard or pointer activity wakes the seat's
-sleeping displays. A fullscreen app or a visible idle inhibitor keeps its own
-display awake while the seat is idle. Dwindle
+One monitor owns workspaces 1–10. With two monitors, the primary owns 1–5
+and the secondary owns 6–10. A third connected monitor stays disabled until
+a slot opens. The pointer crosses anywhere along a side-by-side edge at the
+matching percentage of the other monitor's height.
+
+The `power_state` field shows whether the monitor is awake, asleep, or
+disabled. Sleeping monitors keep their workspaces. Keyboard or pointer
+activity wakes them together. Both displays share the same idle deadline,
+which defaults to 15 minutes. A visible fullscreen app or client idle
+inhibitor keeps both awake. Dwindle
 splits space around a window as new windows open. Scrolling places windows in
 horizontal columns. Set `layout = "scrolling"` in `[window]` to switch the
 layout. [Monitor settings](SEASIDE_CONFIG_EXAMPLE.toml)
@@ -231,7 +240,7 @@ prints a JSON response. An error response includes a code and message.
 
 | Command | What it does |
 |---|---|
-| `seasidectl status` | Check readiness, active layout and tiling, pending restart settings, and the last error |
+| `seasidectl status` | Check readiness, active layout and tiling, and the last error |
 | `seasidectl bindings` | List active shortcuts and actions from the current configuration |
 | `seasidectl outputs` | List displays, selectors, modes, power state, and capabilities |
 | `seasidectl workspaces` / `seasidectl windows` | Inspect workspace and window IDs and state |
@@ -240,6 +249,11 @@ prints a JSON response. An error response includes a code and message.
 | `seasidectl window to-workspace 2` | Move the focused window to workspace 2 and follow it |
 | `seasidectl window toggle-fullscreen` | Toggle fullscreen on the focused window |
 | `seasidectl night-light status` | Show the requested night light and the display's applied state |
+| `seasidectl night-light on` | Enable night light and save the preference |
+| `seasidectl settings` | Read editable values and the settings revision |
+| `seasidectl settings set power.profile balanced` | Save and apply a power profile. Use `system` to follow system policy. |
+| `seasidectl settings set idle.display_off_after_minutes 15` | Set the shared display idle timeout |
+| `seasidectl keybind set Super+N 'night_light toggle'` | Save and apply a shortcut. Use `keybind unset CHORD` to remove it or `keybind reset` for defaults. |
 | `seasidectl debug render` | Show rendering, presentation, and trace status |
 | `seasidectl events` | Print live events until interrupted with Ctrl+C |
 | `seasidectl exit` | End the session and return to the console |
@@ -250,6 +264,14 @@ and source revision. These commands also work outside a Seaside session.
 
 The protocol implementation lists the methods and parameters accepted on the
 local IPC socket. [JSONL protocol](../src/ipc_protocol.cpp)
+
+Shells such as Quickshell and Conch can use `query.settings`,
+`action.settings_update`, and the `settings.changed` event over the same local
+socket. Send `setting` and `value` with each update, and include `revision`
+to reject an update based on an older settings query. For an individual
+keybind, use the `keybinds` setting and send its `chord`. A `null` value removes
+that chord, or restores built-in bindings if `chord` is omitted. Updates take
+effect live and are saved to the user configuration file.
 
 ## Use applications and sharing
 

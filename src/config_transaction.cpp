@@ -94,8 +94,7 @@ std::expected<ConfigCandidate, Diagnostic> load_config_candidate(const ConfigSto
 }
 
 ConfigTransaction::ConfigTransaction(LoadedConfig startup)
-    : active_(startup.config), requested_(std::move(startup.config)),
-      runtime_night_light_(active_.night_light.enabled),
+    : active_(std::move(startup.config)),
       recovery_persisted_(startup.source == ConfigSource::recovery),
       diagnostic_(std::move(startup.diagnostic)) {}
 
@@ -115,10 +114,6 @@ std::expected<ConfigEffects, Diagnostic> ConfigTransaction::commit(ConfigCandida
         return std::unexpected(transaction_error("stale or non-owner configuration commit"));
     if (!prepare)
         return std::unexpected(transaction_error("configuration preparation is required"));
-    // Allocate before applying graphical changes. Successful preparation can
-    // leave output state committed, so the logical publication must be no-throw.
-    auto new_active = candidate.config;
-    new_active.workspaces.mode = active_.workspaces.mode;
     auto ready = [&]() -> std::expected<void, Diagnostic> {
         try {
             return prepare(active_, candidate.config);
@@ -132,21 +127,17 @@ std::expected<ConfigEffects, Diagnostic> ConfigTransaction::commit(ConfigCandida
         diagnostic_ = ready.error();
         return std::unexpected(ready.error());
     }
-    const bool reset = candidate.config.window.tiling != requested_.window.tiling ||
-                       candidate.config.window.layout != requested_.window.layout;
-    const bool change_night =
-        candidate.config.night_light.enabled != requested_.night_light.enabled;
-    const bool enabled = candidate.config.night_light.enabled;
+    const bool reset = candidate.config.window.tiling != active_.window.tiling ||
+                       candidate.config.window.layout != active_.window.layout;
+    const bool change_night = candidate.config.night_light.enabled != active_.night_light.enabled;
+    // Preparation can commit output state, so logical publication must be no-throw.
     static_assert(std::is_nothrow_move_assignable_v<Config>);
-    active_ = std::move(new_active);
-    requested_ = std::move(candidate.config);
+    active_ = std::move(candidate.config);
     committed_generation_ = candidate.generation;
-    if (change_night)
-        runtime_night_light_ = enabled;
     diagnostic_.reset();
     persistence_error_.reset();
     recovery_persisted_ = false;
-    return ConfigEffects{reset, restart_pending(), change_night};
+    return ConfigEffects{reset, change_night};
 }
 void ConfigTransaction::reject(std::uint64_t generation, Diagnostic diagnostic) {
     if (owner_ == std::this_thread::get_id() && generation == generation_)
@@ -157,10 +148,6 @@ void ConfigTransaction::persisted(std::uint64_t generation, std::optional<Storag
         return;
     recovery_persisted_ = !error || error->publication_committed;
     persistence_error_ = std::move(error);
-}
-void ConfigTransaction::set_runtime_night_light(bool enabled) {
-    if (owner_ == std::this_thread::get_id())
-        runtime_night_light_ = enabled;
 }
 
 AsyncConfigIo::AsyncConfigIo(WorkQueue &queue, ConfigStore store)

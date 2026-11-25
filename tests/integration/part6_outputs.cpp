@@ -143,7 +143,8 @@ class OutputTrial : public testing::Test {
     }
 
     void attach(part3_output *handle, std::string_view name, int x, std::string_view identity = {},
-                seaside_drm_output_description description = standard_display) {
+                seaside_drm_output_description description = standard_display,
+                const char *disabled_reason = nullptr) {
         auto *output = part3_output_handle(handle);
         seaside_drm_output_status status{};
         status.settings = {nullptr, 160, 90, 60000, x, 0, 0, 1.0F, false};
@@ -152,16 +153,19 @@ class OutputTrial : public testing::Test {
         status.cursor = true;
         drm.state.insert_or_assign(output, status);
         descriptions.insert_or_assign(output, description);
-        outputs->observe(output, name, identity, true, nullptr);
+        outputs->observe(output, name, identity, true, disabled_reason);
+        if (disabled_reason) {
+            return;
+        }
         const auto *record = outputs->enabled(output, true);
         ASSERT_NE(record, nullptr);
-        ASSERT_TRUE(desktop->add_output(output, name, identity, {x, 0, 160, 90}, record->id));
+        ASSERT_TRUE(desktop->add_output(output, record->id, {x, 0, 160, 90}));
     }
 
     void detach(FixtureOutput &handle, std::string_view connector) {
         auto *output = part3_output_handle(handle.get());
         outputs->enabled(output, false);
-        desktop->remove_output(output, outputs->ranked_fallback());
+        desktop->remove_output(output);
         outputs->observe(output, connector, {}, false, nullptr);
         descriptions.erase(output);
         handle.reset();
@@ -401,21 +405,19 @@ TEST_F(OutputTrial, ReportsOnlyActiveConfigAndShortcutsAcrossReloads) {
     EXPECT_EQ(query("query.bindings")["bindings"], IpcJson::array());
 }
 
-TEST_F(OutputTrial, RanksAdvertisedModesAndKeepsTheAutomaticPrimaryStable) {
-    auto first = make_output();
+TEST_F(OutputTrial, RanksActiveMonitorsAndIgnoresGeometryOnParkedConnectors) {
     auto smaller = make_output();
     auto larger = make_output();
     auto newcomer = make_output();
-    ASSERT_TRUE(first && smaller && larger && newcomer);
+    ASSERT_TRUE(smaller && larger && newcomer);
     auto small_mode = standard_display;
     small_mode.max_refresh_millihz = 144000;
     auto large_mode = small_mode;
     large_mode.max_pixels = 1920 * 1080;
     auto fastest_mode = standard_display;
     fastest_mode.max_refresh_millihz = 240000;
-    ASSERT_NO_FATAL_FAILURE(attach(first.get(), "a-first", 0));
-    ASSERT_NO_FATAL_FAILURE(attach(smaller.get(), "b-smaller", 160, {}, small_mode));
-    ASSERT_NO_FATAL_FAILURE(attach(larger.get(), "c-larger", 320, {}, large_mode));
+    ASSERT_NO_FATAL_FAILURE(attach(smaller.get(), "b-smaller", 0, {}, small_mode));
+    ASSERT_NO_FATAL_FAILURE(attach(larger.get(), "c-larger", 160, {}, large_mode));
 
     auto config = default_config();
     ASSERT_TRUE(outputs->apply(config));
@@ -424,16 +426,29 @@ TEST_F(OutputTrial, RanksAdvertisedModesAndKeepsTheAutomaticPrimaryStable) {
     EXPECT_EQ(outputs->primary()->status.settings.x, 0);
     EXPECT_EQ(connected("b-smaller").status.settings.x, 160);
 
-    ASSERT_NO_FATAL_FAILURE(attach(newcomer.get(), "d-newcomer", 480, {}, fastest_mode));
+    ASSERT_NO_FATAL_FAILURE(
+        attach(newcomer.get(), "d-newcomer", 320, {}, fastest_mode, "two-display limit"));
+    config.monitors.primary = OutputSelector{SelectorKind::connector, "d-newcomer"};
+    MonitorOverride extra{};
+    extra.match = *config.monitors.primary;
+    extra.resolution = Resolution{1, 1};
+    config.monitors.output.push_back(std::move(extra));
+    EXPECT_EQ(outputs->admission_preference(config), part3_output_handle(newcomer.get()));
     ASSERT_TRUE(outputs->apply(config));
     EXPECT_EQ(outputs->primary()->connector, "c-larger");
-    EXPECT_EQ(connected("d-newcomer").status.settings.x, 160);
+    EXPECT_FALSE(connected("d-newcomer").enabled);
+    EXPECT_EQ(connected("d-newcomer").disabled_reason, "two-display limit");
+    EXPECT_EQ(desktop->windows().state().output_count(), 2U);
 
-    // The first display has focus history. Migration uses that history when
-    // the primary disappears, even though another display ranks higher.
     detach(larger, "c-larger");
+    EXPECT_EQ(desktop->windows().workspace_output(10), connected("b-smaller").id);
+    config.monitors.output.clear();
+    ASSERT_NO_FATAL_FAILURE(attach(newcomer.get(), "d-newcomer", 160, {}, fastest_mode));
     ASSERT_TRUE(outputs->apply(config));
-    EXPECT_EQ(outputs->primary()->connector, "a-first");
+    EXPECT_EQ(outputs->primary()->connector, "d-newcomer");
+    EXPECT_TRUE(connected("d-newcomer").disabled_reason.empty());
+    EXPECT_EQ(desktop->windows().workspace_output(1), connected("d-newcomer").id);
+    EXPECT_EQ(desktop->windows().workspace_output(6), connected("b-smaller").id);
     config.monitors.primary = OutputSelector{SelectorKind::connector, "b-smaller"};
     ASSERT_TRUE(outputs->apply(config));
     EXPECT_EQ(outputs->primary()->connector, "b-smaller");
@@ -446,9 +461,6 @@ TEST_F(OutputTrial, RestoresThePhysicalMonitorAndWorkspaceAcrossConnectorChanges
     auto left = make_output();
     auto right = make_output();
     ASSERT_TRUE(left && right);
-    auto config = default_config();
-    config.workspaces.mode = WorkspaceMode::per_monitor;
-    desktop->apply_initial_config(config);
     ASSERT_NO_FATAL_FAILURE(attach(left.get(), "left", 0, "panel-a"));
     ASSERT_NO_FATAL_FAILURE(attach(right.get(), "right", 160, "panel-b"));
     const auto left_id = connected("left").id;
@@ -459,7 +471,7 @@ TEST_F(OutputTrial, RestoresThePhysicalMonitorAndWorkspaceAcrossConnectorChanges
 
     detach(right, "right");
     EXPECT_EQ(windows.workspace_output(*workspace), left_id);
-    EXPECT_EQ(windows.workspace_owner(*workspace), right_id);
+    EXPECT_EQ(windows.workspace_owner(*workspace), left_id);
     right = make_output();
     ASSERT_TRUE(right);
     ASSERT_NO_FATAL_FAILURE(attach(right.get(), "other-connector", 160, "panel-b"));

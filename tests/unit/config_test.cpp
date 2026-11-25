@@ -28,7 +28,7 @@ TEST_F(ConfigTest, CompiledDefaultsMatchApprovedValues) {
     EXPECT_EQ(value.window.gaps_inner, 5);
     EXPECT_EQ(value.window.border_width, 2);
     EXPECT_TRUE(value.window.titlebars);
-    EXPECT_EQ(value.workspaces.mode, seaside::WorkspaceMode::global);
+    EXPECT_FALSE(value.window.allow_edge_drag);
     EXPECT_FALSE(value.monitors.primary);
     EXPECT_FALSE(value.monitors.defaults.resolution);
     EXPECT_FALSE(value.monitors.defaults.refresh_rate);
@@ -48,7 +48,7 @@ TEST_F(ConfigTest, CompiledDefaultsMatchApprovedValues) {
     EXPECT_EQ(value.render.fullscreen_aspect, seaside::FullscreenAspect::preserve);
     EXPECT_FALSE(value.night_light.enabled);
     EXPECT_EQ(value.night_light.temperature_kelvin, 4500);
-    EXPECT_EQ(value.keybinds.size(), 38U);
+    EXPECT_EQ(value.keybinds.size(), 42U);
 }
 
 TEST_F(ConfigTest, CanonicalGenerationMatchesIndependentReferenceAndCompiledDefaults) {
@@ -100,6 +100,7 @@ path='/tmp/壁紙.webp'
 [window]
 tiling=false
 titlebars=false
+allow_edge_drag=true
 layout='scrolling'
 gaps_outer=21
 gaps_inner=22
@@ -154,6 +155,7 @@ temperature_kelvin=6000
     EXPECT_EQ(c.wallpaper.path, "/tmp/壁紙.webp");
     EXPECT_FALSE(c.window.tiling);
     EXPECT_FALSE(c.window.titlebars);
+    EXPECT_TRUE(c.window.allow_edge_drag);
     EXPECT_EQ(c.window.layout, seaside::Layout::scrolling);
     EXPECT_EQ(c.window.gaps_outer, 21);
     EXPECT_EQ(c.window.gaps_inner, 22);
@@ -164,7 +166,6 @@ temperature_kelvin=6000
     EXPECT_EQ(c.audio.default_output, "alsa_output.usb-Example");
     EXPECT_EQ(c.audio.default_input, "alsa_input.usb-Example");
     EXPECT_EQ(c.power.profile, seaside::PowerProfile::performance);
-    EXPECT_EQ(c.workspaces.mode, seaside::WorkspaceMode::per_monitor);
     ASSERT_TRUE(c.monitors.primary);
     EXPECT_EQ(c.monitors.primary->kind, seaside::SelectorKind::identity);
     EXPECT_EQ(c.monitors.primary->value, "serial");
@@ -358,6 +359,44 @@ TEST_F(ConfigTest, NonRepresentableIntegerToFloatConversionsAreRejected) {
         EXPECT_FALSE(seaside::parse_config("[[monitors.output]]\nmatch='connector:DP-1'\n" +
                                            std::string(field) + "=9007199254740993"));
     }
+}
+
+TEST_F(ConfigTest, RetiredWorkspaceBindingsLeaveOtherSettingsUsable) {
+    const auto parsed = seaside::parse_config(R"(
+[workspaces]
+mode = "per-monitor"
+[window]
+allow_edge_drag = true
+[keybinds]
+"Super+A" = "transfer_workspace identity:Room display"
+"Super+B" = "workspace 11"
+"Super+C" = "move_to_workspace 19"
+"Super+D" = "workspace 10"
+)");
+    ASSERT_TRUE(parsed);
+    EXPECT_TRUE(parsed->window.allow_edge_drag);
+    ASSERT_EQ(parsed->keybinds.size(), 1U);
+    EXPECT_EQ(parsed->keybinds.begin()->second.argument, 10);
+}
+
+TEST_F(ConfigTest, AddsDirectionalMovesToAnOldStockMap) {
+    auto old = seaside::default_bindings();
+    for (const auto *direction : {"Left", "Right", "Up", "Down"}) {
+        old.erase(seaside::parse_chord(std::string("Super+Shift+") + direction).value());
+    }
+    old.erase(seaside::parse_chord("Super+S").value());
+    old.erase(seaside::parse_chord("Super+Shift+S").value());
+    std::string text = "[keybinds]\n";
+    for (const auto &[chord, action] : old) {
+        text += '"' + seaside::format_chord(chord) + "\" = \"" + seaside::format_action(action) +
+                "\"\n";
+    }
+    text += seaside::legacy_move_binding_example;
+    const auto migrated = seaside::parse_config(text);
+    ASSERT_TRUE(migrated);
+    EXPECT_EQ(migrated->keybinds.size(), old.size() + 4);
+    EXPECT_FALSE(migrated->keybinds.contains(seaside::parse_chord("Super+S").value()));
+    EXPECT_TRUE(migrated->keybinds.contains(seaside::parse_chord("Super+Shift+Up").value()));
 }
 
 TEST_F(ConfigTest, MonitorOverridesDistinguishInheritanceFromExplicitAuto) {

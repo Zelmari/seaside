@@ -163,6 +163,67 @@ TEST(Part5WindowManager, MoveDragRestoresOnInvalidDropAndSurvivesTargetRemoval) 
     EXPECT_TRUE(windows.state().valid());
 }
 
+TEST(Part5WindowManager, FloatingEdgeDragCanBeEnabledLiveAndLeavesAReachablePart) {
+    auto config = layout_config();
+    config.window.tiling = false;
+    WindowManager windows(config);
+    ASSERT_TRUE(windows.add_output("main", output, output));
+    const auto window = open(windows);
+    ASSERT_TRUE(windows.begin_move(window));
+    ASSERT_TRUE(windows.move_window_by(window, -2000, 0));
+    EXPECT_EQ(windows.view(window).geometry.x, 0);
+    EXPECT_FALSE(windows.finish_move(window, 0, 300));
+
+    config.window.allow_edge_drag = true;
+    windows.apply_layout_config(config);
+    ASSERT_TRUE(windows.begin_move(window));
+    ASSERT_TRUE(windows.move_window_by(window, -310, 0));
+    EXPECT_TRUE(windows.view(window).unclipped_move);
+    EXPECT_EQ(windows.view(window).geometry.x, -310);
+    ASSERT_TRUE(windows.finish_move(window, 0, 300));
+    EXPECT_EQ(windows.view(window).geometry.x, 32 - client.width);
+    EXPECT_EQ(windows.view(window).clip, output);
+    EXPECT_FALSE(windows.view(window).unclipped_move);
+
+    ASSERT_TRUE(windows.begin_move(window));
+    ASSERT_TRUE(windows.move_window_by(window, 100, 0));
+    config.window.allow_edge_drag = false;
+    windows.apply_layout_config(config);
+    EXPECT_FALSE(windows.finish_move(window, 100, 300));
+    EXPECT_EQ(windows.view(window).geometry.x, 0);
+}
+
+TEST(Part5WindowManager, FloatingEdgeDropMovesTheWindowFamilyToTheShownWorkspace) {
+    auto config = layout_config();
+    config.window.tiling = false;
+    config.window.allow_edge_drag = true;
+    WindowManager windows(config);
+    ASSERT_TRUE(windows.add_output("main", output, output));
+    constexpr WindowRect second{1000, 100, 700, 500};
+    ASSERT_TRUE(windows.add_output("second", second, second));
+    ASSERT_TRUE(windows.select_workspace(8));
+    ASSERT_TRUE(windows.select_workspace(1));
+
+    const auto window = open(windows);
+    const auto dialog = windows.create_window(window);
+    ASSERT_TRUE(dialog);
+    ASSERT_TRUE(windows.initialize_window(*dialog));
+    ASSERT_TRUE(windows.map_window(*dialog, {0, 0, 160, 80}));
+    const auto from = windows.view(window).geometry;
+    ASSERT_TRUE(windows.begin_move(window));
+    ASSERT_TRUE(windows.move_window_by(window, 1100 - from.x, 0));
+    EXPECT_TRUE(windows.view(*dialog).unclipped_move);
+    EXPECT_EQ(windows.view(*dialog).geometry.x, 1180);
+    EXPECT_EQ(windows.state().window(window)->home_workspace, 1u);
+    ASSERT_TRUE(windows.finish_move(window, 1150, 300));
+    EXPECT_EQ(windows.state().window(window)->home_workspace, 8u);
+    EXPECT_EQ(windows.state().window(*dialog)->home_workspace, 8u);
+    EXPECT_EQ(windows.view(window).geometry.x, 1100);
+    EXPECT_EQ(windows.focused_workspace(), 8);
+    EXPECT_EQ(windows.focused_window(), window);
+    EXPECT_TRUE(windows.state().valid());
+}
+
 TEST(Part5WindowManager, ScrollingRemembersCustomWidthAndViewportAndClosesToTheRight) {
     WindowManager windows(layout_config(Layout::scrolling));
     ASSERT_TRUE(windows.add_output("main", output, output));
@@ -191,7 +252,7 @@ TEST(Part5WindowManager, ScrollingRemembersCustomWidthAndViewportAndClosesToTheR
     EXPECT_FALSE(windows.resize_window(second, Direction::down, 100));
     const auto positions = {windows.view(first).geometry, windows.view(second).geometry,
                             windows.view(third).geometry};
-    ASSERT_TRUE(windows.select_workspace(27));
+    ASSERT_TRUE(windows.select_workspace(7));
     open(windows);
     ASSERT_TRUE(windows.select_workspace(home));
     EXPECT_EQ(windows.focused_window(), second);

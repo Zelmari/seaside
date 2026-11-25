@@ -28,6 +28,8 @@ active_border_color = "#BFBFBF"
 inactive_border_color = "#595959"
 # false hides title bars in apps that support Wayland decoration negotiation.
 titlebars = true
+# Allow move gestures to cross display edges or drop onto the other monitor.
+allow_edge_drag = false
 
 [appearance]
 # Global color preference for Seaside and compatible apps. "dark" or "light".
@@ -43,10 +45,6 @@ default_input = "auto"
 # Optional system power profile. Omit to follow the system policy.
 # Run `powerprofilesctl list` to see the available profiles.
 # profile = "balanced"  # "saver", "balanced", or "performance"
-
-[workspaces]
-# "global" (default) or "per-monitor". THIS KEY NEEDS A RESTART.
-mode = "global"
 
 [monitors]
 # Primary: "auto" (highest supported Hz, then resolution, then connector)
@@ -99,7 +97,7 @@ scroll_direction = "normal"
 
 [idle]
 # Minutes with no activity before display power-off: 0..1440; 0 disables.
-# Visible fullscreen apps and client idle inhibition prevent display-off.
+# All displays share one deadline. A visible fullscreen app or inhibitor keeps them awake.
 display_off_after_minutes = 15
 
 [render]
@@ -173,6 +171,10 @@ temperature_kelvin = 4500
 "Super+Right" = "focus right"
 "Super+Up" = "focus up"
 "Super+Down" = "focus down"
+"Super+Shift+Left" = "move_window left"
+"Super+Shift+Right" = "move_window right"
+"Super+Shift+Up" = "move_window up"
+"Super+Shift+Down" = "move_window down"
 "Alt+Tab" = "cycle_focus_mru"
 "Super+MouseLeftDrag" = "move_window"
 "Super+MouseRightDrag" = "resize_window"
@@ -188,17 +190,14 @@ temperature_kelvin = 4500
 #   toggle_window_tiling; focus DIR; cycle_focus_mru
 #   move_window (mouse drag only); resize_window (mouse drag only)
 #   move_window DIR; swap_window DIR; resize_window DIR [DISTANCE]
-#   workspace ID; move_to_workspace ID; transfer_workspace SELECTOR
+#   workspace ID; move_to_workspace ID
 #   toggle_window_pin; toggle_window_maximize; toggle_window_fullscreen
 #   close_window; night_light on; night_light off; night_light toggle
 #   exit; exec SHELL_COMMAND
-# DIR = left/right/up/down; ID = positive integer, globally unique.
-# SELECTOR = identity:<as-reported> or connector:<output-name>.
+# DIR = left/right/up/down; ID = integer from 1 through 10.
 # DISTANCE = optional positive logical pixels, default 32.
 # Optional examples (uncomment ONLY those you want):
 # "Super+B" = "exec firefox"
-# "Super+Alt+1" = "transfer_workspace connector:DP-1"
-# "Super+Shift+Left" = "move_window left"
 # "Super+Alt+Left" = "swap_window left"
 # "Super+Ctrl+Left" = "resize_window left 32"
 # "Super+N" = "night_light toggle"
