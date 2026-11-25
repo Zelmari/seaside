@@ -5,9 +5,11 @@
 
 #include <drm_fourcc.h>
 #include <errno.h>
+#include <inttypes.h>
 #include <limits.h>
 #include <linux/vt.h>
 #include <math.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -257,6 +259,57 @@ static void fail(struct seaside_tty_drm *drm, const char *message) {
     }
 }
 
+static int64_t monotonic_ms(void) {
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) < 0) {
+        return -1;
+    }
+    return (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+}
+
+static atomic_bool drm_seat_paused;
+static atomic_int_fast64_t drm_log_start_ms;
+
+static void log_wlroots(enum wlr_log_importance importance, const char *format, va_list args) {
+    /* wlroots 0.20.2 destroys outputs on seat pause. Its CRTC disable returns
+     * before reaching KMS when the seat is inactive, then emits this error. */
+    if (importance == WLR_ERROR && atomic_load_explicit(&drm_seat_paused, memory_order_relaxed) &&
+        strcmp(format, "[%s:%d] connector %s: Failed to disable CRTC %" PRIu32) == 0) {
+        va_list copy;
+        va_copy(copy, args);
+        const char *file = va_arg(copy, const char *);
+        va_end(copy);
+        const char source[] = "backend/drm/drm.c";
+        const size_t length = strlen(file);
+        if (strcmp(file, source) == 0 ||
+            (length >= sizeof(source) && file[length - sizeof(source)] == '/' &&
+             strcmp(file + length - sizeof(source) + 1, source) == 0)) {
+            importance = WLR_INFO;
+            format = "[%s:%d] connector %s: Skipped disabling CRTC %" PRIu32 " while seat is paused";
+        }
+    }
+    if ((unsigned)importance > (unsigned)wlr_log_get_verbosity()) {
+        return;
+    }
+    static const struct { const char *label, *color; } levels[] = {
+        [WLR_SILENT] = {"", ""},
+        [WLR_ERROR] = {"[ERROR] ", "\033[1;31m"},
+        [WLR_INFO] = {"[INFO] ", "\033[1;34m"},
+        [WLR_DEBUG] = {"[DEBUG] ", "\033[1;90m"},
+    };
+    const int64_t started = atomic_load_explicit(&drm_log_start_ms, memory_order_relaxed);
+    const int64_t now = monotonic_ms();
+    const int64_t ms = started >= 0 && now >= started ? now - started : 0;
+    const bool color = isatty(STDERR_FILENO);
+    flockfile(stderr);
+    fprintf(stderr, "%02d:%02d:%02d.%03d %s", (int)(ms / 3600000), (int)(ms / 60000 % 60),
+            (int)(ms / 1000 % 60), (int)(ms % 1000),
+            color ? levels[importance].color : levels[importance].label);
+    vfprintf(stderr, format, args);
+    fputs(color ? "\033[0m\n" : "\n", stderr);
+    funlockfile(stderr);
+}
+
 static void on_session_destroy(struct wl_listener *listener, void *data) {
     (void)data;
     struct seaside_tty_drm *drm = wl_container_of(listener, drm, session_destroy);
@@ -267,12 +320,14 @@ static void on_session_destroy(struct wl_listener *listener, void *data) {
     unlink_listener(&drm->session_active);
     drm->session = NULL;
     drm->evidence.active = false;
+    atomic_store_explicit(&drm_seat_paused, false, memory_order_relaxed);
 }
 
 static void on_session_active(struct wl_listener *listener, void *data) {
     (void)data;
     struct seaside_tty_drm *drm = wl_container_of(listener, drm, session_active);
     drm->evidence.active = drm->session->active;
+    atomic_store_explicit(&drm_seat_paused, !drm->session->active, memory_order_relaxed);
     if (!drm->session->active) {
         /* wlroots destroys DRM outputs on VT pause and advertises fresh
          * handles on resume. Reverify the plane on the new presentation. */
@@ -575,14 +630,6 @@ bool seaside_tty_active_console(void) {
            ioctl(STDIN_FILENO, VT_GETSTATE, &active) == 0 && vt == active.v_active;
 }
 
-static int64_t monotonic_ms(void) {
-    struct timespec now;
-    if (clock_gettime(CLOCK_MONOTONIC, &now) < 0) {
-        return -1;
-    }
-    return (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
-}
-
 static bool wait_for_active_seat(struct seaside_tty_drm *drm, struct wl_event_loop *loop) {
     if (drm->session->active) {
         return true;
@@ -657,7 +704,8 @@ struct seaside_tty_drm *seaside_tty_drm_create(struct wl_display *display, const
     wl_list_init(&drm->backend_destroy.link);
     wl_list_init(&drm->new_output.link);
 
-    wlr_log_init(WLR_INFO, NULL);
+    atomic_store_explicit(&drm_log_start_ms, monotonic_ms(), memory_order_relaxed);
+    wlr_log_init(WLR_INFO, log_wlroots);
     struct wl_event_loop *loop = wl_display_get_event_loop(display);
     drm->session = wlr_session_create(loop);
     if (!drm->session) {
@@ -665,6 +713,7 @@ struct seaside_tty_drm *seaside_tty_drm_create(struct wl_display *display, const
         goto error;
     }
     wl_signal_add(&drm->session->events.destroy, &drm->session_destroy);
+    /* Observe the seat before the DRM backend's VT teardown listener. */
     wl_signal_add(&drm->session->events.active, &drm->session_active);
     if (!wait_for_active_seat(drm, loop)) {
         fail(drm, "console seat did not become active");
@@ -731,6 +780,9 @@ void seaside_tty_drm_destroy(struct seaside_tty_drm *drm) {
     }
     unlink_listener(&drm->session_destroy);
     unlink_listener(&drm->session_active);
+    if (drm->session) {
+        atomic_store_explicit(&drm_seat_paused, false, memory_order_relaxed);
+    }
     if (!drm->backend) {
         wlr_session_destroy(drm->session);
     }

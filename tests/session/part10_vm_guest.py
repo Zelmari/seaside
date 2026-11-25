@@ -263,6 +263,8 @@ def first_use(session, temporary, state):
             wait_for(lambda: standard["active"]() == "tty1", 12, "TTY 1", session.process)
             wait_for(lambda: session.log.read_text(errors="replace").count("presented with cursor plane") >= 2,
                      12, "hardware cursor presentation after VT return", session.process)
+            require("Failed to disable CRTC" not in session.log.read_text(errors="replace"),
+                    "The VT switch reported a CRTC disable failure")
         event(name, "type and capture in the package-launched terminal", marker_dir=str(temporary))
         marker = temporary / f"{name}.pid"
         wait_for(lambda: marker.is_file() and marker.stat().st_size, 14, f"{name} capture", session.process)
