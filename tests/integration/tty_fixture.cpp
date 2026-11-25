@@ -187,6 +187,7 @@ std::expected<Result, const char *> run_fixture(const char *device, bool termina
         .cursor_surface = nullptr,
         .pointer_cancelled = nullptr,
         .drag_icon = nullptr,
+        .input_popup = nullptr,
         .activity = nullptr,
     };
     std::unique_ptr<seaside_tty_input, decltype(&seaside_tty_input_destroy)> input(

@@ -11,6 +11,8 @@ struct wl_display;
 struct timespec;
 struct wlr_backend;
 struct wlr_drag_icon;
+struct wlr_box;
+struct wlr_input_popup_surface_v2;
 struct wlr_output;
 struct wlr_seat;
 struct wlr_seat_client;
@@ -51,6 +53,9 @@ struct seaside_tty_input_callbacks {
     void (*pointer_cancelled)(void *data);
     /* The icon is borrowed. The scene removes its node on icon destruction. */
     void (*drag_icon)(void *data, struct wlr_drag_icon *icon);
+    /* An inactive popup has no focus or cursor rectangle. */
+    void (*input_popup)(void *data, struct wlr_input_popup_surface_v2 *popup,
+                        struct wlr_surface *focus, const struct wlr_box *cursor);
     /* Local input also counts when a binding or pointer constraint consumes it.
      * Motion reports after routing so it can wake the destination output. */
     void (*activity)(void *data, bool pointer);

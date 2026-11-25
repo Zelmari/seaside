@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "tty_input.h"
+#include "text_input.h"
 
 #include <libinput.h>
 #include <limits.h>
@@ -16,6 +17,7 @@
 #include <wlr/types/wlr_data_device.h>
 #include <wlr/types/wlr_ext_data_control_v1.h>
 #include <wlr/types/wlr_fractional_scale_v1.h>
+#include <wlr/types/wlr_input_method_v2.h>
 #include <wlr/types/wlr_keyboard.h>
 #include <wlr/types/wlr_keyboard_group.h>
 #include <wlr/types/wlr_output.h>
@@ -37,6 +39,7 @@ struct seaside_tty_input {
     struct wl_listener backend_destroy;
     bool attached;
     struct wlr_seat *seat;
+    struct seaside_text_input *text_input;
     struct wlr_keyboard_group *group;
     struct xkb_state *shortcut_state;
     /* wlroots uses the seat keyboard's key list for late wl_keyboard binds.
@@ -394,6 +397,7 @@ void seaside_tty_input_set_focus(struct seaside_tty_input *input, struct wlr_sur
     if (!input || !input->seat || input->focus == surface) {
         return;
     }
+    seaside_text_input_restore_keyboard(input->text_input);
     wl_list_remove(&input->focus_destroy.link);
     wl_list_init(&input->focus_destroy.link);
     input->focus = surface;
@@ -788,8 +792,11 @@ static void handle_pointer_button(struct wl_listener *listener, void *data) {
         input->pointer_grab_device = NULL;
     }
     const uint64_t window = update_pointer_target(input, event->time_msec);
+    struct wlr_surface *hovered = seat->pointer_state.focused_surface;
+    struct wlr_surface *root = hovered ? wlr_surface_get_root_surface(hovered) : NULL;
+    const bool input_popup = root && wlr_input_popup_surface_v2_try_from_wlr_surface(root);
     if (input->callbacks.pointer_button && !wlr_seat_pointer_has_grab(seat) && !input->constraint &&
-        (seat->pointer_state.button_count == 0 || !pressed) &&
+        !input_popup && (seat->pointer_state.button_count == 0 || !pressed) &&
         input->callbacks.pointer_button(input->data, window, button, pressed, input->modifiers) &&
         pressed && button < KEY_CNT) {
         input->gesture_device = device;
@@ -965,9 +972,11 @@ static void deliver_key(struct seaside_tty_input *input, struct wlr_keyboard_key
             break;
         }
     }
-    if (pressed == already_down || (pressed && keyboard->num_keycodes == WLR_KEYBOARD_KEYS_CAP)) {
+    if ((pressed && already_down) || seaside_text_input_key(input->text_input, keyboard, &event) ||
+        pressed == already_down || (pressed && keyboard->num_keycodes == WLR_KEYBOARD_KEYS_CAP)) {
         return;
     }
+    seaside_text_input_restore_keyboard(input->text_input);
     /* XKB state comes from the hardware group, while the seat keyboard needs
      * the visible pressed keys for focus changes and late keyboard binds. */
     event.update_state = false;
@@ -1032,7 +1041,8 @@ static void deliver_modifiers(struct seaside_tty_input *input,
                               const struct wlr_keyboard_modifiers *mods) {
     wlr_keyboard_notify_modifiers(&input->client_keyboard, mods->depressed, mods->latched,
                                   mods->locked, mods->group);
-    if (input->seat) {
+    if (input->seat && !seaside_text_input_modifiers(input->text_input, &input->client_keyboard)) {
+        seaside_text_input_restore_keyboard(input->text_input);
         wlr_seat_keyboard_notify_modifiers(input->seat, &input->client_keyboard.modifiers);
     }
 }
@@ -1226,6 +1236,8 @@ static const struct wlr_keyboard_impl client_keyboard_impl = {.name = "seaside-s
 static void handle_seat_destroy(struct wl_listener *listener, void *data) {
     (void)data;
     struct seaside_tty_input *input = wl_container_of(listener, input, seat_destroy);
+    seaside_text_input_destroy(input->text_input);
+    input->text_input = NULL;
     leave_constraint(input, false);
     wl_list_remove(&input->seat_destroy.link);
     wl_list_remove(&input->pointer_focus_change.link);
@@ -1278,6 +1290,10 @@ bool seaside_tty_input_enable_keyboard(struct seaside_tty_input *input,
                   wlr_keyboard_set_keymap(&input->client_keyboard, keymap);
     xkb_keymap_unref(keymap);
     struct wlr_seat *seat = mapped ? wlr_seat_create(display, "seat0") : NULL;
+    struct seaside_text_input *text_input =
+        seat ? seaside_text_input_create(display, seat, &input->client_keyboard, &input->callbacks,
+                                         input->data)
+             : NULL;
     struct wlr_relative_pointer_manager_v1 *relative_pointer = NULL;
     struct wlr_pointer_constraints_v1 *constraints = NULL;
     struct wlr_cursor_shape_manager_v1 *cursor_shapes = NULL;
@@ -1289,12 +1305,14 @@ bool seaside_tty_input_enable_keyboard(struct seaside_tty_input *input,
     if (seat && needs_cursor) {
         cursor_shapes = wlr_cursor_shape_manager_v1_create(display, 1);
     }
-    if (!seat || (input->callbacks.pointer_target && (!relative_pointer || !constraints)) ||
+    if (!seat || !text_input ||
+        (input->callbacks.pointer_target && (!relative_pointer || !constraints)) ||
         (needs_cursor && !cursor_shapes) || !wlr_data_device_manager_create(display) ||
         !wlr_primary_selection_v1_device_manager_create(display) ||
         !wlr_ext_data_control_manager_v1_create(display, 1) ||
         !wlr_data_control_manager_v1_create(display)) {
         xkb_state_unref(shortcut_state);
+        seaside_text_input_destroy(text_input);
         wlr_seat_destroy(seat);
         if (group) {
             wlr_keyboard_group_destroy(group);
@@ -1304,6 +1322,7 @@ bool seaside_tty_input_enable_keyboard(struct seaside_tty_input *input,
     }
 
     input->seat = seat;
+    input->text_input = text_input;
     input->group = group;
     input->shortcut_state = shortcut_state;
     input->seat_destroy.notify = handle_seat_destroy;

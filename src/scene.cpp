@@ -401,6 +401,11 @@ void Scene::move_drag_icon(int x, int y) noexcept {
     seaside_scene_move_drag_icon(bridge_, x, y);
 }
 
+void Scene::set_input_popup(wlr_input_popup_surface_v2 *popup, wlr_surface *focus,
+                            const wlr_box *cursor) noexcept {
+    seaside_scene_set_input_popup(bridge_, popup, focus, cursor);
+}
+
 bool Scene::watch_client(pid_t pid, seaside_scene_focus_fn focus, void *data) noexcept {
     return seaside_scene_watch_client(bridge_, pid, focus, data);
 }

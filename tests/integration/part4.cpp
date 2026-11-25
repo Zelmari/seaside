@@ -21,6 +21,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fcntl.h>
 #include <filesystem>
 #include <fstream>
 #include <linux/input-event-codes.h>
@@ -29,6 +30,7 @@
 #include <string_view>
 #include <sys/mman.h>
 #include <sys/socket.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #include <wayland-client.h>
 #include <wayland-server-core.h>
@@ -676,7 +678,7 @@ struct Fixture {
     }
 };
 
-bool run_fixture(const seaside::Config &config, bool (*scenario)(const Fixture &)) {
+template <typename Scenario> bool run_fixture(const seaside::Config &config, Scenario scenario) {
     auto server = seaside::Server::create();
     REQUIRE(server);
     auto *display = (*server)->display();
@@ -1481,6 +1483,12 @@ struct LayerSeat {
             .cursor_surface = nullptr,
             .pointer_cancelled = nullptr,
             .drag_icon = nullptr,
+            .input_popup =
+                [](void *data, wlr_input_popup_surface_v2 *popup, wlr_surface *surface,
+                   const wlr_box *cursor) {
+                    static_cast<LayerSeat *>(data)->fixture.scene.set_input_popup(popup, surface,
+                                                                                  cursor);
+                },
             .activity = nullptr,
         };
         input.reset(seaside_tty_input_create(fixture.backend, &callbacks, this));
@@ -1512,6 +1520,96 @@ struct LayerSeat {
     double x = 1, y = 1;
     unsigned shortcuts = 0;
 };
+
+bool run_wayland_input(const Fixture &fixture, const char *executable) {
+    auto output = fixture.output();
+    REQUIRE(output);
+    auto *handle = part3_output_handle(output.get());
+    auto &desktop = fixture.desktop;
+    REQUIRE(desktop.add_output(handle, "main", output_bounds));
+    LayerSeat seat(fixture);
+    REQUIRE(seat.start());
+
+    int sockets[2];
+    REQUIRE(socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sockets) == 0);
+    auto *connection = wl_client_create(fixture.display, sockets[0]);
+    REQUIRE(connection);
+    int transcript[2];
+    REQUIRE(pipe2(transcript, O_CLOEXEC | O_NONBLOCK) == 0);
+    const pid_t pid = fork();
+    if (pid == 0) {
+        char fd[16];
+        std::snprintf(fd, sizeof(fd), "%d", sockets[1]);
+        if (fcntl(sockets[1], F_SETFD, 0) < 0 || dup2(transcript[1], STDOUT_FILENO) < 0 ||
+            setenv("WAYLAND_SOCKET", fd, 1) < 0) {
+            _exit(1);
+        }
+        execl(executable, executable, "--verify-focus", nullptr);
+        _exit(1);
+    }
+    close(sockets[1]);
+    close(transcript[1]);
+    struct Child {
+        pid_t pid;
+        int transcript;
+        ~Child() {
+            close(transcript);
+            if (pid > 0) {
+                kill(pid, SIGKILL);
+                waitpid(pid, nullptr, 0);
+            }
+        }
+    } child{pid, transcript[0]};
+    REQUIRE(pid > 0);
+    std::string log;
+    const auto pump = [&](std::string_view expected) {
+        auto *loop = wl_display_get_event_loop(fixture.display);
+        for (int i = 0; i < 200 && log.find(expected) == std::string::npos; ++i) {
+            wl_display_flush_clients(fixture.display);
+            if (wl_event_loop_dispatch(loop, 20) < 0) {
+                return false;
+            }
+            char bytes[256];
+            const auto size = read(child.transcript, bytes, sizeof(bytes));
+            if (size > 0) {
+                log.append(bytes, size);
+            } else if (size == 0) {
+                break;
+            }
+        }
+        return log.find(expected) != std::string::npos;
+    };
+    REQUIRE(pump("Wayland input composition, popup, privacy, and key forwarding passed"));
+    const auto window = desktop.keyboard_window();
+    REQUIRE(window);
+    const auto icon = fixture.scene.window_metadata(*window);
+    REQUIRE(icon.icon_name && std::string_view(icon.icon_name) == "seaside-fixture");
+    REQUIRE(icon.icon_png_base64 && std::string_view(icon.icon_png_base64).starts_with("iVBOR"));
+    seat.key(KEY_A);
+    REQUIRE(pump("physical grab key 30 state 0"));
+    // Drain the forwarded key before removing focus.
+    wl_display_flush_clients(fixture.display);
+    REQUIRE(wl_event_loop_dispatch(wl_display_get_event_loop(fixture.display), 20) >= 0);
+    REQUIRE(desktop.action(action(ActionKind::workspace, 2)));
+    REQUIRE(pump("text input focus left"));
+    REQUIRE(desktop.action(action(ActionKind::workspace, 1)));
+    bool exited = false;
+    for (int i = 0; i < 200 && !exited; ++i) {
+        wl_display_flush_clients(fixture.display);
+        REQUIRE(wl_event_loop_dispatch(wl_display_get_event_loop(fixture.display), 20) >= 0);
+        int status;
+        const auto finished = waitpid(child.pid, &status, WNOHANG);
+        REQUIRE(finished >= 0);
+        if (finished) {
+            child.pid = -1;
+            REQUIRE(WIFEXITED(status) && WEXITSTATUS(status) == EXIT_SUCCESS);
+            exited = true;
+        }
+    }
+    REQUIRE(exited);
+    desktop.remove_output(handle);
+    return true;
+}
 
 template <bool outside_click> bool run_popup_shutdown(const Fixture &fixture) {
     auto output = fixture.output();
@@ -2561,6 +2659,14 @@ int main(int argc, char **argv) {
                    : EXIT_FAILURE;
     }
     const std::string_view scenario = argv[1];
+    if (argc == 3 && scenario == "wayland-input") {
+        config.window.tiling = false;
+        return run_fixture(
+                   config,
+                   [&](const Fixture &fixture) { return run_wayland_input(fixture, argv[2]); })
+                   ? EXIT_SUCCESS
+                   : EXIT_FAILURE;
+    }
     if (argc == 2 && scenario == "titlebars") {
         return run_fixture(config, run_titlebars) ? EXIT_SUCCESS : EXIT_FAILURE;
     }

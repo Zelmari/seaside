@@ -10,9 +10,11 @@ struct wl_display;
 struct wl_event_loop;
 struct wlr_allocator;
 struct wlr_buffer;
+struct wlr_box;
 struct wlr_compositor;
 struct wlr_drag_icon;
 struct wlr_ext_image_copy_capture_manager_v1;
+struct wlr_input_popup_surface_v2;
 struct wlr_linux_dmabuf_v1;
 struct wlr_output;
 struct wlr_renderer;
@@ -120,6 +122,7 @@ struct seaside_scene_size_limits {
 
 struct seaside_scene_window_metadata {
     const char *app_id, *title;
+    const char *icon_name, *icon_png_base64;
 };
 
 struct seaside_scene_snapshot {
@@ -167,6 +170,9 @@ void seaside_scene_destroy(struct seaside_scene_bridge *scene);
  * are rendered above windows and are excluded from pointer hit-testing. */
 void seaside_scene_set_drag_icon(struct seaside_scene_bridge *scene, struct wlr_drag_icon *icon);
 void seaside_scene_move_drag_icon(struct seaside_scene_bridge *scene, int x, int y);
+void seaside_scene_set_input_popup(struct seaside_scene_bridge *scene,
+                                   struct wlr_input_popup_surface_v2 *popup,
+                                   struct wlr_surface *focus, const struct wlr_box *cursor);
 /* Output mode, renderer initialization and cursor policy belong to the caller.
  * This owns only the scene viewport and its frame/destroy listeners. */
 bool seaside_scene_add_output(struct seaside_scene_bridge *scene, struct wlr_output *output);

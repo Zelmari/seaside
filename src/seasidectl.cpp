@@ -32,6 +32,7 @@ constexpr std::string_view usage =
     "       seasidectl window move|swap DIR\n"
     "       seasidectl window resize DIR [DELTA]\n"
     "       seasidectl window to-workspace ID\n"
+    "       seasidectl window icon ID\n"
     "       seasidectl night-light status|on|off|toggle\n"
     "       seasidectl settings [set SETTING VALUE]\n"
     "       seasidectl keybind set CHORD ACTION | unset CHORD | reset\n"
@@ -80,6 +81,9 @@ std::optional<Command> window_command(Args args) {
     }
     if (args.size() == 2 && operation == "to-workspace") {
         return Command{"action.window_to_workspace", IpcJson{{"workspace_id", integer(args[1])}}};
+    }
+    if (args.size() == 2 && operation == "icon") {
+        return Command{"query.window_icon", IpcJson{{"window_id", integer(args[1])}}};
     }
     return {};
 }

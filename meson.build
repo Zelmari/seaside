@@ -278,10 +278,10 @@ test('part7-selected-capture', capture_test, args: ['part7'], suite: ['integrati
   timeout: 25, env: {'SEASIDE_TEST_PART': '7', 'SEASIDE_REQUIREMENTS': '7.2,11,12.2b'},
 )
 
-tty_dependencies = [wlroots, wayland_server, pixman, libdrm, libinput, xkbcommon,
+tty_dependencies = [wlroots, wayland_server, pixman, libdrm, libinput, xkbcommon, glib,
                     meson.get_compiler('c').find_library('m')]
 tty_foundation = static_library(
-  'seaside-tty-foundation', ['src/tty_drm.c', 'src/tty_input.c', 'src/cursor_layout.c'],
+  'seaside-tty-foundation', ['src/tty_drm.c', 'src/tty_input.c', 'src/text_input.c', 'src/cursor_layout.c'],
   include_directories: include_directories('src'),
   dependencies: tty_dependencies, install: false,
 )
@@ -747,6 +747,31 @@ portal_stream = executable('seaside-portal-stream', 'tests/integration/portal_st
 part7_native_client = executable('seaside-part7-native-client',
   ['tests/integration/part7_native_client.c', xdg_shell_client_header, xdg_shell_private_code],
   dependencies: wayland_client, install: false,
+)
+wayland_input_protocols = [xdg_shell_client_header, xdg_shell_private_code]
+foreach protocol : [
+  'unstable/text-input/text-input-unstable-v3',
+  'staging/xdg-toplevel-icon/xdg-toplevel-icon-v1',
+  'tests/protocols/input-method-unstable-v2',
+  'tests/protocols/virtual-keyboard-unstable-v1',
+]
+  name = protocol.split('/')[-1]
+  xml = protocol.startswith('tests/') ? files(protocol + '.xml') : wayland_protocols.get_variable(pkgconfig: 'pkgdatadir') / (protocol + '.xml')
+  wayland_input_protocols += custom_target(
+    name + '-client-header', input: xml, output: name + '-client-protocol.h',
+    command: [wayland_scanner, 'client-header', '@INPUT@', '@OUTPUT@'],
+  )
+  wayland_input_protocols += custom_target(
+    name + '-private-code', input: xml, output: name + '-protocol.c',
+    command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'],
+  )
+endforeach
+wayland_input_client = executable('seaside-wayland-input-client',
+  ['tests/integration/wayland_input_client.c', wayland_input_protocols],
+  dependencies: [wayland_client], install: false,
+)
+test('native-wayland-input', part4_fixture, args: ['wayland-input', wayland_input_client],
+  suite: 'integration', timeout: 15,
 )
 test('part3-real-portals', python,
   args: [files('tests/integration/test_real_portals.py'), portal_smoke,

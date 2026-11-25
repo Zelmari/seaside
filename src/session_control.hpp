@@ -25,6 +25,7 @@ class SessionControl {
         : scene_(scene), desktop_(desktop), outputs_(output_config) {}
     IpcResult query(std::string_view method, const LiveConfig &config, Trace &trace,
                     std::string_view path, std::string_view phase, const IpcJson &last_error);
+    IpcResult window_icon(WindowId id) const;
     void publish(IpcServer &ipc);
     void set_renderer(const char *renderer) noexcept { renderer_ = renderer; }
 

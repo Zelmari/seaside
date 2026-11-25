@@ -599,6 +599,11 @@ class Session {
         static_cast<Session *>(data)->scene_.set_drag_icon(icon);
     }
 
+    static void input_popup(void *data, wlr_input_popup_surface_v2 *popup, wlr_surface *focus,
+                            const wlr_box *cursor) noexcept {
+        static_cast<Session *>(data)->scene_.set_input_popup(popup, focus, cursor);
+    }
+
     static void modifiers_changed(void *data, std::uint8_t modifiers) noexcept {
         auto &session = *static_cast<Session *>(data);
         session.desktop_.modifiers_changed(modifiers);
@@ -667,6 +672,9 @@ class Session {
 
     IpcResult request(std::string_view method, const IpcJson &params) {
         const bool ending = ipc_exiting_ || stopping_;
+        if (method == "query.window_icon") {
+            return control_.window_icon(params.at("window_id").get<seaside::WindowId>());
+        }
         if (method.starts_with("query.")) {
             auto last_error = last_error_;
             if (const auto &diagnostic = config_->transaction().diagnostic()) {
@@ -1398,6 +1406,7 @@ run_session(seaside::LoadedConfig config, seaside::Wallpaper wallpaper, seaside:
         .cursor_surface = Session::cursor_surface,
         .pointer_cancelled = Session::pointer_cancelled,
         .drag_icon = Session::drag_icon,
+        .input_popup = Session::input_popup,
         .activity = Session::input_activity,
     };
     std::unique_ptr<seaside_tty_input, decltype(&seaside_tty_input_destroy)> input(

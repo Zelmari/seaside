@@ -9,8 +9,10 @@
 #include <glib.h>
 #include <limits.h>
 #include <math.h>
+#include <png.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
 #include <wayland-server-core.h>
 #include <wlr/backend/drm.h>
@@ -21,12 +23,14 @@
 #include <wlr/render/pass.h>
 #include <wlr/render/swapchain.h>
 #include <wlr/types/wlr_compositor.h>
+#include <wlr/types/wlr_input_method_v2.h>
 #include <wlr/types/wlr_output.h>
 #include <wlr/types/wlr_scene.h>
 #include <wlr/types/wlr_tearing_control_v1.h>
 #include <wlr/types/wlr_xdg_activation_v1.h>
 #include <wlr/types/wlr_xdg_decoration_v1.h>
 #include <wlr/types/wlr_xdg_shell.h>
+#include <wlr/types/wlr_xdg_toplevel_icon_v1.h>
 #include <wlr/util/edges.h>
 #include <wlr/util/transform.h>
 #include <xf86drm.h>
@@ -35,10 +39,12 @@ struct seaside_scene_bridge {
     struct wl_display *display;
     struct wlr_scene *scene;
     struct wlr_scene_tree *backgrounds, *windows, *drag_icons, *decorations;
+    struct wlr_scene_tree *input_popups;
     struct wlr_buffer *wallpaper;
     struct wlr_xdg_shell *shell;
     struct wlr_xdg_activation_v1 *activation;
     struct wl_listener new_decoration;
+    struct wl_listener set_icon, icon_manager_destroy;
     struct wlr_tearing_control_manager_v1 *tearing;
     struct seaside_window_capture *capture;
     struct seaside_layer_scene *layers;
@@ -47,6 +53,7 @@ struct seaside_scene_bridge {
     struct wl_list views;
     GHashTable *views_by_id;
     struct wl_list popups;
+    struct wl_list input_popup_views;
     struct wl_list outputs;
     struct wl_listener new_toplevel;
     struct wl_listener new_popup;
@@ -84,6 +91,9 @@ struct window_projection {
 struct scene_view {
     struct seaside_scene_bridge *owner;
     struct wlr_xdg_toplevel *toplevel;
+    struct wlr_xdg_toplevel_icon_v1 *pending_icon;
+    char *icon_name, *icon_png_base64;
+    bool icon_dirty;
     struct wlr_xdg_toplevel_decoration_v1 *decoration;
     struct wl_listener request_decoration, decoration_destroy;
     struct seaside_window_source *capture;
@@ -151,6 +161,19 @@ struct scene_output {
     bool blur_active;
     enum { LUT_CLEAN, LUT_PENDING, LUT_RETRY } lut_request;
 };
+
+struct scene_input_popup {
+    struct seaside_scene_bridge *scene;
+    struct wlr_input_popup_surface_v2 *role;
+    struct wlr_surface *focus;
+    struct wlr_scene_tree *tree;
+    struct wl_list link;
+    struct wl_listener destroy, tree_destroy, commit, focus_destroy;
+    struct wlr_box cursor, last_relative;
+    bool has_cursor, sent_rectangle;
+};
+
+static void update_input_popups(struct seaside_scene_bridge *scene);
 
 struct scene_image {
     struct wlr_buffer base;
@@ -922,9 +945,130 @@ static void new_decoration(struct wl_listener *listener, void *data) {
     configure_decoration(view);
 }
 
+enum { window_icon_size = 64 };
+
+static bool copy_icon_pixels(struct wlr_buffer *buffer, int size, uint8_t *rgba) {
+    void *pixels;
+    uint32_t format;
+    size_t stride;
+    if (!wlr_buffer_begin_data_ptr_access(buffer, WLR_BUFFER_DATA_PTR_ACCESS_READ, &pixels, &format,
+                                          &stride)) {
+        return false;
+    }
+    const bool alpha = format == DRM_FORMAT_ARGB8888 || format == DRM_FORMAT_ABGR8888;
+    const bool swapped = format == DRM_FORMAT_ABGR8888 || format == DRM_FORMAT_XBGR8888;
+    const bool supported =
+        (alpha || format == DRM_FORMAT_XRGB8888 || format == DRM_FORMAT_XBGR8888) &&
+        stride / sizeof(uint32_t) >= (size_t)buffer->width;
+    if (supported) {
+        for (int y = 0; y < size; ++y) {
+            const size_t source_y = (size_t)y * (size_t)buffer->height / (size_t)size;
+            const uint8_t *row = (const uint8_t *)pixels + source_y * stride;
+            for (int x = 0; x < size; ++x) {
+                const size_t source_x = (size_t)x * (size_t)buffer->width / (size_t)size;
+                uint32_t pixel;
+                memcpy(&pixel, row + source_x * sizeof(pixel), sizeof(pixel));
+                const unsigned a = alpha ? pixel >> 24 : 255;
+                const unsigned channels[] = {
+                    (pixel >> (swapped ? 0 : 16)) & 255,
+                    (pixel >> 8) & 255,
+                    (pixel >> (swapped ? 16 : 0)) & 255,
+                };
+                for (size_t channel = 0; channel < 3; ++channel) {
+                    // Wayland SHM pixels use premultiplied alpha. PNG stores straight alpha.
+                    const unsigned value = a ? (channels[channel] * 255 + a / 2) / a : 0;
+                    *rgba++ = value < 255 ? value : 255;
+                }
+                *rgba++ = a;
+            }
+        }
+    }
+    wlr_buffer_end_data_ptr_access(buffer);
+    return supported;
+}
+
+static char *encode_icon(const struct wlr_xdg_toplevel_icon_v1 *icon) {
+    struct wlr_xdg_toplevel_icon_v1_buffer *entry;
+    uint8_t pixels[window_icon_size * window_icon_size * 4];
+    int size = 0;
+    wl_list_for_each(entry, &icon->buffers, link) {
+        const int width = entry->buffer->width;
+        const int candidate = width < window_icon_size ? width : window_icon_size;
+        if (candidate > size && copy_icon_pixels(entry->buffer, candidate, pixels)) {
+            size = candidate;
+        }
+    }
+    if (!size) {
+        return NULL;
+    }
+    png_image image = {
+        .version = PNG_IMAGE_VERSION,
+        .width = size,
+        .height = size,
+        .format = PNG_FORMAT_RGBA,
+    };
+    png_alloc_size_t length = 0;
+    char *encoded = NULL;
+    if (png_image_write_to_memory(&image, NULL, &length, 0, pixels, 0, NULL)) {
+        void *png = malloc(length);
+        if (png && png_image_write_to_memory(&image, png, &length, 0, pixels, 0, NULL)) {
+            encoded = g_base64_encode(png, length);
+        }
+        free(png);
+    }
+    png_image_free(&image);
+    return encoded;
+}
+
+static void apply_icon(struct scene_view *view) {
+    if (!view->icon_dirty) {
+        return;
+    }
+    view->icon_dirty = false;
+    g_clear_pointer(&view->icon_name, g_free);
+    g_clear_pointer(&view->icon_png_base64, g_free);
+    struct wlr_xdg_toplevel_icon_v1 *icon = view->pending_icon;
+    if (icon) {
+        if (icon->name && *icon->name && !strchr(icon->name, '/') && strcmp(icon->name, ".") != 0 &&
+            strcmp(icon->name, "..") != 0 && strlen(icon->name) <= 255) {
+            view->icon_name = g_strdup(icon->name);
+        }
+        view->icon_png_base64 = encode_icon(icon);
+        wlr_xdg_toplevel_icon_v1_unref(icon);
+        view->pending_icon = NULL;
+    }
+}
+
+static void set_icon(struct wl_listener *listener, void *data) {
+    struct seaside_scene_bridge *scene = wl_container_of(listener, scene, set_icon);
+    const struct wlr_xdg_toplevel_icon_manager_v1_set_icon_event *event = data;
+    struct scene_view *view = toplevel_view(scene, event->toplevel);
+    if (view) {
+        if (view->pending_icon) {
+            wlr_xdg_toplevel_icon_v1_unref(view->pending_icon);
+        }
+        view->pending_icon = event->icon ? wlr_xdg_toplevel_icon_v1_ref(event->icon) : NULL;
+        view->icon_dirty = true;
+    }
+}
+
+static void remove_icon_manager_watch(struct seaside_scene_bridge *scene) {
+    wl_list_remove(&scene->set_icon.link);
+    wl_list_init(&scene->set_icon.link);
+    wl_list_remove(&scene->icon_manager_destroy.link);
+    wl_list_init(&scene->icon_manager_destroy.link);
+}
+
+static void icon_manager_destroy(struct wl_listener *listener, void *data) {
+    (void)data;
+    struct seaside_scene_bridge *scene = wl_container_of(listener, scene, icon_manager_destroy);
+    remove_icon_manager_watch(scene);
+}
+
 static void view_commit(struct wl_listener *listener, void *data) {
     (void)data;
     struct scene_view *view = wl_container_of(listener, view, commit);
+    apply_icon(view);
     configure_decoration(view);
     if (view->toplevel->base->initial_commit) {
         uint32_t capabilities = view->id ? WLR_XDG_TOPLEVEL_WM_CAPABILITIES_MAXIMIZE |
@@ -1012,6 +1156,11 @@ static void view_set_parent(struct wl_listener *listener, void *data) {
 
 static void destroy_view(struct scene_view *view) {
     seaside_scene_blur_destroy(&view->blur);
+    if (view->pending_icon) {
+        wlr_xdg_toplevel_icon_v1_unref(view->pending_icon);
+    }
+    g_free(view->icon_name);
+    g_free(view->icon_png_base64);
     detach_decoration(view);
     seaside_window_capture_unmap(view->capture);
     if (view->owner->focused_view == view) {
@@ -1646,6 +1795,7 @@ static void output_frame(struct wl_listener *listener, void *data) {
     if (output->owner->before_frame) {
         output->owner->before_frame(output->owner->before_frame_data, output->viewport->output);
     }
+    update_input_popups(output->owner);
     if (!commit_frame(output)) {
         output->owner->snapshot.failed_frames++;
         return;
@@ -1688,6 +1838,7 @@ static void detach(struct seaside_scene_bridge *scene) {
     }
     end_focus(scene, false);
     remove_blur_watches(scene);
+    remove_icon_manager_watch(scene);
     scene->window = NULL;
     scene->window_data = NULL;
     scene->watched_pid = 0;
@@ -1763,6 +1914,7 @@ struct seaside_scene_bridge *seaside_scene_create(struct wl_display *display) {
     scene->temperature_kelvin = 4500;
     wl_list_init(&scene->views);
     wl_list_init(&scene->popups);
+    wl_list_init(&scene->input_popup_views);
     wl_list_init(&scene->outputs);
     wl_list_init(&scene->blur_surfaces);
     wl_list_init(&scene->blur_new_surface.link);
@@ -1775,8 +1927,10 @@ struct seaside_scene_bridge *seaside_scene_create(struct wl_display *display) {
     scene->backgrounds = wlr_scene_tree_create(&scene->scene->tree);
     scene->windows = wlr_scene_tree_create(&scene->scene->tree);
     scene->drag_icons = wlr_scene_tree_create(&scene->scene->tree);
+    scene->input_popups = wlr_scene_tree_create(&scene->scene->tree);
     scene->decorations = wlr_scene_tree_create(&scene->scene->tree);
-    if (!scene->backgrounds || !scene->windows || !scene->drag_icons || !scene->decorations) {
+    if (!scene->backgrounds || !scene->windows || !scene->drag_icons || !scene->input_popups ||
+        !scene->decorations) {
         wlr_scene_node_destroy(&scene->scene->tree.node);
         free(scene);
         return NULL;
@@ -1790,24 +1944,34 @@ struct seaside_scene_bridge *seaside_scene_create(struct wl_display *display) {
     scene->activation = wlr_xdg_activation_v1_create(display);
     struct wlr_xdg_decoration_manager_v1 *decoration_manager =
         wlr_xdg_decoration_manager_v1_create(display);
+    struct wlr_xdg_toplevel_icon_manager_v1 *icon_manager =
+        wlr_xdg_toplevel_icon_manager_v1_create(display, 1);
     scene->tearing = wlr_tearing_control_manager_v1_create(display, 1);
     scene->layers = seaside_layer_scene_create(display, scene->windows, scene->drag_icons);
-    if (!scene->activation || !decoration_manager || !scene->tearing || !scene->layers) {
+    if (!scene->activation || !decoration_manager || !icon_manager || !scene->tearing ||
+        !scene->layers) {
         seaside_layer_scene_destroy(scene->layers);
         wlr_scene_node_destroy(&scene->scene->tree.node);
         free(scene);
         return NULL;
     }
+    wlr_scene_node_place_below(&scene->input_popups->node, &scene->drag_icons->node);
     scene->views_by_id = g_hash_table_new(g_int64_hash, g_int64_equal);
     scene->new_toplevel.notify = new_toplevel;
     scene->new_popup.notify = new_popup;
     scene->new_decoration.notify = new_decoration;
+    scene->set_icon.notify = set_icon;
+    scene->icon_manager_destroy.notify = icon_manager_destroy;
     scene->shell_destroy.notify = shell_destroy;
     scene->activation_destroy.notify = activation_destroy;
     scene->request_activation.notify = request_activation;
     wl_signal_add(&scene->shell->events.new_toplevel, &scene->new_toplevel);
     wl_signal_add(&scene->shell->events.new_popup, &scene->new_popup);
     wl_signal_add(&decoration_manager->events.new_toplevel_decoration, &scene->new_decoration);
+    int icon_sizes[] = {32, window_icon_size};
+    wlr_xdg_toplevel_icon_manager_v1_set_sizes(icon_manager, icon_sizes, 2);
+    wl_signal_add(&icon_manager->events.set_icon, &scene->set_icon);
+    wl_signal_add(&icon_manager->events.destroy, &scene->icon_manager_destroy);
     wl_signal_add(&scene->shell->events.destroy, &scene->shell_destroy);
     wl_signal_add(&scene->activation->events.destroy, &scene->activation_destroy);
     wl_signal_add(&scene->activation->events.request_activate, &scene->request_activation);
@@ -2418,7 +2582,12 @@ seaside_scene_get_window_metadata(struct seaside_scene_bridge *scene, uint64_t i
     if (!view) {
         return (struct seaside_scene_window_metadata){0};
     }
-    return (struct seaside_scene_window_metadata){view->toplevel->app_id, view->toplevel->title};
+    return (struct seaside_scene_window_metadata){
+        .app_id = view->toplevel->app_id,
+        .title = view->toplevel->title,
+        .icon_name = view->icon_name,
+        .icon_png_base64 = view->icon_png_base64,
+    };
 }
 
 static struct scene_view *node_view(struct seaside_scene_bridge *scene,
@@ -2521,14 +2690,235 @@ static bool exact_surface_at(struct seaside_scene_bridge *scene, double x, doubl
     return search.found;
 }
 
+static bool regular_surface_at(struct seaside_scene_bridge *scene, double x, double y,
+                               struct seaside_scene_target *target) {
+    return seaside_layer_scene_position(scene->layers, x, y, target) ||
+           exact_surface_at(scene, x, y, target);
+}
+
+static struct scene_output *input_popup_output(const struct scene_input_popup *popup, double x,
+                                               double y) {
+    struct scene_output *output;
+    wl_list_for_each(output, &popup->scene->outputs, link) {
+        const double local_x = x - output->viewport->x, local_y = y - output->viewport->y;
+        if (local_x >= 0 && local_y >= 0 && local_x < output->width && local_y < output->height) {
+            return output;
+        }
+    }
+    return find_output(popup->scene, seaside_scene_visible_output(popup->scene, popup->focus));
+}
+
+static double clamp_popup_axis(double position, int origin, int extent, int size) {
+    return fmin(fmax(position, origin), (double)origin + fmax(0, extent - size));
+}
+
+static void update_input_popup(struct scene_input_popup *popup) {
+    struct seaside_scene_target origin = {.surface = popup->focus};
+    struct seaside_scene_target step = origin;
+    if (!popup->focus || !regular_surface_at(popup->scene, 0, 0, &origin) ||
+        !regular_surface_at(popup->scene, 1, 1, &step)) {
+        wlr_scene_node_set_enabled(&popup->tree->node, false);
+        return;
+    }
+    const double dx = step.sx - origin.sx, dy = step.sy - origin.sy;
+    if (!(dx > 0 && dy > 0)) {
+        wlr_scene_node_set_enabled(&popup->tree->node, false);
+        return;
+    }
+    const struct wlr_box cursor = popup->has_cursor
+                                      ? popup->cursor
+                                      : (struct wlr_box){.height = popup->focus->current.height};
+    const double left = (cursor.x - origin.sx) / dx;
+    const double top = (cursor.y - origin.sy) / dy;
+    const double right = left + fmax(0, cursor.width) / dx;
+    const double bottom = top + fmax(0, cursor.height) / dy;
+    struct scene_output *output = input_popup_output(popup, (left + right) / 2, (top + bottom) / 2);
+    if (!output) {
+        wlr_scene_node_set_enabled(&popup->tree->node, false);
+        return;
+    }
+    const int width = popup->role->surface->current.width;
+    const int height = popup->role->surface->current.height;
+    const int ox = output->viewport->x, oy = output->viewport->y;
+    const double y = bottom + height <= (double)oy + output->height ? bottom : top - height;
+    const int px = clamp_rounded_coordinate(clamp_popup_axis(left, ox, output->width, width));
+    const int py = clamp_rounded_coordinate(clamp_popup_axis(y, oy, output->height, height));
+    wlr_scene_node_set_position(&popup->tree->node, px, py);
+    wlr_scene_node_set_enabled(&popup->tree->node, popup->role->surface->mapped);
+    struct wlr_box relative = {
+        .x = clamp_rounded_coordinate(left - px),
+        .y = clamp_rounded_coordinate(top - py),
+        .width = clamp_rounded_coordinate(right - left),
+        .height = clamp_rounded_coordinate(bottom - top),
+    };
+    if (popup->has_cursor &&
+        (!popup->sent_rectangle || !wlr_box_equal(&popup->last_relative, &relative))) {
+        wlr_input_popup_surface_v2_send_text_input_rectangle(popup->role, &relative);
+        popup->sent_rectangle = true;
+        popup->last_relative = relative;
+    }
+}
+
+static void update_input_popups(struct seaside_scene_bridge *scene) {
+    struct scene_input_popup *popup;
+    wl_list_for_each(popup, &scene->input_popup_views, link) {
+        update_input_popup(popup);
+    }
+}
+
+static void input_popup_commit(struct wl_listener *listener, void *data) {
+    (void)data;
+    struct scene_input_popup *popup = wl_container_of(listener, popup, commit);
+    update_input_popup(popup);
+}
+
+static void input_popup_focus_destroy(struct wl_listener *listener, void *data) {
+    (void)data;
+    struct scene_input_popup *popup = wl_container_of(listener, popup, focus_destroy);
+    popup->focus = NULL;
+    wl_list_remove(&popup->focus_destroy.link);
+    wl_list_init(&popup->focus_destroy.link);
+    update_input_popup(popup);
+}
+
+static void input_popup_tree_destroy(struct wl_listener *listener, void *data) {
+    (void)data;
+    struct scene_input_popup *popup = wl_container_of(listener, popup, tree_destroy);
+    wl_list_remove(&popup->link);
+    wl_list_remove(&popup->destroy.link);
+    wl_list_remove(&popup->tree_destroy.link);
+    wl_list_remove(&popup->commit.link);
+    wl_list_remove(&popup->focus_destroy.link);
+    free(popup);
+}
+
+static void input_popup_destroy(struct wl_listener *listener, void *data) {
+    (void)data;
+    struct scene_input_popup *popup = wl_container_of(listener, popup, destroy);
+    wlr_scene_node_destroy(&popup->tree->node);
+}
+
+static struct scene_input_popup *find_input_popup(struct seaside_scene_bridge *scene,
+                                                  struct wlr_input_popup_surface_v2 *role) {
+    struct scene_input_popup *popup;
+    wl_list_for_each(popup, &scene->input_popup_views, link) {
+        if (popup->role == role) {
+            return popup;
+        }
+    }
+    return NULL;
+}
+
+static struct scene_input_popup *create_input_popup(struct seaside_scene_bridge *scene,
+                                                    struct wlr_input_popup_surface_v2 *role) {
+    struct scene_input_popup *popup = calloc(1, sizeof(*popup));
+    if (!popup) {
+        return NULL;
+    }
+    popup->scene = scene;
+    popup->role = role;
+    popup->tree = wlr_scene_tree_create(scene->input_popups);
+    if (!popup->tree || !wlr_scene_subsurface_tree_create(popup->tree, role->surface)) {
+        if (popup->tree) {
+            wlr_scene_node_destroy(&popup->tree->node);
+        }
+        free(popup);
+        return NULL;
+    }
+    popup->destroy.notify = input_popup_destroy;
+    popup->commit.notify = input_popup_commit;
+    popup->tree_destroy.notify = input_popup_tree_destroy;
+    popup->focus_destroy.notify = input_popup_focus_destroy;
+    wl_list_init(&popup->focus_destroy.link);
+    wl_list_insert(&scene->input_popup_views, &popup->link);
+    wl_signal_add(&role->events.destroy, &popup->destroy);
+    wl_signal_add(&role->surface->events.commit, &popup->commit);
+    wl_signal_add(&popup->tree->node.events.destroy, &popup->tree_destroy);
+    return popup;
+}
+
+void seaside_scene_set_input_popup(struct seaside_scene_bridge *scene,
+                                   struct wlr_input_popup_surface_v2 *role,
+                                   struct wlr_surface *focus, const struct wlr_box *cursor) {
+    if (!scene || !scene->attached) {
+        return;
+    }
+    struct scene_input_popup *popup = find_input_popup(scene, role);
+    if (!popup && focus) {
+        popup = create_input_popup(scene, role);
+        if (!popup) {
+            wl_client_post_no_memory(wl_resource_get_client(role->resource));
+            return;
+        }
+    }
+    if (!popup) {
+        return;
+    }
+    if (popup->focus != focus) {
+        wl_list_remove(&popup->focus_destroy.link);
+        wl_list_init(&popup->focus_destroy.link);
+        if (focus) {
+            wl_signal_add(&focus->events.destroy, &popup->focus_destroy);
+        }
+        popup->focus = focus;
+        popup->sent_rectangle = false;
+    }
+    if (!cursor) {
+        popup->sent_rectangle = false;
+    }
+    popup->has_cursor = cursor != NULL;
+    if (cursor) {
+        popup->cursor = *cursor;
+    }
+    update_input_popup(popup);
+}
+
+static bool input_popup_at(struct seaside_scene_bridge *scene, double x, double y,
+                           struct seaside_scene_target *target) {
+    if (target->surface) {
+        struct wlr_surface *root = wlr_surface_get_root_surface(target->surface);
+        struct wlr_input_popup_surface_v2 *role =
+            root ? wlr_input_popup_surface_v2_try_from_wlr_surface(root) : NULL;
+        const struct scene_input_popup *popup = role ? find_input_popup(scene, role) : NULL;
+        if (!popup || !popup->tree->node.enabled) {
+            return false;
+        }
+        struct exact_target search = {
+            .target = target,
+            .x = x - popup->tree->node.x,
+            .y = y - popup->tree->node.y,
+        };
+        wlr_surface_for_each_surface(root, match_target, &search);
+        if (search.found) {
+            target->id = 0;
+        }
+        return search.found;
+    }
+    struct wlr_scene_node *node =
+        wlr_scene_node_at(&scene->input_popups->node, x, y, &target->sx, &target->sy);
+    if (!node || node->type != WLR_SCENE_NODE_BUFFER) {
+        return false;
+    }
+    struct wlr_scene_surface *surface =
+        wlr_scene_surface_try_from_buffer(wlr_scene_buffer_from_node(node));
+    if (!surface) {
+        return false;
+    }
+    target->surface = surface->surface;
+    target->id = 0;
+    return true;
+}
+
 bool seaside_scene_window_at(struct seaside_scene_bridge *scene, double x, double y,
                              struct seaside_scene_target *target) {
     if (!scene || !scene->attached) {
         return false;
     }
+    if (input_popup_at(scene, x, y, target)) {
+        return true;
+    }
     if (target->surface) {
-        return seaside_layer_scene_position(scene->layers, x, y, target) ||
-               exact_surface_at(scene, x, y, target);
+        return regular_surface_at(scene, x, y, target);
     }
     if (seaside_layer_scene_at(scene->layers, true, x, y, target)) {
         return true;

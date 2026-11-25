@@ -244,6 +244,7 @@ prints a JSON response. An error response includes a code and message.
 | `seasidectl bindings` | List active shortcuts and actions from the current configuration |
 | `seasidectl outputs` | List displays, selectors, modes, power state, and capabilities |
 | `seasidectl workspaces` / `seasidectl windows` | Inspect workspace and window IDs and state |
+| `seasidectl window icon ID` | Read an app-supplied icon name or base64 PNG bitmap |
 | `seasidectl focus` | Inspect the focused output, workspace, and window |
 | `seasidectl workspace 2` | Show workspace 2 |
 | `seasidectl window to-workspace 2` | Move the focused window to workspace 2 and follow it |
@@ -264,6 +265,11 @@ and source revision. These commands also work outside a Seaside session.
 
 The protocol implementation lists the methods and parameters accepted on the
 local IPC socket. [JSONL protocol](../src/ipc_protocol.cpp)
+
+Each `query.windows` row includes the app-supplied `icon_name` and a
+`has_icon_bitmap` flag. Send `query.window_icon` with the `window_id` to get
+the window's icon name and `png_base64`. Use the named icon from your theme
+when available and the PNG as a fallback.
 
 Shells such as Quickshell and Conch can use `query.settings`,
 `action.settings_update`, and the `settings.changed` event over the same local
@@ -289,6 +295,9 @@ and `pinned`. Mapping, unmapping, and destruction have their own events.
   Seaside terminal. The first X11 client starts Seaside’s packaged copy of
   `xwayland-satellite` on demand.
   If that service exits, a subsequent X11 connection can start it again.
+- **Input methods.** Native Wayland apps can compose text through a Wayland
+  input method running in your session. Seaside accepts one input method per
+  seat and withholds surrounding text in password, PIN, and sensitive fields.
 - **Clipboard.** Local Wayland clients running as your user can read and replace
   clipboard and primary selections in the background. Use `wl-copy` and
   `wl-paste` for command-line transfers. For history, run an external manager

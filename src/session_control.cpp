@@ -221,6 +221,9 @@ IpcJson SessionControl::windows() const {
         row["id"] = id;
         row["app_id"] = bounded_utf8(metadata.app_id, 1024);
         row["title"] = bounded_utf8(metadata.title, 4096);
+        row["icon_name"] =
+            metadata.icon_name ? Json(bounded_utf8(metadata.icon_name, 255)) : Json(nullptr);
+        row["has_icon_bitmap"] = metadata.icon_png_base64 != nullptr;
     }
     return result;
 }
@@ -312,6 +315,18 @@ IpcJson SessionControl::diagnostics(Trace &trace) const {
         });
     }
     return {{"outputs", std::move(outputs)}, {"trace", trace.status()}};
+}
+
+IpcResult SessionControl::window_icon(WindowId id) const {
+    if (!desktop_.windows().state().windows().contains(id)) {
+        return std::unexpected(IpcError{"not_found", "The requested window is unavailable"});
+    }
+    const auto metadata = scene_.window_metadata(id);
+    return Json{
+        {"window_id", id},
+        {"icon_name",
+         metadata.icon_name ? Json(bounded_utf8(metadata.icon_name, 255)) : Json(nullptr)},
+        {"png_base64", metadata.icon_png_base64 ? Json(metadata.icon_png_base64) : Json(nullptr)}};
 }
 
 IpcResult SessionControl::query(std::string_view method, const LiveConfig &config, Trace &trace,

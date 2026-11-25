@@ -66,6 +66,7 @@ constexpr std::array methods{
     Method{"query.outputs"},
     Method{"query.workspaces"},
     Method{"query.windows"},
+    Method{"query.window_icon", window},
     Method{"query.focus"},
     Method{"query.config"},
     Method{"query.diagnostics"},

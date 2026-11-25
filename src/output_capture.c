@@ -518,7 +518,9 @@ static bool session_global_visible(const struct wl_client *client, const struct 
         strcmp(interface, "ext_foreign_toplevel_list_v1") != 0 &&
         strcmp(interface, "zwlr_screencopy_manager_v1") != 0 &&
         strcmp(interface, "ext_data_control_manager_v1") != 0 &&
-        strcmp(interface, "zwlr_data_control_manager_v1") != 0) {
+        strcmp(interface, "zwlr_data_control_manager_v1") != 0 &&
+        strcmp(interface, "zwp_input_method_manager_v2") != 0 &&
+        strcmp(interface, "zwp_virtual_keyboard_manager_v1") != 0) {
         return true;
     }
     uid_t uid;
@@ -535,7 +537,7 @@ struct seaside_output_capture *seaside_output_capture_create(struct wl_display *
         return NULL;
     }
     capture->display = display;
-    // Direct capture and background clipboard access share the local session's UID boundary.
+    // Privileged session protocols share the local session's UID boundary.
     wl_display_set_global_filter(display, session_global_visible, NULL);
     capture->display_destroy.notify = on_display_destroy;
     capture->new_session.notify = on_new_session;
