@@ -407,23 +407,29 @@ def run_live(repo, directory, result_dir, state):
             session.wait(session.windows, "the default Super+Return terminal")
             mapped = events.expect("window.mapped")
             first = mapped["data"]["window_id"]
-            require(session.ctl("window", "toggle-fullscreen")["result"]["changed"],
-                    "The default terminal could not enter fullscreen")
-            fullscreen = events.expect("window.changed", lambda data: data["window_id"] == first and
-                                       data["fullscreen"])["data"]
+            output = session.focused_output()
+            position = output["position"]
+            # Stay inside the top outer gap even after recovery changes the window geometry.
+            region = f'{position["x"] + output["mode"]["width"] - 132},{position["y"]} 128x8'
+            clean_windowed = session.strip(region)
+
+            def set_fullscreen(enabled):
+                require(session.ctl("window", "toggle-fullscreen")["result"]["changed"],
+                        f"The terminal could not set fullscreen to {enabled}")
+                return events.expect("window.changed", lambda data: data["window_id"] == first and
+                                     data["fullscreen"] == enabled)["data"]
+
+            fullscreen = set_fullscreen(True)
             window = next(window for window in session.windows() if window["id"] == first)
             require(all(fullscreen[field] == window[field] for field in
                         ("workspace_id", "mapped", "floating", "fullscreen", "maximized", "pinned")),
                     "Fullscreen event disagrees with the current window state")
-            output = session.focused_output()
             workspaces = session.ctl("workspaces")["result"]["workspaces"]
             require([workspace["id"] for workspace in workspaces] == list(range(1, 11)) and
                     all(workspace["output_id"] == output["id"] for workspace in workspaces),
                     "The single display did not own workspaces 1–10")
             state["workspace_count"] = len(workspaces)
-            position = output["position"]
-            region = f'{position["x"] + output["mode"]["width"] - 132},{position["y"]} 128x12'
-            clean = session.strip(region)
+            clean_fullscreen = session.strip(region)
             state["screen"] = session.screenshot(result_dir, "clean")
 
             session.ctl("night-light", "on")
@@ -440,8 +446,17 @@ def run_live(repo, directory, result_dir, state):
             require(rejected["error"]["field"] == "window.gaps_outer" and
                     rejected["error"]["line"] == 2 and snapshot.read_text() == night_light_saved,
                     "Invalid edit lost its diagnostic or replaced last-good TOML")
-            session.wait(lambda: session.strip(region) != clean, "visible fullscreen error banner")
+            session.wait(lambda: session.strip(region) == clean_fullscreen,
+                         "the unchanged fullscreen image after an invalid edit")
+            set_fullscreen(False)
+            session.wait(lambda: session.strip(region) != clean_windowed, "visible windowed error banner")
+            banner = session.strip(region)
             session.screenshot(result_dir, "error")
+            set_fullscreen(True)
+            session.wait(lambda: session.strip(region) == clean_fullscreen,
+                         "the rendered banner to hide in fullscreen")
+            set_fullscreen(False)
+            session.wait(lambda: session.strip(region) == banner, "the banner to reappear after fullscreen")
 
             config.unlink()
             missing = events.expect("config.error", lambda data: data["message"] ==
@@ -469,8 +484,11 @@ def run_live(repo, directory, result_dir, state):
                     "Valid edit lost live state or snapshot bytes")
             state["partial_recreation"] = "held-until-close"
             require(session.night_light_enabled(), "The repaired file did not retain night light")
-            session.wait(lambda: session.strip(region) == clean, "banner removal after repair")
+            session.wait(lambda: session.strip(region) == clean_windowed, "banner removal after repair")
             session.screenshot(result_dir, "recovered")
+            state["config_banner"] = {"fullscreen_suppressed": True, "visible_windowed": True,
+                                      "removed_after_repair": True}
+            set_fullscreen(True)
 
             replace(config, unsupported_config)
             mode_rejected = events.expect("config.error")
