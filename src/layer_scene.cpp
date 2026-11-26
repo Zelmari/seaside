@@ -1,14 +1,21 @@
-#include "layer_scene.h"
+#include "layer_scene.hpp"
 #include "popup_grab.hpp"
+#include "wlr_compat.hpp"
+#include "wlr_layer_shell_compat.hpp"
+#include "wlr_scene_compat.hpp"
 
 #include <limits.h>
 #include <stdlib.h>
+#include <type_traits>
 #include <wayland-server-core.h>
-#include <wlr/types/wlr_layer_shell_v1.h>
-#include <wlr/types/wlr_scene.h>
-#include <wlr/types/wlr_xdg_shell.h>
 
-enum { LAYER_COUNT = ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY + 1 };
+extern "C" {
+#include <wlr/types/wlr_xdg_shell.h>
+}
+
+static_assert(std::is_standard_layout_v<wlr_xdg_popup>);
+
+constexpr unsigned LAYER_COUNT = ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY + 1;
 
 struct seaside_layer_scene {
     struct wl_event_loop *loop;
@@ -22,6 +29,7 @@ struct seaside_layer_scene {
     void *data;
     struct layer_surface *selected;
 };
+static_assert(std::is_standard_layout_v<seaside_layer_scene>);
 
 struct layer_output {
     struct wlr_output *output;
@@ -30,6 +38,7 @@ struct layer_output {
     bool fullscreen;
     struct wl_list link;
 };
+static_assert(std::is_standard_layout_v<layer_output>);
 
 struct layer_surface {
     struct seaside_layer_scene *owner;
@@ -41,6 +50,7 @@ struct layer_surface {
     uint32_t width, height;
     bool configured, visible, mapped;
 };
+static_assert(std::is_standard_layout_v<layer_surface>);
 
 struct layer_popup {
     struct layer_surface *layer;
@@ -50,6 +60,7 @@ struct layer_popup {
     struct wl_listener commit, reposition, destroy, tree_destroy;
     struct wl_list link;
 };
+static_assert(std::is_standard_layout_v<layer_popup>);
 
 static int coordinate(int64_t value) {
     return value < INT_MIN ? INT_MIN : value > INT_MAX ? INT_MAX : (int)value;
@@ -63,7 +74,7 @@ static struct layer_output *find_output(struct seaside_layer_scene *layers,
             return record;
         }
     }
-    return NULL;
+    return nullptr;
 }
 
 static bool sibling_layer(const struct layer_surface *surface, unsigned level) {
@@ -115,7 +126,7 @@ static void set_visibility(struct layer_surface *surface) {
     if (surface->owner->selected == surface &&
         (!visible || surface->role->current.keyboard_interactive ==
                          ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_NONE)) {
-        surface->owner->selected = NULL;
+        surface->owner->selected = nullptr;
     }
 }
 
@@ -261,9 +272,9 @@ static void arrange_output(struct seaside_layer_scene *layers, struct layer_outp
     output->work = work;
 }
 
-static void update_layers(void *data) {
-    struct seaside_layer_scene *layers = data;
-    layers->update = NULL;
+static void update_layers(void *data) noexcept {
+    struct seaside_layer_scene *layers = static_cast<seaside_layer_scene *>(data);
+    layers->update = nullptr;
     struct layer_output *output;
     wl_list_for_each(output, &layers->outputs, link) {
         arrange_output(layers, output);
@@ -279,7 +290,7 @@ static void schedule_update(struct seaside_layer_scene *layers) {
     }
 }
 
-static void surface_commit(struct wl_listener *listener, void *data) {
+static void surface_commit(struct wl_listener *listener, void *data) noexcept {
     (void)data;
     struct layer_surface *surface = wl_container_of(listener, surface, commit);
     struct wlr_layer_surface_v1 *role = surface->role;
@@ -290,7 +301,7 @@ static void surface_commit(struct wl_listener *listener, void *data) {
     surface->mapped = mapped;
 }
 
-static void surface_unmap(struct wl_listener *listener, void *data) {
+static void surface_unmap(struct wl_listener *listener, void *data) noexcept {
     (void)data;
     struct layer_surface *surface = wl_container_of(listener, surface, unmap);
     surface->configured = false;
@@ -301,17 +312,17 @@ static void surface_unmap(struct wl_listener *listener, void *data) {
         hide_surface(surface);
     }
     if (surface->owner->selected == surface) {
-        surface->owner->selected = NULL;
+        surface->owner->selected = nullptr;
     }
     schedule_update(surface->owner);
 }
 
-static void surface_destroy(struct wl_listener *listener, void *data) {
+static void surface_destroy(struct wl_listener *listener, void *data) noexcept {
     (void)data;
     struct layer_surface *surface = wl_container_of(listener, surface, destroy);
     struct seaside_layer_scene *layers = surface->owner;
     if (layers->selected == surface) {
-        layers->selected = NULL;
+        layers->selected = nullptr;
     }
     wl_list_remove(&surface->commit.link);
     wl_list_remove(&surface->unmap.link);
@@ -323,14 +334,14 @@ static void surface_destroy(struct wl_listener *listener, void *data) {
     schedule_update(layers);
 }
 
-static void popup_created(struct wl_listener *listener, void *data) {
+static void popup_created(struct wl_listener *listener, void *data) noexcept {
     struct layer_surface *surface = wl_container_of(listener, surface, new_popup);
-    (void)seaside_layer_scene_add_popup(surface->owner, data);
+    (void)seaside_layer_scene_add_popup(surface->owner, static_cast<wlr_xdg_popup *>(data));
 }
 
-static void new_surface(struct wl_listener *listener, void *data) {
+static void new_surface(struct wl_listener *listener, void *data) noexcept {
     struct seaside_layer_scene *layers = wl_container_of(listener, layers, new_surface);
-    struct wlr_layer_surface_v1 *role = data;
+    struct wlr_layer_surface_v1 *role = static_cast<wlr_layer_surface_v1 *>(data);
     struct layer_output *output = find_output(layers, role->output);
     if (!role->output && !wl_list_empty(&layers->outputs)) {
         if (layers->focused_output) {
@@ -345,7 +356,7 @@ static void new_surface(struct wl_listener *listener, void *data) {
         return;
     }
 
-    struct layer_surface *surface = calloc(1, sizeof(*surface));
+    struct layer_surface *surface = static_cast<layer_surface *>(calloc(1, sizeof(*surface)));
     if (surface) {
         surface->tree = wlr_scene_tree_create(layers->trees[role->current.layer]);
         if (surface->tree) {
@@ -377,7 +388,7 @@ static void new_surface(struct wl_listener *listener, void *data) {
     wl_list_insert(layers->surfaces.prev, &surface->link);
 }
 
-static void shell_destroy(struct wl_listener *listener, void *data) {
+static void shell_destroy(struct wl_listener *listener, void *data) noexcept {
     (void)data;
     struct seaside_layer_scene *layers = wl_container_of(listener, layers, shell_destroy);
     wl_list_remove(&layers->new_surface.link);
@@ -389,9 +400,10 @@ static void shell_destroy(struct wl_listener *listener, void *data) {
 struct seaside_layer_scene *seaside_layer_scene_create(struct wl_display *display,
                                                        struct wlr_scene_tree *windows,
                                                        struct wlr_scene_tree *drag_icons) {
-    struct seaside_layer_scene *layers = calloc(1, sizeof(*layers));
+    struct seaside_layer_scene *layers =
+        static_cast<seaside_layer_scene *>(calloc(1, sizeof(*layers)));
     if (!layers) {
-        return NULL;
+        return nullptr;
     }
     layers->loop = wl_display_get_event_loop(display);
     wl_list_init(&layers->outputs);
@@ -403,7 +415,7 @@ struct seaside_layer_scene *seaside_layer_scene_create(struct wl_display *displa
         layers->trees[i] = wlr_scene_tree_create(windows->node.parent);
         if (!layers->trees[i]) {
             seaside_layer_scene_destroy(layers);
-            return NULL;
+            return nullptr;
         }
         struct wlr_scene_node *above =
             i < ZWLR_LAYER_SHELL_V1_LAYER_TOP ? &windows->node : &drag_icons->node;
@@ -412,7 +424,7 @@ struct seaside_layer_scene *seaside_layer_scene_create(struct wl_display *displa
     struct wlr_layer_shell_v1 *shell = wlr_layer_shell_v1_create(display, 5);
     if (!shell) {
         seaside_layer_scene_destroy(layers);
-        return NULL;
+        return nullptr;
     }
     layers->new_surface.notify = new_surface;
     layers->shell_destroy.notify = shell_destroy;
@@ -454,7 +466,7 @@ void seaside_layer_scene_set_handler(struct seaside_layer_scene *layers,
 
 bool seaside_layer_scene_add_output(struct seaside_layer_scene *layers, struct wlr_output *output,
                                     struct seaside_scene_rect bounds) {
-    struct layer_output *record = calloc(1, sizeof(*record));
+    struct layer_output *record = static_cast<layer_output *>(calloc(1, sizeof(*record)));
     if (!record) {
         return false;
     }
@@ -512,7 +524,7 @@ struct seaside_scene_rect seaside_layer_scene_work_area(struct seaside_layer_sce
                                                         bool fullscreen) {
     struct layer_output *record = find_output(layers, output);
     if (!record) {
-        return (struct seaside_scene_rect){0};
+        return seaside_scene_rect{};
     }
     if (record->fullscreen != fullscreen) {
         record->fullscreen = fullscreen;
@@ -529,7 +541,7 @@ static struct layer_popup *find_popup(struct seaside_layer_scene *layers,
             return popup;
         }
     }
-    return NULL;
+    return nullptr;
 }
 
 static struct layer_surface *find_surface(struct seaside_layer_scene *layers,
@@ -540,13 +552,13 @@ static struct layer_surface *find_surface(struct seaside_layer_scene *layers,
             return layer;
         }
     }
-    return NULL;
+    return nullptr;
 }
 
 static struct layer_surface *find_owner(struct seaside_layer_scene *layers,
                                         struct wlr_surface *surface) {
     if (!surface) {
-        return NULL;
+        return nullptr;
     }
     struct wlr_surface *root = wlr_surface_get_root_surface(surface);
     struct layer_popup *popup = find_popup(layers, root);
@@ -561,7 +573,7 @@ static void popup_unconstrain(struct layer_popup *popup) {
     wlr_xdg_popup_unconstrain_from_box(popup->role, &bounds);
 }
 
-static void popup_commit(struct wl_listener *listener, void *data) {
+static void popup_commit(struct wl_listener *listener, void *data) noexcept {
     (void)data;
     struct layer_popup *popup = wl_container_of(listener, popup, commit);
     if (popup->role->seat && popup->layer->role->current.keyboard_interactive ==
@@ -586,13 +598,13 @@ static void popup_commit(struct wl_listener *listener, void *data) {
     }
 }
 
-static void popup_reposition(struct wl_listener *listener, void *data) {
+static void popup_reposition(struct wl_listener *listener, void *data) noexcept {
     (void)data;
     struct layer_popup *popup = wl_container_of(listener, popup, reposition);
     popup_unconstrain(popup);
 }
 
-static void popup_tree_destroy(struct wl_listener *listener, void *data) {
+static void popup_tree_destroy(struct wl_listener *listener, void *data) noexcept {
     (void)data;
     struct layer_popup *popup = wl_container_of(listener, popup, tree_destroy);
     seaside_popup_focus_finish(&popup->focus);
@@ -604,7 +616,7 @@ static void popup_tree_destroy(struct wl_listener *listener, void *data) {
     free(popup);
 }
 
-static void popup_destroy(struct wl_listener *listener, void *data) {
+static void popup_destroy(struct wl_listener *listener, void *data) noexcept {
     (void)data;
     struct layer_popup *popup = wl_container_of(listener, popup, destroy);
     wlr_scene_node_destroy(&popup->tree->node);
@@ -621,7 +633,7 @@ bool seaside_layer_scene_add_popup(struct seaside_layer_scene *layers, struct wl
         wlr_xdg_popup_destroy(role);
         return true;
     }
-    struct layer_popup *popup = calloc(1, sizeof(*popup));
+    struct layer_popup *popup = static_cast<layer_popup *>(calloc(1, sizeof(*popup)));
     if (popup) {
         popup->tree = wlr_scene_tree_create(parent ? parent->tree : layer->tree);
         if (popup->tree) {
@@ -656,7 +668,8 @@ bool seaside_layer_scene_add_popup(struct seaside_layer_scene *layers, struct wl
 bool seaside_layer_scene_at(struct seaside_layer_scene *layers, bool above_windows, double x,
                             double y, struct seaside_scene_target *target) {
     const unsigned first = above_windows ? ZWLR_LAYER_SHELL_V1_LAYER_TOP : 0;
-    const unsigned end = above_windows ? LAYER_COUNT : ZWLR_LAYER_SHELL_V1_LAYER_TOP;
+    const unsigned end =
+        above_windows ? LAYER_COUNT : static_cast<unsigned>(ZWLR_LAYER_SHELL_V1_LAYER_TOP);
     for (unsigned i = end; i > first; --i) {
         struct wlr_scene_node *node =
             wlr_scene_node_at(&layers->trees[i - 1]->node, x, y, &target->sx, &target->sy);
@@ -679,8 +692,8 @@ struct pointer_position {
     bool found;
 };
 
-static void exact_position(struct wlr_surface *surface, int x, int y, void *data) {
-    struct pointer_position *position = data;
+static void exact_position(struct wlr_surface *surface, int x, int y, void *data) noexcept {
+    struct pointer_position *position = static_cast<pointer_position *>(data);
     if (surface == position->target->surface) {
         position->target->id = 0;
         position->target->sx = position->x - x;
@@ -695,8 +708,10 @@ bool seaside_layer_scene_position(struct seaside_layer_scene *layers, double x, 
     if (!layer || !layer->visible) {
         return false;
     }
-    struct pointer_position position = {
-        .target = target, .x = x - layer->tree->node.x, .y = y - layer->tree->node.y};
+    struct pointer_position position = {.target = target,
+                                        .x = x - layer->tree->node.x,
+                                        .y = y - layer->tree->node.y,
+                                        .found = false};
     wlr_layer_surface_v1_for_each_surface(layer->role, exact_position, &position);
     return position.found;
 }
@@ -707,13 +722,13 @@ void seaside_layer_scene_select(struct seaside_layer_scene *layers, struct wlr_s
                                layer->role->current.keyboard_interactive !=
                                    ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_NONE
                            ? layer
-                           : NULL;
+                           : nullptr;
 }
 
 struct wlr_surface *seaside_layer_scene_keyboard_focus(struct seaside_layer_scene *layers,
                                                        struct wlr_output *focused_output) {
     for (unsigned i = LAYER_COUNT; i > ZWLR_LAYER_SHELL_V1_LAYER_TOP; --i) {
-        struct layer_surface *layer, *candidate = NULL;
+        struct layer_surface *layer, *candidate = nullptr;
         wl_list_for_each_reverse(layer, &layers->surfaces, link) {
             if (!sibling_layer(layer, i - 1) || !layer->visible || !exclusive_keyboard(layer)) {
                 continue;
@@ -730,9 +745,9 @@ struct wlr_surface *seaside_layer_scene_keyboard_focus(struct seaside_layer_scen
         }
     }
     if (layers->selected && layers->selected->output->output != focused_output) {
-        layers->selected = NULL;
+        layers->selected = nullptr;
     }
-    return layers->selected ? layers->selected->role->surface : NULL;
+    return layers->selected ? layers->selected->role->surface : nullptr;
 }
 
 struct intersection_search {
@@ -741,8 +756,9 @@ struct intersection_search {
     bool intersects;
 };
 
-static void test_buffer_intersection(struct wlr_scene_buffer *buffer, int x, int y, void *data) {
-    struct intersection_search *search = data;
+static void test_buffer_intersection(struct wlr_scene_buffer *buffer, int x, int y,
+                                     void *data) noexcept {
+    struct intersection_search *search = static_cast<intersection_search *>(data);
     struct wlr_scene_surface *surface = wlr_scene_surface_try_from_buffer(buffer);
     if (surface && surface->surface == search->surface && buffer->buffer &&
         buffer->primary_output && wlr_scene_node_coords(&buffer->node, &x, &y)) {
@@ -758,7 +774,8 @@ static void test_buffer_intersection(struct wlr_scene_buffer *buffer, int x, int
 
 bool seaside_scene_surface_intersects(struct wlr_scene_tree *tree, struct wlr_surface *surface,
                                       struct seaside_scene_rect viewport) {
-    struct intersection_search search = {.surface = surface, .viewport = viewport};
+    struct intersection_search search = {
+        .surface = surface, .viewport = viewport, .intersects = false};
     wlr_scene_node_for_each_buffer(&tree->node, test_buffer_intersection, &search);
     return search.intersects;
 }
@@ -769,7 +786,7 @@ struct wlr_output *seaside_layer_scene_visible_output(struct seaside_layer_scene
     return layer && layer->visible &&
                    seaside_scene_surface_intersects(layer->tree, surface, layer->output->bounds)
                ? layer->output->output
-               : NULL;
+               : nullptr;
 }
 
 bool seaside_layer_scene_has_overlay(const struct seaside_layer_scene *layers,

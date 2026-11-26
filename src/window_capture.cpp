@@ -1,5 +1,5 @@
-#define _POSIX_C_SOURCE 200809L
-#include "window_capture.h"
+#include "window_capture.hpp"
+#include "wlr_compat.hpp"
 #include "wlroots_bridge.hpp"
 
 #include <drm.h>
@@ -9,8 +9,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <type_traits>
 #include <unistd.h>
 #include <wayland-server-core.h>
+
+extern "C" {
 #include <wlr/interfaces/wlr_ext_image_capture_source_v1.h>
 #include <wlr/render/allocator.h>
 #include <wlr/render/drm_syncobj.h>
@@ -25,6 +28,10 @@
 #include <wlr/types/wlr_subcompositor.h>
 #include <wlr/types/wlr_xdg_shell.h>
 #include <wlr/util/transform.h>
+}
+
+static_assert(std::is_standard_layout_v<wlr_subsurface>);
+static_assert(std::is_standard_layout_v<wlr_xdg_popup>);
 
 struct seaside_window_capture {
     struct wl_display *display;
@@ -36,6 +43,7 @@ struct seaside_window_capture {
     struct wl_list painting;
     struct wl_listener request, new_session;
 };
+static_assert(std::is_standard_layout_v<seaside_window_capture>);
 
 struct seaside_window_source {
     struct seaside_window_capture *owner;
@@ -58,6 +66,7 @@ struct seaside_window_source {
     size_t active;
     bool scheduled, pending, damaged, refresh, presented, painting_cursor, cursor_painted;
 };
+static_assert(std::is_standard_layout_v<seaside_window_source>);
 
 struct painted_session {
     struct seaside_window_source *target;
@@ -65,6 +74,7 @@ struct painted_session {
     struct wl_listener destroy;
     struct wl_list link;
 };
+static_assert(std::is_standard_layout_v<painted_session>);
 
 struct observed_surface {
     struct seaside_window_source *target;
@@ -74,6 +84,7 @@ struct observed_surface {
     struct wl_listener new_popup, xdg_destroy;
     bool visited;
 };
+static_assert(std::is_standard_layout_v<observed_surface>);
 
 struct window_frame {
     struct wlr_ext_image_capture_source_v1_frame_event base;
@@ -81,6 +92,7 @@ struct window_frame {
     struct wlr_buffer *with_cursor;
     struct timespec when;
 };
+static_assert(std::is_standard_layout_v<window_frame>);
 
 /* Coalesce independent subsurface commits and pace hidden clients at most
  * once per ordinary refresh interval. The one-shot exists only during use. */
@@ -90,7 +102,7 @@ static void schedule(struct seaside_window_source *target) {
     }
 }
 
-static void surface_commit(struct wl_listener *listener, void *data) {
+static void surface_commit(struct wl_listener *listener, void *data) noexcept {
     (void)data;
     struct observed_surface *observer = wl_container_of(listener, observer, commit);
     // A callback-only commit can still need a wakeup without a new image.
@@ -106,19 +118,19 @@ static void surface_tree_changed(struct seaside_window_source *target) {
     schedule(target);
 }
 
-static void surface_new_subsurface(struct wl_listener *listener, void *data) {
+static void surface_new_subsurface(struct wl_listener *listener, void *data) noexcept {
     (void)data;
     struct observed_surface *observer = wl_container_of(listener, observer, new_subsurface);
     surface_tree_changed(observer->target);
 }
 
-static void surface_new_popup(struct wl_listener *listener, void *data) {
+static void surface_new_popup(struct wl_listener *listener, void *data) noexcept {
     (void)data;
     struct observed_surface *observer = wl_container_of(listener, observer, new_popup);
     surface_tree_changed(observer->target);
 }
 
-static void surface_unmap(struct wl_listener *listener, void *data) {
+static void surface_unmap(struct wl_listener *listener, void *data) noexcept {
     (void)data;
     struct observed_surface *observer = wl_container_of(listener, observer, unmap);
     surface_tree_changed(observer->target);
@@ -135,14 +147,14 @@ static void remove_observer(struct observed_surface *observer) {
     free(observer);
 }
 
-static void surface_destroy(struct wl_listener *listener, void *data) {
+static void surface_destroy(struct wl_listener *listener, void *data) noexcept {
     (void)data;
     struct observed_surface *observer = wl_container_of(listener, observer, destroy);
     surface_tree_changed(observer->target);
     remove_observer(observer);
 }
 
-static void xdg_surface_destroy(struct wl_listener *listener, void *data) {
+static void xdg_surface_destroy(struct wl_listener *listener, void *data) noexcept {
     (void)data;
     struct observed_surface *observer = wl_container_of(listener, observer, xdg_destroy);
     surface_tree_changed(observer->target);
@@ -158,7 +170,7 @@ static bool observe_surface(struct seaside_window_source *target, struct wlr_sur
             return true;
         }
     }
-    observer = calloc(1, sizeof(*observer));
+    observer = static_cast<observed_surface *>(calloc(1, sizeof(*observer)));
     if (!observer) {
         return false;
     }
@@ -193,12 +205,12 @@ static bool observe_tree(struct seaside_window_source *target, struct wlr_surfac
     }
     struct wlr_subsurface *child;
     wl_list_for_each(child, &surface->current.subsurfaces_below, current.link) {
-        if (!observe_tree(target, child->surface, NULL)) {
+        if (!observe_tree(target, child->surface, nullptr)) {
             return false;
         }
     }
     wl_list_for_each(child, &surface->current.subsurfaces_above, current.link) {
-        if (!observe_tree(target, child->surface, NULL)) {
+        if (!observe_tree(target, child->surface, nullptr)) {
             return false;
         }
     }
@@ -283,8 +295,8 @@ struct render_window {
     bool failed;
 };
 
-static void draw_surface(struct wlr_surface *surface, int x, int y, void *data) {
-    struct render_window *render = data;
+static void draw_surface(struct wlr_surface *surface, int x, int y, void *data) noexcept {
+    struct render_window *render = static_cast<render_window *>(data);
     struct wlr_texture *texture = wlr_surface_get_texture(surface);
     const int width = surface->current.width;
     const int height = surface->current.height;
@@ -333,31 +345,30 @@ static void draw_surface(struct wlr_surface *surface, int x, int y, void *data) 
         render->failed = true;
         return;
     }
-    wlr_render_pass_add_texture(render->pass,
-                                &(struct wlr_render_texture_options){
-                                    .texture = texture,
-                                    .src_box = source,
-                                    .dst_box = destination,
-                                    .transform = wlr_output_transform_invert(transform),
-                                    .wait_timeline = sync ? sync->acquire_timeline : NULL,
-                                    .wait_point = sync ? sync->acquire_point : 0,
-                                });
+    wlr_render_texture_options options{};
+    options.texture = texture;
+    options.src_box = source;
+    options.dst_box = destination;
+    options.transform = wlr_output_transform_invert(transform);
+    options.wait_timeline = sync ? sync->acquire_timeline : nullptr;
+    options.wait_point = sync ? sync->acquire_point : 0;
+    wlr_render_pass_add_texture(render->pass, &options);
 }
 
-static void callback_surface(struct wlr_surface *surface, int x, int y, void *data) {
+static void callback_surface(struct wlr_surface *surface, int x, int y, void *data) noexcept {
     (void)x;
     (void)y;
-    wlr_surface_send_frame_done(surface, data);
+    wlr_surface_send_frame_done(surface, static_cast<const timespec *>(data));
 }
 
 struct capture_sync {
     bool explicit_sync, wants_replacement;
 };
 
-static void check_sync_surface(struct wlr_surface *surface, int x, int y, void *data) {
+static void check_sync_surface(struct wlr_surface *surface, int x, int y, void *data) noexcept {
     (void)x;
     (void)y;
-    struct capture_sync *tracking = data;
+    struct capture_sync *tracking = static_cast<capture_sync *>(data);
     const struct wlr_linux_drm_syncobj_surface_v1_state *sync =
         wlr_linux_drm_syncobj_v1_get_surface_state(surface);
     tracking->explicit_sync |= sync && sync->acquire_timeline;
@@ -368,7 +379,8 @@ static void publish_frame(struct seaside_window_source *target, struct wlr_buffe
                           struct timespec when) {
     pixman_region32_t damage;
     pixman_region32_init_rect(&damage, 0, 0, buffer->width, buffer->height);
-    struct window_frame frame = {.base = {.damage = &damage}, .buffer = buffer, .when = when};
+    struct window_frame frame = {
+        .base = {.damage = &damage}, .buffer = buffer, .with_cursor = nullptr, .when = when};
     wl_signal_emit_mutable(&target->source.events.frame, &frame.base);
     wlr_buffer_unlock(frame.with_cursor);
     pixman_region32_fini(&damage);
@@ -389,13 +401,13 @@ static bool deliver_rendered_buffer(struct seaside_window_source *target) {
         return false;
     }
     struct wlr_buffer *buffer = target->rendered_buffer;
-    target->rendered_buffer = NULL;
+    target->rendered_buffer = nullptr;
     publish_frame(target, buffer, target->rendered_at);
     wlr_buffer_unlock(buffer);
     return true;
 }
 
-static void capture_render_ready(struct wlr_drm_syncobj_timeline_waiter *waiter) {
+static void capture_render_ready(struct wlr_drm_syncobj_timeline_waiter *waiter) noexcept {
     struct seaside_window_source *target = wl_container_of(waiter, target, waiter);
     wlr_drm_syncobj_timeline_waiter_finish(waiter);
     target->waiting_for_render = false;
@@ -417,25 +429,27 @@ static bool emit_frame(struct seaside_window_source *target, struct timespec whe
     if (!buffer) {
         return false;
     }
-    const struct wlr_buffer_pass_options options = {
-        .signal_timeline = explicit_sync ? target->timeline : NULL,
-        .signal_point = explicit_sync ? ++target->render_point : 0,
-    };
+    wlr_buffer_pass_options options{};
+    options.signal_timeline = explicit_sync ? target->timeline : nullptr;
+    options.signal_point = explicit_sync ? ++target->render_point : 0;
     struct wlr_render_pass *pass = wlr_renderer_begin_buffer_pass(renderer, buffer, &options);
     bool rendered = false;
     if (pass) {
         const struct wlr_box geometry = target->toplevel->base->geometry;
-        wlr_render_pass_add_rect(pass, &(struct wlr_render_rect_options){
-                                           .box = {0, 0, buffer->width, buffer->height},
-                                           .color = {0, 0, 0, 1},
-                                           .blend_mode = WLR_RENDER_BLEND_MODE_NONE,
-                                       });
+        const wlr_render_rect_options clear{
+            .box = {0, 0, buffer->width, buffer->height},
+            .color = {0, 0, 0, 1},
+            .clip = nullptr,
+            .blend_mode = WLR_RENDER_BLEND_MODE_NONE,
+        };
+        wlr_render_pass_add_rect(pass, &clear);
         struct render_window render = {
             .pass = pass,
             .geometry = geometry,
             .target = target,
             .scale_x = (double)buffer->width / geometry.width,
             .scale_y = (double)buffer->height / geometry.height,
+            .failed = false,
         };
         wlr_xdg_surface_for_each_surface(target->toplevel->base, draw_surface, &render);
         rendered = wlr_render_pass_submit(pass) && !render.failed;
@@ -458,15 +472,29 @@ static bool emit_frame(struct seaside_window_source *target, struct timespec whe
     return rendered;
 }
 
-static const struct wlr_ext_image_capture_source_v1_interface window_source_impl;
+static void start(struct wlr_ext_image_capture_source_v1 *source, bool with_cursors) noexcept;
+static void stop(struct wlr_ext_image_capture_source_v1 *source) noexcept;
+static void request_frame(struct wlr_ext_image_capture_source_v1 *source,
+                          bool needs_frame) noexcept;
+static void copy_frame(struct wlr_ext_image_capture_source_v1 *source,
+                       struct wlr_ext_image_copy_capture_frame_v1 *frame,
+                       struct wlr_ext_image_capture_source_v1_frame_event *data) noexcept;
+
+static const struct wlr_ext_image_capture_source_v1_interface window_source_impl = {
+    .start = start,
+    .stop = stop,
+    .request_frame = request_frame,
+    .copy_frame = copy_frame,
+    .get_pointer_cursor = nullptr,
+};
 
 static void invalidate_source(struct seaside_window_source *target) {
     wlr_ext_image_capture_source_v1_finish(&target->source);
     wlr_ext_image_capture_source_v1_init(&target->source, &window_source_impl);
 }
 
-static int capture_tick(void *data) {
-    struct seaside_window_source *target = data;
+static int capture_tick(void *data) noexcept {
+    struct seaside_window_source *target = static_cast<seaside_window_source *>(data);
     target->scheduled = false;
     if (target->rendered_buffer &&
         (target->waiting_for_render || !deliver_rendered_buffer(target))) {
@@ -482,7 +510,7 @@ static int capture_tick(void *data) {
         return 0;
     }
     if (target->pending && target->damaged) {
-        struct capture_sync sync = {0};
+        struct capture_sync sync = {};
         if (target->owner->renderer->features.timeline) {
             wlr_xdg_surface_for_each_surface(target->toplevel->base, check_sync_surface, &sync);
         }
@@ -505,7 +533,7 @@ static int capture_tick(void *data) {
     return 0;
 }
 
-static void start(struct wlr_ext_image_capture_source_v1 *source, bool with_cursors) {
+static void start(struct wlr_ext_image_capture_source_v1 *source, bool with_cursors) noexcept {
     struct seaside_window_source *target = wl_container_of(source, target, source);
     target->painting_cursor = with_cursors;
     if (target->active++ == 0) {
@@ -518,7 +546,7 @@ static void start(struct wlr_ext_image_capture_source_v1 *source, bool with_curs
     }
 }
 
-static void stop(struct wlr_ext_image_capture_source_v1 *source) {
+static void stop(struct wlr_ext_image_capture_source_v1 *source) noexcept {
     struct seaside_window_source *target = wl_container_of(source, target, source);
     if (--target->active == 0) {
         wl_event_source_timer_update(target->timer, 0);
@@ -529,20 +557,21 @@ static void stop(struct wlr_ext_image_capture_source_v1 *source) {
             target->waiting_for_render = false;
         }
         wlr_buffer_unlock(target->rendered_buffer);
-        target->rendered_buffer = NULL;
+        target->rendered_buffer = nullptr;
         wlr_drm_syncobj_timeline_unref(target->timeline);
-        target->timeline = NULL;
+        target->timeline = nullptr;
         target->render_point = 0;
         struct observed_surface *observer, *next;
         wl_list_for_each_safe(observer, next, &target->observers, link) {
             remove_observer(observer);
         }
         wlr_swapchain_destroy(target->swapchain);
-        target->swapchain = NULL;
+        target->swapchain = nullptr;
     }
 }
 
-static void request_frame(struct wlr_ext_image_capture_source_v1 *source, bool needs_frame) {
+static void request_frame(struct wlr_ext_image_capture_source_v1 *source,
+                          bool needs_frame) noexcept {
     struct seaside_window_source *target = wl_container_of(source, target, source);
     target->pending = true;
     target->damaged |= needs_frame;
@@ -572,12 +601,12 @@ static bool paint_cursor(struct seaside_window_source *target, struct window_fra
     struct wlr_renderer *renderer = target->owner->renderer;
     struct wlr_texture *content = wlr_texture_from_buffer(renderer, frame->buffer);
     struct wlr_render_pass *pass =
-        content ? wlr_renderer_begin_buffer_pass(renderer, buffer, NULL) : NULL;
+        content ? wlr_renderer_begin_buffer_pass(renderer, buffer, nullptr) : nullptr;
     if (pass) {
-        wlr_render_pass_add_texture(pass, &(struct wlr_render_texture_options){
-                                              .texture = content,
-                                              .blend_mode = WLR_RENDER_BLEND_MODE_NONE,
-                                          });
+        wlr_render_texture_options options{};
+        options.texture = content;
+        options.blend_mode = WLR_RENDER_BLEND_MODE_NONE;
+        wlr_render_pass_add_texture(pass, &options);
         wlr_render_pass_add_texture(pass, &cursor);
         if (wlr_render_pass_submit(pass)) {
             frame->with_cursor = buffer;
@@ -593,7 +622,7 @@ static bool paint_cursor(struct seaside_window_source *target, struct window_fra
 
 static void copy_frame(struct wlr_ext_image_capture_source_v1 *source,
                        struct wlr_ext_image_copy_capture_frame_v1 *frame,
-                       struct wlr_ext_image_capture_source_v1_frame_event *data) {
+                       struct wlr_ext_image_capture_source_v1_frame_event *data) noexcept {
     struct seaside_window_source *target = wl_container_of(source, target, source);
     struct window_frame *event = wl_container_of(data, event, base);
     struct wlr_buffer *buffer = event->buffer;
@@ -616,14 +645,7 @@ static void copy_frame(struct wlr_ext_image_capture_source_v1 *source,
     }
 }
 
-static const struct wlr_ext_image_capture_source_v1_interface window_source_impl = {
-    .start = start,
-    .stop = stop,
-    .request_frame = request_frame,
-    .copy_frame = copy_frame,
-};
-
-static void painted_session_destroy(struct wl_listener *listener, void *data) {
+static void painted_session_destroy(struct wl_listener *listener, void *data) noexcept {
     (void)data;
     struct painted_session *painting = wl_container_of(listener, painting, destroy);
     struct seaside_window_source *target = painting->target;
@@ -636,9 +658,10 @@ static void painted_session_destroy(struct wl_listener *listener, void *data) {
     free(painting);
 }
 
-static void new_session(struct wl_listener *listener, void *data) {
+static void new_session(struct wl_listener *listener, void *data) noexcept {
     struct seaside_window_capture *capture = wl_container_of(listener, capture, new_session);
-    struct wlr_ext_image_copy_capture_session_v1 *session = data;
+    struct wlr_ext_image_copy_capture_session_v1 *session =
+        static_cast<wlr_ext_image_copy_capture_session_v1 *>(data);
     if (session->source->impl != &window_source_impl) {
         return;
     }
@@ -646,7 +669,7 @@ static void new_session(struct wl_listener *listener, void *data) {
     if (!target->painting_cursor) {
         return;
     }
-    struct painted_session *painting = calloc(1, sizeof(*painting));
+    struct painted_session *painting = static_cast<painted_session *>(calloc(1, sizeof(*painting)));
     if (!painting) {
         wl_client_post_no_memory(wl_resource_get_client(session->resource));
         return;
@@ -661,13 +684,15 @@ static void new_session(struct wl_listener *listener, void *data) {
     wl_list_insert(&target->painted_sessions, &painting->link);
 }
 
-static void source_request(struct wl_listener *listener, void *data) {
+static void source_request(struct wl_listener *listener, void *data) noexcept {
     struct seaside_window_capture *capture = wl_container_of(listener, capture, request);
-    struct wlr_ext_foreign_toplevel_image_capture_source_manager_v1_request *request = data;
-    struct seaside_window_source *target = request->toplevel_handle->data;
-    struct wlr_ext_image_capture_source_v1 *source = NULL;
+    struct wlr_ext_foreign_toplevel_image_capture_source_manager_v1_request *request =
+        static_cast<wlr_ext_foreign_toplevel_image_capture_source_manager_v1_request *>(data);
+    struct seaside_window_source *target =
+        static_cast<seaside_window_source *>(request->toplevel_handle->data);
+    struct wlr_ext_image_capture_source_v1 *source = nullptr;
     uid_t uid;
-    wl_client_get_credentials(request->client, NULL, &uid, NULL);
+    wl_client_get_credentials(request->client, nullptr, &uid, nullptr);
     if (uid == geteuid() && request->toplevel_handle->list == capture->list && target &&
         valid_geometry(&target->toplevel->base->geometry)) {
         source = &target->source;
@@ -680,18 +705,19 @@ seaside_window_capture_create(struct wl_display *display, struct wlr_allocator *
                               struct wlr_renderer *renderer,
                               struct wlr_ext_image_copy_capture_manager_v1 *copy) {
     if (!display || !allocator || !renderer || !copy) {
-        return NULL;
+        return nullptr;
     }
     const struct wlr_drm_format_set *formats =
         wlr_renderer_get_texture_formats(renderer, allocator->buffer_caps);
     const struct wlr_drm_format *format =
-        formats ? wlr_drm_format_set_get(formats, DRM_FORMAT_XRGB8888) : NULL;
+        formats ? wlr_drm_format_set_get(formats, DRM_FORMAT_XRGB8888) : nullptr;
     if (!format) {
-        return NULL;
+        return nullptr;
     }
-    struct seaside_window_capture *capture = calloc(1, sizeof(*capture));
+    struct seaside_window_capture *capture =
+        static_cast<seaside_window_capture *>(calloc(1, sizeof(*capture)));
     if (!capture) {
-        return NULL;
+        return nullptr;
     }
     capture->display = display;
     capture->allocator = allocator;
@@ -701,7 +727,7 @@ seaside_window_capture_create(struct wl_display *display, struct wlr_allocator *
     capture->sources = wlr_ext_foreign_toplevel_image_capture_source_manager_v1_create(display, 1);
     if (!capture->list || !capture->sources) {
         free(capture);
-        return NULL;
+        return nullptr;
     }
     capture->request.notify = source_request;
     capture->new_session.notify = new_session;
@@ -758,7 +784,7 @@ static struct wlr_ext_foreign_toplevel_handle_v1_state
 foreign_state(const struct wlr_xdg_toplevel *toplevel, struct foreign_metadata *metadata) {
     sanitize_metadata(metadata->title, toplevel->title);
     sanitize_metadata(metadata->app_id, toplevel->app_id);
-    return (struct wlr_ext_foreign_toplevel_handle_v1_state){
+    return wlr_ext_foreign_toplevel_handle_v1_state{
         .title = metadata->title,
         .app_id = metadata->app_id,
     };
@@ -771,13 +797,13 @@ static void update_metadata(struct seaside_window_source *target) {
     wlr_ext_foreign_toplevel_handle_v1_update_state(target->handle, &state);
 }
 
-static void title_changed(struct wl_listener *listener, void *data) {
+static void title_changed(struct wl_listener *listener, void *data) noexcept {
     (void)data;
     struct seaside_window_source *target = wl_container_of(listener, target, title);
     update_metadata(target);
 }
 
-static void app_id_changed(struct wl_listener *listener, void *data) {
+static void app_id_changed(struct wl_listener *listener, void *data) noexcept {
     (void)data;
     struct seaside_window_source *target = wl_container_of(listener, target, app_id);
     update_metadata(target);
@@ -788,9 +814,10 @@ struct seaside_window_source *seaside_window_capture_map(struct seaside_window_c
                                                          bool presented,
                                                          seaside_window_cursor_fn cursor,
                                                          void *cursor_data) {
-    struct seaside_window_source *target = calloc(1, sizeof(*target));
+    struct seaside_window_source *target =
+        static_cast<seaside_window_source *>(calloc(1, sizeof(*target)));
     if (!target) {
-        return NULL;
+        return nullptr;
     }
     target->owner = capture;
     target->toplevel = toplevel;
@@ -802,13 +829,13 @@ struct seaside_window_source *seaside_window_capture_map(struct seaside_window_c
     struct foreign_metadata metadata;
     struct wlr_ext_foreign_toplevel_handle_v1_state state = foreign_state(toplevel, &metadata);
     target->handle =
-        target->timer ? wlr_ext_foreign_toplevel_handle_v1_create(capture->list, &state) : NULL;
+        target->timer ? wlr_ext_foreign_toplevel_handle_v1_create(capture->list, &state) : nullptr;
     if (!target->handle) {
         if (target->timer) {
             wl_event_source_remove(target->timer);
         }
         free(target);
-        return NULL;
+        return nullptr;
     }
     target->handle->data = target;
     wl_list_init(&target->observers);
@@ -862,8 +889,8 @@ struct ready_bindings {
     bool list, source;
 };
 
-static enum wl_iterator_result check_binding(struct wl_resource *resource, void *data) {
-    struct ready_bindings *bindings = data;
+static enum wl_iterator_result check_binding(struct wl_resource *resource, void *data) noexcept {
+    struct ready_bindings *bindings = static_cast<ready_bindings *>(data);
     const char *name = wl_resource_get_class(resource);
     if (strcmp(name, "ext_foreign_toplevel_list_v1") == 0) {
         bindings->list |= wl_resource_get_user_data(resource) == bindings->capture->list;
@@ -882,9 +909,9 @@ bool seaside_window_capture_client_ready(const struct seaside_window_capture *ca
     wl_client_for_each(client, wl_display_get_client_list(capture->display)) {
         pid_t peer_pid;
         uid_t peer_uid;
-        wl_client_get_credentials(client, &peer_pid, &peer_uid, NULL);
+        wl_client_get_credentials(client, &peer_pid, &peer_uid, nullptr);
         if (peer_pid == pid && peer_uid == uid) {
-            struct ready_bindings bindings = {.capture = capture};
+            ready_bindings bindings{capture, false, false};
             wl_client_for_each_resource(client, check_binding, &bindings);
             if (bindings.list && bindings.source) {
                 return true;

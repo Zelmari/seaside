@@ -2,7 +2,7 @@
 #define SEASIDE_SCENE_HPP
 
 #include "render_assets.hpp"
-#include "scene_bridge.h"
+#include "scene_bridge.hpp"
 
 #include <cstdint>
 #include <expected>

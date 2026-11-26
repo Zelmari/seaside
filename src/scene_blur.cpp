@@ -1,23 +1,33 @@
-#include "scene_blur.h"
+#include "scene_blur.hpp"
+#include "wlr_compat.hpp"
+#include "wlr_scene_compat.hpp"
 
 #include <drm_fourcc.h>
-#include <glib.h>
 #include <math.h>
+#include <memory>
+#include <new>
 #include <stdlib.h>
 #include <string.h>
+#include <type_traits>
+#include <vector>
+
+extern "C" {
 #include <wlr/interfaces/wlr_buffer.h>
 #include <wlr/render/allocator.h>
 #include <wlr/render/drm_format_set.h>
 #include <wlr/types/wlr_output.h>
-#include <wlr/types/wlr_scene.h>
 #include <wlr/util/transform.h>
+}
+
+static_assert(std::is_standard_layout_v<wlr_scene_node>);
 
 enum { BLUR_DOWNSAMPLE = 4, BLUR_MAX_DIMENSION = 1024, BLUR_MAX_PASSES = 4 };
 
 struct blur_image {
     struct wlr_buffer buffer;
-    uint32_t pixels[];
+    std::vector<uint32_t> pixels;
 };
+static_assert(std::is_standard_layout_v<blur_image>);
 
 struct blur_patch {
     struct wl_list link;
@@ -27,15 +37,18 @@ struct blur_patch {
     pixman_region32_t region;
     struct wlr_box sample;
 };
+static_assert(std::is_standard_layout_v<blur_patch>);
 
 struct seaside_scene_blur {
     struct wl_list patches;
 };
+static_assert(std::is_standard_layout_v<seaside_scene_blur>);
 
 struct blur_item {
     struct wlr_render_texture_options texture;
     struct wlr_render_rect_options rect;
-    struct wlr_texture *owned_texture;
+    std::unique_ptr<wlr_texture, decltype(&wlr_texture_destroy)> owned_texture{nullptr,
+                                                                               wlr_texture_destroy};
     float opacity;
     enum wlr_color_named_primaries primaries;
 };
@@ -45,47 +58,52 @@ struct blur_pass {
     const struct wlr_scene_node *stop;
     const struct wlr_box *sample;
     double scale_x, scale_y;
-    GArray *items;
-    bool failed;
+    std::vector<blur_item> items;
+    bool failed = false;
 };
 
-static void destroy_image(struct wlr_buffer *buffer) {
+static void destroy_image(struct wlr_buffer *buffer) noexcept {
     struct blur_image *image = wl_container_of(buffer, image, buffer);
     wlr_buffer_finish(buffer);
-    free(image);
+    delete image;
 }
 
 static bool image_data(struct wlr_buffer *buffer, uint32_t flags, void **data, uint32_t *format,
-                       size_t *stride) {
+                       size_t *stride) noexcept {
     if (flags != WLR_BUFFER_DATA_PTR_ACCESS_READ) {
         return false;
     }
     struct blur_image *image = wl_container_of(buffer, image, buffer);
-    *data = image->pixels;
+    *data = image->pixels.data();
     // Do not advertise opacity. Damage to a covered source must still schedule
     // a frame when the overlying backdrop samples it.
     *format = DRM_FORMAT_ARGB8888;
-    *stride = (size_t)buffer->width * sizeof(*image->pixels);
+    *stride = (size_t)buffer->width * sizeof(uint32_t);
     return true;
 }
 
-static void image_data_end(struct wlr_buffer *buffer) {
+static void image_data_end(struct wlr_buffer *buffer) noexcept {
     (void)buffer;
 }
 
 static const struct wlr_buffer_impl image_impl = {
     .destroy = destroy_image,
+    .get_dmabuf = nullptr,
+    .get_shm = nullptr,
     .begin_data_ptr_access = image_data,
     .end_data_ptr_access = image_data_end,
 };
 
 static struct blur_image *new_image(int width, int height) {
     const size_t count = (size_t)width * height;
-    struct blur_image *image = malloc(sizeof(*image) + count * sizeof(*image->pixels));
-    if (image) {
+    try {
+        auto image = std::make_unique<blur_image>();
+        image->pixels.resize(count);
         wlr_buffer_init(&image->buffer, &image_impl, width, height);
+        return image.release();
+    } catch (const std::bad_alloc &) {
+        return nullptr;
     }
-    return image;
 }
 
 static void destroy_patch(struct blur_patch *patch) {
@@ -114,7 +132,7 @@ void seaside_scene_blur_destroy(struct seaside_scene_blur **blur) {
             destroy_patch(patch);
         }
         free(*blur);
-        *blur = NULL;
+        *blur = nullptr;
     }
 }
 
@@ -126,11 +144,11 @@ static bool has_texture(const struct wlr_scene_buffer *buffer) {
 
 static struct wlr_box buffer_box(const struct wlr_scene_buffer *buffer, int x, int y) {
     if (buffer->dst_width > 0 && buffer->dst_height > 0) {
-        return (struct wlr_box){x, y, buffer->dst_width, buffer->dst_height};
+        return wlr_box{x, y, buffer->dst_width, buffer->dst_height};
     }
     int width = buffer->WLR_PRIVATE.buffer_width, height = buffer->WLR_PRIVATE.buffer_height;
     wlr_output_transform_coords(buffer->transform, &width, &height);
-    return (struct wlr_box){x, y, width, height};
+    return wlr_box{x, y, width, height};
 }
 
 static void collect_coverage(struct wlr_scene_node *node, const struct wlr_box *viewport,
@@ -201,7 +219,7 @@ static bool collect_occluders(struct wlr_scene_node *node, const struct wlr_scen
             }
         }
     } else {
-        collect_coverage(node, viewport, NULL, opaque);
+        collect_coverage(node, viewport, nullptr, opaque);
     }
     return false;
 }
@@ -209,8 +227,8 @@ static bool collect_occluders(struct wlr_scene_node *node, const struct wlr_scen
 static struct wlr_box pass_destination(const struct blur_pass *pass, const struct wlr_box *box) {
     const double left = (double)box->x - pass->sample->x, top = (double)box->y - pass->sample->y;
     const int x = (int)lround(left * pass->scale_x), y = (int)lround(top * pass->scale_y);
-    return (struct wlr_box){x, y, (int)lround((left + box->width) * pass->scale_x) - x,
-                            (int)lround((top + box->height) * pass->scale_y) - y};
+    return wlr_box{x, y, (int)lround((left + box->width) * pass->scale_x) - x,
+                   (int)lround((top + box->height) * pass->scale_y) - y};
 }
 
 static void collect_rect(struct blur_pass *pass, struct wlr_scene_rect *rect, int x, int y) {
@@ -219,11 +237,14 @@ static void collect_rect(struct blur_pass *pass, struct wlr_scene_rect *rect, in
     if (rect->color[3] > 0 && wlr_box_intersection(&visible, pass->sample, &box)) {
         const struct wlr_box dest = pass_destination(pass, &visible);
         if (!wlr_box_empty(&dest)) {
-            const struct blur_item item = {
-                .rect = {.box = dest,
-                         .color = {rect->color[0], rect->color[1], rect->color[2], rect->color[3]}},
-            };
-            g_array_append_val(pass->items, item);
+            blur_item item{};
+            item.rect.box = dest;
+            item.rect.color = {rect->color[0], rect->color[1], rect->color[2], rect->color[3]};
+            try {
+                pass->items.push_back(std::move(item));
+            } catch (const std::bad_alloc &) {
+                pass->failed = true;
+            }
         }
     }
 }
@@ -233,7 +254,8 @@ static void crop_source(struct wlr_fbox *src, const struct wlr_scene_buffer *buf
                         const struct wlr_box *visible) {
     *src = buffer->src_box;
     if (wlr_fbox_empty(src)) {
-        *src = (struct wlr_fbox){0, 0, texture->width, texture->height};
+        *src = wlr_fbox{0, 0, static_cast<double>(texture->width),
+                        static_cast<double>(texture->height)};
     }
     int width = (int)texture->width, height = (int)texture->height;
     wlr_fbox_transform(src, src, buffer->transform, width, height);
@@ -264,7 +286,7 @@ static void collect_buffer(struct blur_pass *pass, struct wlr_scene_buffer *buff
         pass->failed = true;
         return;
     }
-    struct wlr_texture *texture = buffer->WLR_PRIVATE.texture, *owned_texture = NULL;
+    struct wlr_texture *texture = buffer->WLR_PRIVATE.texture, *owned_texture = nullptr;
     if (!texture) {
         struct wlr_client_buffer *client = wlr_client_buffer_get(buffer->buffer);
         texture = client
@@ -278,20 +300,23 @@ static void collect_buffer(struct blur_pass *pass, struct wlr_scene_buffer *buff
     }
     struct wlr_fbox cropped;
     crop_source(&cropped, buffer, texture, &box, &visible);
-    const struct blur_item item = {
-        .texture = {.texture = texture,
-                    .src_box = cropped,
-                    .dst_box = dest,
-                    .transform = wlr_output_transform_invert(buffer->transform),
-                    .filter_mode = buffer->filter_mode,
-                    .transfer_function = buffer->transfer_function,
-                    .color_encoding = buffer->color_encoding,
-                    .color_range = buffer->color_range},
-        .owned_texture = owned_texture,
-        .opacity = buffer->opacity,
-        .primaries = buffer->primaries,
-    };
-    g_array_append_val(pass->items, item);
+    blur_item item{};
+    item.texture.texture = texture;
+    item.texture.src_box = cropped;
+    item.texture.dst_box = dest;
+    item.texture.transform = wlr_output_transform_invert(buffer->transform);
+    item.texture.filter_mode = buffer->filter_mode;
+    item.texture.transfer_function = buffer->transfer_function;
+    item.texture.color_encoding = buffer->color_encoding;
+    item.texture.color_range = buffer->color_range;
+    item.owned_texture.reset(owned_texture);
+    item.opacity = buffer->opacity;
+    item.primaries = buffer->primaries;
+    try {
+        pass->items.push_back(std::move(item));
+    } catch (const std::bad_alloc &) {
+        pass->failed = true;
+    }
 }
 
 static bool collect_backdrop(struct blur_pass *pass, struct wlr_scene_node *node) {
@@ -323,11 +348,10 @@ static bool collect_backdrop(struct blur_pass *pass, struct wlr_scene_node *node
 }
 
 static bool read_backdrop(struct wlr_texture *texture, struct blur_image *image) {
-    struct wlr_texture_read_pixels_options options = {
-        .data = image->pixels,
-        .format = wlr_texture_preferred_read_format(texture),
-        .stride = (uint32_t)image->buffer.width * sizeof(uint32_t),
-    };
+    wlr_texture_read_pixels_options options{};
+    options.data = image->pixels.data();
+    options.format = wlr_texture_preferred_read_format(texture);
+    options.stride = static_cast<uint32_t>(image->buffer.width * sizeof(uint32_t));
     if (options.format != DRM_FORMAT_XRGB8888 && options.format != DRM_FORMAT_ARGB8888 &&
         options.format != DRM_FORMAT_XBGR8888 && options.format != DRM_FORMAT_ABGR8888) {
         options.format = DRM_FORMAT_XRGB8888;
@@ -359,10 +383,10 @@ static bool render_backdrop(struct wlr_scene_tree *stack, struct wlr_scene_tree 
     const struct wlr_drm_format_set *formats =
         wlr_renderer_get_texture_formats(renderer, allocator->buffer_caps);
     const struct wlr_drm_format *format =
-        formats ? wlr_drm_format_set_get(formats, DRM_FORMAT_XRGB8888) : NULL;
+        formats ? wlr_drm_format_set_get(formats, DRM_FORMAT_XRGB8888) : nullptr;
     const int width = image->buffer.width, height = image->buffer.height;
     struct wlr_buffer *target =
-        format ? wlr_allocator_create_buffer(allocator, width, height, format) : NULL;
+        format ? wlr_allocator_create_buffer(allocator, width, height, format) : nullptr;
     if (!target) {
         return false;
     }
@@ -371,30 +395,32 @@ static bool render_backdrop(struct wlr_scene_tree *stack, struct wlr_scene_tree 
                                  .sample = sample,
                                  .scale_x = (double)width / sample->width,
                                  .scale_y = (double)height / sample->height,
-                                 .items = g_array_new(false, false, sizeof(struct blur_item))};
+                                 .items = {}};
     const bool found = collect_backdrop(&backdrop, &stack->node);
-    struct wlr_render_pass *pass =
-        found && !backdrop.failed ? wlr_renderer_begin_buffer_pass(renderer, target, NULL) : NULL;
+    struct wlr_render_pass *pass = found && !backdrop.failed
+                                       ? wlr_renderer_begin_buffer_pass(renderer, target, nullptr)
+                                       : nullptr;
     bool rendered = false;
     if (pass) {
-        wlr_render_pass_add_rect(pass, &(struct wlr_render_rect_options){
-                                           .box = {0, 0, width, height},
-                                           .color = {0, 0, 0, 1},
-                                           .blend_mode = WLR_RENDER_BLEND_MODE_NONE,
-                                       });
-        for (unsigned i = 0; i < backdrop.items->len; ++i) {
-            struct blur_item *item = &g_array_index(backdrop.items, struct blur_item, i);
-            if (item->texture.texture) {
-                struct wlr_render_texture_options texture = item->texture;
-                struct wlr_color_primaries primaries;
-                texture.alpha = &item->opacity;
-                if (item->primaries) {
-                    wlr_color_primaries_from_named(&primaries, item->primaries);
+        const wlr_render_rect_options clear{
+            .box = {0, 0, width, height},
+            .color = {0, 0, 0, 1},
+            .clip = nullptr,
+            .blend_mode = WLR_RENDER_BLEND_MODE_NONE,
+        };
+        wlr_render_pass_add_rect(pass, &clear);
+        for (const auto &item : backdrop.items) {
+            if (item.texture.texture) {
+                auto texture = item.texture;
+                wlr_color_primaries primaries;
+                texture.alpha = &item.opacity;
+                if (item.primaries) {
+                    wlr_color_primaries_from_named(&primaries, item.primaries);
                     texture.primaries = &primaries;
                 }
                 wlr_render_pass_add_texture(pass, &texture);
             } else {
-                wlr_render_pass_add_rect(pass, &item->rect);
+                wlr_render_pass_add_rect(pass, &item.rect);
             }
         }
         if (wlr_render_pass_submit(pass)) {
@@ -403,10 +429,7 @@ static bool render_backdrop(struct wlr_scene_tree *stack, struct wlr_scene_tree 
             wlr_texture_destroy(texture);
         }
     }
-    for (unsigned i = 0; i < backdrop.items->len; ++i) {
-        wlr_texture_destroy(g_array_index(backdrop.items, struct blur_item, i).owned_texture);
-    }
-    g_array_unref(backdrop.items);
+    backdrop.items.clear();
     wlr_buffer_drop(target);
     return rendered;
 }
@@ -445,19 +468,19 @@ static bool filter_image(struct blur_image *image, int radius, int passes) {
     if (width <= 0 || height <= 0) {
         return false;
     }
-    uint32_t *scratch = malloc((size_t)width * height * sizeof(*scratch));
+    uint32_t *scratch = static_cast<uint32_t *>(malloc((size_t)width * height * sizeof(*scratch)));
     if (!scratch) {
         return false;
     }
     for (int pass = 0; pass < passes; ++pass) {
-        filter_lines(scratch, image->pixels, width, height, 1, width, radius);
-        filter_lines(image->pixels, scratch, height, width, width, 1, radius);
+        filter_lines(scratch, image->pixels.data(), width, height, 1, width, radius);
+        filter_lines(image->pixels.data(), scratch, height, width, width, 1, radius);
     }
     free(scratch);
     return true;
 }
 
-static bool ignore_blur_input(struct wlr_scene_buffer *buffer, double *sx, double *sy) {
+static bool ignore_blur_input(struct wlr_scene_buffer *buffer, double *sx, double *sy) noexcept {
     (void)buffer;
     (void)sx;
     (void)sy;
@@ -469,14 +492,14 @@ static struct blur_patch *create_patch(struct seaside_scene_blur *blur,
                                        const struct wlr_box *sample,
                                        const pixman_region32_t *region, struct blur_image *image,
                                        float opacity) {
-    struct blur_patch *patch = calloc(1, sizeof(*patch));
+    struct blur_patch *patch = static_cast<blur_patch *>(calloc(1, sizeof(*patch)));
     if (!patch) {
-        return NULL;
+        return nullptr;
     }
     patch->tree = wlr_scene_tree_create(window);
     if (!patch->tree) {
         free(patch);
-        return NULL;
+        return nullptr;
     }
     patch->output = output;
     patch->sample = *sample;
@@ -497,15 +520,16 @@ static struct blur_patch *create_patch(struct seaside_scene_blur *blur,
         struct wlr_scene_buffer *buffer = wlr_scene_buffer_create(patch->tree, &image->buffer);
         if (!buffer) {
             destroy_patch(patch);
-            return NULL;
+            return nullptr;
         }
         buffer->point_accepts_input = ignore_blur_input;
-        wlr_scene_buffer_set_source_box(buffer, &(struct wlr_fbox){
-                                                    (r.x1 - sample->x) * sx,
-                                                    (r.y1 - sample->y) * sy,
-                                                    (r.x2 - r.x1) * sx,
-                                                    (r.y2 - r.y1) * sy,
-                                                });
+        const wlr_fbox source{
+            (r.x1 - sample->x) * sx,
+            (r.y1 - sample->y) * sy,
+            (r.x2 - r.x1) * sx,
+            (r.y2 - r.y1) * sy,
+        };
+        wlr_scene_buffer_set_source_box(buffer, &source);
         wlr_scene_buffer_set_dest_size(buffer, r.x2 - r.x1, r.y2 - r.y1);
         wlr_scene_buffer_set_opacity(buffer, opacity);
         wlr_scene_node_set_position(&buffer->node, r.x1 - sample->x, r.y1 - sample->y);
@@ -522,7 +546,7 @@ static struct blur_patch *output_patch(struct seaside_scene_blur *blur, struct w
             }
         }
     }
-    return NULL;
+    return nullptr;
 }
 
 static bool box_equal(const struct wlr_box *a, const struct wlr_box *b) {
@@ -537,8 +561,8 @@ static struct wlr_box sample_box(const pixman_box32_t *extents, const struct wlr
                   end_y = (int64_t)viewport->y + viewport->height;
     const int x = min_x < viewport->x ? viewport->x : (int)min_x;
     const int y = min_y < viewport->y ? viewport->y : (int)min_y;
-    return (struct wlr_box){x, y, (int)((max_x > end_x ? end_x : max_x) - x),
-                            (int)((max_y > end_y ? end_y : max_y) - y)};
+    return wlr_box{x, y, (int)((max_x > end_x ? end_x : max_x) - x),
+                   (int)((max_y > end_y ? end_y : max_y) - y)};
 }
 
 static void update_patch(struct blur_patch *patch, struct wlr_scene_tree *window,
@@ -546,9 +570,7 @@ static void update_patch(struct blur_patch *patch, struct wlr_scene_tree *window
     int x, y;
     wlr_scene_node_coords(&window->node, &x, &y);
     wlr_scene_node_set_position(&patch->tree->node, patch->sample.x - x, patch->sample.y - y);
-    const int width = image->buffer.width, height = image->buffer.height;
-    const bool changed =
-        memcmp(patch->image->pixels, image->pixels, (size_t)width * height * sizeof(uint32_t)) != 0;
+    const bool changed = patch->image->pixels != image->pixels;
     struct wlr_scene_node *node;
     wl_list_for_each(node, &patch->tree->children, link) {
         struct wlr_scene_buffer *buffer = wlr_scene_buffer_from_node(node);
@@ -610,7 +632,7 @@ bool seaside_scene_blur_update(struct seaside_scene_blur **blur, struct wlr_scen
                 applied = true;
             } else {
                 if (!*blur) {
-                    *blur = calloc(1, sizeof(**blur));
+                    *blur = static_cast<seaside_scene_blur *>(calloc(1, sizeof(**blur)));
                     if (*blur) {
                         wl_list_init(&(*blur)->patches);
                     }
@@ -618,10 +640,10 @@ bool seaside_scene_blur_update(struct seaside_scene_blur **blur, struct wlr_scen
                 if (*blur) {
                     if (patch) {
                         destroy_patch(patch);
-                        patch = NULL;
+                        patch = nullptr;
                     }
                     applied = create_patch(*blur, window, output, &sample, &coverage, image,
-                                           opacity) != NULL;
+                                           opacity) != nullptr;
                 }
             }
         }

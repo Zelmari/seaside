@@ -1,7 +1,7 @@
 #ifndef SEASIDE_LAYER_SCENE_H
 #define SEASIDE_LAYER_SCENE_H
 
-#include "scene_bridge.h"
+#include "scene_bridge.hpp"
 
 struct wlr_scene_tree;
 struct wlr_xdg_popup;

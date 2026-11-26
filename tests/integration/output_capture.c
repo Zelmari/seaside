@@ -2,7 +2,7 @@
 
 #include "output_capture.hpp"
 #include "capture_fence_fixture.h"
-#include "scene_bridge.h"
+#include "scene_bridge.hpp"
 #include "tearing-control-v1-client-protocol.h"
 #include "viewporter-client-protocol.h"
 

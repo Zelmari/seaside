@@ -1,4 +1,4 @@
-#include "scene_blur.h"
+#include "scene_blur.hpp"
 
 #include <drm_fourcc.h>
 #include <stdio.h>

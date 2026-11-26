@@ -1,4 +1,4 @@
-#include "scene_bridge.h"
+#include "scene_bridge.hpp"
 
 #include <stdio.h>
 #include <stdlib.h>
