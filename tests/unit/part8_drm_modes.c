@@ -1,4 +1,4 @@
-#include "tty_drm.h"
+#include "tty_drm.hpp"
 
 #include <stdio.h>
 #include <wlr/types/wlr_output.h>

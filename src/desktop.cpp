@@ -1,5 +1,5 @@
 #include "desktop.hpp"
-#include "tty_input.h"
+#include "tty_input.hpp"
 
 #include <algorithm>
 #include <array>

@@ -1,16 +1,20 @@
-#define _POSIX_C_SOURCE 200809L
-#include "text_input.h"
+#include "text_input.hpp"
+#include "wlr_input_method_compat.hpp"
 
 #include <glib.h>
 #include <linux/input-event-codes.h>
+#include <new>
 #include <stdlib.h>
 #include <string.h>
+#include <type_traits>
 #include <unistd.h>
+
+extern "C" {
 #include <wlr/types/wlr_compositor.h>
-#include <wlr/types/wlr_input_method_v2.h>
 #include <wlr/types/wlr_keyboard.h>
 #include <wlr/types/wlr_text_input_v3.h>
 #include <wlr/types/wlr_virtual_keyboard_v1.h>
+}
 
 struct seaside_text_input {
     struct wlr_seat *seat;
@@ -31,6 +35,7 @@ struct seaside_text_input {
                   const struct wlr_box *);
     void *data;
 };
+static_assert(std::is_standard_layout_v<seaside_text_input>);
 
 struct text_input {
     struct seaside_text_input *relay;
@@ -38,14 +43,16 @@ struct text_input {
     struct wl_list link;
     struct wl_listener enable, commit, disable, destroy;
 };
+static_assert(std::is_standard_layout_v<text_input>);
 
 struct virtual_keyboard {
     struct seaside_text_input *relay;
-    struct wlr_virtual_keyboard_v1 *virtual;
+    struct wlr_virtual_keyboard_v1 *virtual_kbd;
     struct wl_list link;
     struct wl_listener key, modifiers, destroy;
     bool delivered[KEY_CNT];
 };
+static_assert(std::is_standard_layout_v<virtual_keyboard>);
 
 static void remove_listener(struct wl_listener *listener) {
     wl_list_remove(&listener->link);
@@ -58,9 +65,9 @@ static void update_popup(struct seaside_text_input *relay,
     const struct wlr_box *cursor =
         input && (input->active_features & WLR_TEXT_INPUT_V3_FEATURE_CURSOR_RECTANGLE)
             ? &input->current.cursor_rectangle
-            : NULL;
+            : nullptr;
     if (relay->popup) {
-        relay->popup(relay->data, popup, input ? input->focused_surface : NULL, cursor);
+        relay->popup(relay->data, popup, input ? input->focused_surface : nullptr, cursor);
     }
 }
 
@@ -76,7 +83,7 @@ void seaside_text_input_restore_keyboard(struct seaside_text_input *relay) {
         return;
     }
     struct virtual_keyboard *forwarding = relay->forwarding;
-    relay->forwarding = NULL;
+    relay->forwarding = nullptr;
     if (relay->focus == relay->seat->keyboard_state.focused_surface) {
         for (size_t key = 0; key < KEY_CNT; ++key) {
             if (forwarding->delivered[key]) {
@@ -95,7 +102,7 @@ static void deactivate(struct seaside_text_input *relay) {
         return;
     }
     struct wlr_input_method_keyboard_grab_v2 *grab =
-        relay->method ? relay->method->keyboard_grab : NULL;
+        relay->method ? relay->method->keyboard_grab : nullptr;
     if (grab) {
         for (size_t key = 0; key < KEY_CNT; ++key) {
             if (relay->grabbed_keys[key] == relay->grab_generation) {
@@ -104,7 +111,7 @@ static void deactivate(struct seaside_text_input *relay) {
             }
         }
     }
-    relay->active = NULL;
+    relay->active = nullptr;
     ++relay->grab_generation;
     seaside_text_input_restore_keyboard(relay);
     if (relay->method) {
@@ -129,7 +136,8 @@ enum {
 
 static bool text_length(const char *text, size_t *length) {
     *length = text ? strnlen(text, text_input_max_bytes + 1) : 0;
-    return !text || (*length <= text_input_max_bytes && g_utf8_validate_len(text, *length, NULL));
+    return !text ||
+           (*length <= text_input_max_bytes && g_utf8_validate_len(text, *length, nullptr));
 }
 
 static bool text_offset(const char *text, size_t length, size_t offset) {
@@ -159,7 +167,7 @@ static void send_state(struct seaside_text_input *relay) {
         // Each activation starts a new input context and discards the old edit batch.
         free(relay->method->pending.commit_text);
         free(relay->method->pending.preedit.text);
-        relay->method->pending = (struct wlr_input_method_v2_state){0};
+        relay->method->pending = wlr_input_method_v2_state{};
         wlr_input_method_v2_send_activate(relay->method);
     }
     if (input->active_features & WLR_TEXT_INPUT_V3_FEATURE_SURROUNDING_TEXT) {
@@ -185,14 +193,14 @@ static void reset_text_state(struct wlr_text_input_v3 *input) {
     // The commit counter belongs to the object and survives focus changes.
     free(input->pending.surrounding.text);
     free(input->current.surrounding.text);
-    input->pending = (struct wlr_text_input_v3_state){0};
-    input->current = (struct wlr_text_input_v3_state){0};
+    input->pending = wlr_text_input_v3_state{};
+    input->current = wlr_text_input_v3_state{};
     input->pending_enabled = false;
     input->current_enabled = false;
     input->active_features = 0;
 }
 
-static void text_enable(struct wl_listener *listener, void *data) {
+static void text_enable(struct wl_listener *listener, void *data) noexcept {
     (void)data;
     struct text_input *binding = wl_container_of(listener, binding, enable);
     struct seaside_text_input *relay = binding->relay;
@@ -207,7 +215,7 @@ static void text_enable(struct wl_listener *listener, void *data) {
     input->pending.text_change_cause = 0;
 }
 
-static void text_disable(struct wl_listener *listener, void *data) {
+static void text_disable(struct wl_listener *listener, void *data) noexcept {
     (void)data;
     struct text_input *binding = wl_container_of(listener, binding, disable);
     if (binding->relay->active == binding->input) {
@@ -215,7 +223,7 @@ static void text_disable(struct wl_listener *listener, void *data) {
     }
 }
 
-static void text_commit(struct wl_listener *listener, void *data) {
+static void text_commit(struct wl_listener *listener, void *data) noexcept {
     (void)data;
     struct text_input *binding = wl_container_of(listener, binding, commit);
     if (binding->relay->active == binding->input) {
@@ -236,10 +244,10 @@ static void destroy_binding(struct text_input *binding) {
     wl_list_remove(&binding->disable.link);
     wl_list_remove(&binding->commit.link);
     wl_list_remove(&binding->destroy.link);
-    free(binding);
+    delete binding;
 }
 
-static void text_destroy(struct wl_listener *listener, void *data) {
+static void text_destroy(struct wl_listener *listener, void *data) noexcept {
     (void)data;
     struct text_input *binding = wl_container_of(listener, binding, destroy);
     destroy_binding(binding);
@@ -252,9 +260,9 @@ static void enter(struct text_input *binding, struct wlr_surface *focus) {
     }
 }
 
-static void focus_change(struct wl_listener *listener, void *data) {
+static void focus_change(struct wl_listener *listener, void *data) noexcept {
     struct seaside_text_input *relay = wl_container_of(listener, relay, focus_change);
-    const struct wlr_seat_keyboard_focus_change_event *event = data;
+    auto *event = static_cast<const wlr_seat_keyboard_focus_change_event *>(data);
     deactivate(relay);
     relay->focus = event->new_surface;
     struct text_input *binding;
@@ -267,13 +275,13 @@ static void focus_change(struct wl_listener *listener, void *data) {
     }
 }
 
-static void new_text_input(struct wl_listener *listener, void *data) {
+static void new_text_input(struct wl_listener *listener, void *data) noexcept {
     struct seaside_text_input *relay = wl_container_of(listener, relay, new_text_input);
-    struct wlr_text_input_v3 *input = data;
+    auto *input = static_cast<wlr_text_input_v3 *>(data);
     if (input->seat != relay->seat) {
         return;
     }
-    struct text_input *binding = calloc(1, sizeof(*binding));
+    struct text_input *binding = new (std::nothrow) text_input{};
     if (!binding) {
         wl_client_post_no_memory(wl_resource_get_client(input->resource));
         return;
@@ -306,7 +314,7 @@ static bool valid_deletion(const struct wlr_text_input_v3 *input, uint32_t befor
            text_offset(text, length, end + after);
 }
 
-static void method_commit(struct wl_listener *listener, void *data) {
+static void method_commit(struct wl_listener *listener, void *data) noexcept {
     (void)data;
     struct seaside_text_input *relay = wl_container_of(listener, relay, method_commit);
     struct wlr_text_input_v3 *input = relay->active;
@@ -316,7 +324,7 @@ static void method_commit(struct wl_listener *listener, void *data) {
     /* wlroots emits this signal only for the current input method done serial.
      * It also supplies the text client's separate commit serial in send_done. */
     const struct wlr_input_method_v2_state *state = &relay->method->current;
-    const uint32_t before = state->delete.before_length, after = state->delete.after_length;
+    const uint32_t before = state->wlr_delete.before_length, after = state->wlr_delete.after_length;
     if ((before || after) && valid_deletion(input, before, after)) {
         wlr_text_input_v3_send_delete_surrounding_text(input, before, after);
     }
@@ -332,17 +340,17 @@ static void method_commit(struct wl_listener *listener, void *data) {
           text_offset(preedit, length, end)))) {
         wlr_text_input_v3_send_preedit_string(input, preedit, start, end);
     } else {
-        wlr_text_input_v3_send_preedit_string(input, NULL, 0, 0);
+        wlr_text_input_v3_send_preedit_string(input, nullptr, 0, 0);
     }
     wlr_text_input_v3_send_done(input);
 }
 
-static void new_popup(struct wl_listener *listener, void *data) {
+static void new_popup(struct wl_listener *listener, void *data) noexcept {
     struct seaside_text_input *relay = wl_container_of(listener, relay, new_popup);
-    update_popup(relay, data);
+    update_popup(relay, static_cast<wlr_input_popup_surface_v2 *>(data));
 }
 
-static void grab_destroy(struct wl_listener *listener, void *data) {
+static void grab_destroy(struct wl_listener *listener, void *data) noexcept {
     (void)data;
     struct seaside_text_input *relay = wl_container_of(listener, relay, grab_destroy);
     remove_listener(&relay->grab_destroy);
@@ -354,9 +362,9 @@ static void grab_destroy(struct wl_listener *listener, void *data) {
     }
 }
 
-static void grab_keyboard(struct wl_listener *listener, void *data) {
+static void grab_keyboard(struct wl_listener *listener, void *data) noexcept {
     struct seaside_text_input *relay = wl_container_of(listener, relay, grab_keyboard);
-    struct wlr_input_method_keyboard_grab_v2 *grab = data;
+    auto *grab = static_cast<wlr_input_method_keyboard_grab_v2 *>(data);
     if (wlr_seat_get_keyboard(relay->seat)) {
         wlr_input_method_keyboard_grab_v2_set_keyboard(grab, relay->keyboard);
     }
@@ -369,25 +377,25 @@ static void detach_method(struct seaside_text_input *relay) {
     remove_listener(&relay->new_popup);
     remove_listener(&relay->grab_keyboard);
     remove_listener(&relay->grab_destroy);
-    relay->method = NULL;
+    relay->method = nullptr;
 }
 
-static void method_destroy(struct wl_listener *listener, void *data) {
+static void method_destroy(struct wl_listener *listener, void *data) noexcept {
     (void)data;
     struct seaside_text_input *relay = wl_container_of(listener, relay, method_destroy);
     seaside_text_input_restore_keyboard(relay);
     if (relay->active && relay->active->focused_surface) {
-        wlr_text_input_v3_send_preedit_string(relay->active, NULL, 0, 0);
+        wlr_text_input_v3_send_preedit_string(relay->active, nullptr, 0, 0);
         wlr_text_input_v3_send_done(relay->active);
     }
     detach_method(relay);
 }
 
-static void new_input_method(struct wl_listener *listener, void *data) {
+static void new_input_method(struct wl_listener *listener, void *data) noexcept {
     struct seaside_text_input *relay = wl_container_of(listener, relay, new_input_method);
-    struct wlr_input_method_v2 *method = data;
+    auto *method = static_cast<wlr_input_method_v2 *>(data);
     uid_t uid;
-    wl_client_get_credentials(wl_resource_get_client(method->resource), NULL, &uid, NULL);
+    wl_client_get_credentials(wl_resource_get_client(method->resource), nullptr, &uid, nullptr);
     if (method->seat != relay->seat || relay->method || uid != geteuid()) {
         wlr_input_method_v2_send_unavailable(method);
         return;
@@ -402,14 +410,14 @@ static void new_input_method(struct wl_listener *listener, void *data) {
     }
 }
 
-static void text_manager_destroy(struct wl_listener *listener, void *data) {
+static void text_manager_destroy(struct wl_listener *listener, void *data) noexcept {
     (void)data;
     struct seaside_text_input *relay = wl_container_of(listener, relay, text_manager_destroy);
     remove_listener(&relay->text_manager_destroy);
     remove_listener(&relay->new_text_input);
 }
 
-static void method_manager_destroy(struct wl_listener *listener, void *data) {
+static void method_manager_destroy(struct wl_listener *listener, void *data) noexcept {
     (void)data;
     struct seaside_text_input *relay = wl_container_of(listener, relay, method_manager_destroy);
     remove_listener(&relay->method_manager_destroy);
@@ -418,9 +426,9 @@ static void method_manager_destroy(struct wl_listener *listener, void *data) {
 
 static bool can_forward(const struct virtual_keyboard *binding) {
     const struct seaside_text_input *relay = binding->relay;
-    return relay->active && relay->method && binding->virtual->has_keymap &&
+    return relay->active && relay->method && binding->virtual_kbd->has_keymap &&
            wlr_seat_get_keyboard(relay->seat) && !wlr_seat_keyboard_has_grab(relay->seat) &&
-           wl_resource_get_client(binding->virtual->resource) ==
+           wl_resource_get_client(binding->virtual_kbd->resource) ==
                wl_resource_get_client(relay->method->resource);
 }
 
@@ -429,13 +437,13 @@ static void select_virtual_keyboard(struct virtual_keyboard *binding) {
     if (relay->forwarding != binding) {
         seaside_text_input_restore_keyboard(relay);
         relay->forwarding = binding;
-        wlr_seat_set_keyboard(relay->seat, &binding->virtual->keyboard);
+        wlr_seat_set_keyboard(relay->seat, &binding->virtual_kbd->keyboard);
     }
 }
 
-static void virtual_key(struct wl_listener *listener, void *data) {
+static void virtual_key(struct wl_listener *listener, void *data) noexcept {
     struct virtual_keyboard *binding = wl_container_of(listener, binding, key);
-    const struct wlr_keyboard_key_event *event = data;
+    auto *event = static_cast<const wlr_keyboard_key_event *>(data);
     if (event->keycode >= KEY_CNT || !can_forward(binding)) {
         return;
     }
@@ -451,9 +459,9 @@ static void virtual_key(struct wl_listener *listener, void *data) {
                                  event->state);
 }
 
-static void virtual_modifiers(struct wl_listener *listener, void *data) {
+static void virtual_modifiers(struct wl_listener *listener, void *data) noexcept {
     struct virtual_keyboard *binding = wl_container_of(listener, binding, modifiers);
-    struct wlr_keyboard *keyboard = data;
+    auto *keyboard = static_cast<wlr_keyboard *>(data);
     if (can_forward(binding)) {
         select_virtual_keyboard(binding);
         wlr_seat_keyboard_notify_modifiers(binding->relay->seat, &keyboard->modifiers);
@@ -468,28 +476,28 @@ static void remove_virtual_keyboard(struct virtual_keyboard *binding) {
     wl_list_remove(&binding->key.link);
     wl_list_remove(&binding->modifiers.link);
     wl_list_remove(&binding->destroy.link);
-    free(binding);
+    delete binding;
 }
 
-static void virtual_destroy(struct wl_listener *listener, void *data) {
+static void virtual_destroy(struct wl_listener *listener, void *data) noexcept {
     (void)data;
     struct virtual_keyboard *binding = wl_container_of(listener, binding, destroy);
     remove_virtual_keyboard(binding);
 }
 
-static void new_virtual_keyboard(struct wl_listener *listener, void *data) {
+static void new_virtual_keyboard(struct wl_listener *listener, void *data) noexcept {
     struct seaside_text_input *relay = wl_container_of(listener, relay, new_virtual_keyboard);
-    struct wlr_virtual_keyboard_v1 *keyboard = data;
+    auto *keyboard = static_cast<wlr_virtual_keyboard_v1 *>(data);
     if (keyboard->seat != relay->seat) {
         return;
     }
-    struct virtual_keyboard *binding = calloc(1, sizeof(*binding));
+    struct virtual_keyboard *binding = new (std::nothrow) virtual_keyboard{};
     if (!binding) {
         wl_client_post_no_memory(wl_resource_get_client(keyboard->resource));
         return;
     }
     binding->relay = relay;
-    binding->virtual = keyboard;
+    binding->virtual_kbd = keyboard;
     binding->key.notify = virtual_key;
     binding->modifiers.notify = virtual_modifiers;
     binding->destroy.notify = virtual_destroy;
@@ -499,7 +507,7 @@ static void new_virtual_keyboard(struct wl_listener *listener, void *data) {
     wl_signal_add(&keyboard->keyboard.base.events.destroy, &binding->destroy);
 }
 
-static void virtual_manager_destroy(struct wl_listener *listener, void *data) {
+static void virtual_manager_destroy(struct wl_listener *listener, void *data) noexcept {
     (void)data;
     struct seaside_text_input *relay = wl_container_of(listener, relay, virtual_manager_destroy);
     remove_listener(&relay->virtual_manager_destroy);
@@ -510,17 +518,17 @@ struct seaside_text_input *
 seaside_text_input_create(struct wl_display *display, struct wlr_seat *seat,
                           struct wlr_keyboard *keyboard,
                           const struct seaside_tty_input_callbacks *callbacks, void *data) {
-    struct seaside_text_input *relay = calloc(1, sizeof(*relay));
+    struct seaside_text_input *relay = new (std::nothrow) seaside_text_input{};
     if (!relay) {
-        return NULL;
+        return nullptr;
     }
     struct wlr_text_input_manager_v3 *text = wlr_text_input_manager_v3_create(display);
     struct wlr_input_method_manager_v2 *method = wlr_input_method_manager_v2_create(display);
-    struct wlr_virtual_keyboard_manager_v1 *virtual =
+    struct wlr_virtual_keyboard_manager_v1 *virtual_manager =
         wlr_virtual_keyboard_manager_v1_create(display);
-    if (!text || !method || !virtual) {
-        free(relay);
-        return NULL;
+    if (!text || !method || !virtual_manager) {
+        delete relay;
+        return nullptr;
     }
     relay->seat = seat;
     relay->keyboard = keyboard;
@@ -547,8 +555,8 @@ seaside_text_input_create(struct wl_display *display, struct wlr_seat *seat,
     wl_signal_add(&text->events.destroy, &relay->text_manager_destroy);
     wl_signal_add(&method->events.new_input_method, &relay->new_input_method);
     wl_signal_add(&method->events.destroy, &relay->method_manager_destroy);
-    wl_signal_add(&virtual->events.new_virtual_keyboard, &relay->new_virtual_keyboard);
-    wl_signal_add(&virtual->events.destroy, &relay->virtual_manager_destroy);
+    wl_signal_add(&virtual_manager->events.new_virtual_keyboard, &relay->new_virtual_keyboard);
+    wl_signal_add(&virtual_manager->events.destroy, &relay->virtual_manager_destroy);
     wl_signal_add(&seat->keyboard_state.events.focus_change, &relay->focus_change);
     return relay;
 }
@@ -561,9 +569,9 @@ void seaside_text_input_destroy(struct seaside_text_input *relay) {
     if (relay->method) {
         detach_method(relay);
     }
-    struct virtual_keyboard *virtual, *next_virtual;
-    wl_list_for_each_safe(virtual, next_virtual, &relay->virtual_keyboards, link) {
-        remove_virtual_keyboard(virtual);
+    struct virtual_keyboard *virtual_kbd, *next_virtual;
+    wl_list_for_each_safe(virtual_kbd, next_virtual, &relay->virtual_keyboards, link) {
+        remove_virtual_keyboard(virtual_kbd);
     }
     struct text_input *binding, *next;
     wl_list_for_each_safe(binding, next, &relay->inputs, link) {
@@ -576,14 +584,14 @@ void seaside_text_input_destroy(struct seaside_text_input *relay) {
     remove_listener(&relay->method_manager_destroy);
     remove_listener(&relay->new_virtual_keyboard);
     remove_listener(&relay->virtual_manager_destroy);
-    free(relay);
+    delete relay;
 }
 
 static struct wlr_input_method_keyboard_grab_v2 *active_grab(struct seaside_text_input *relay,
                                                              struct wlr_keyboard *keyboard) {
     if (!relay->active || !relay->method || !relay->method->keyboard_grab ||
         wlr_seat_keyboard_has_grab(relay->seat)) {
-        return NULL;
+        return nullptr;
     }
     struct wlr_input_method_keyboard_grab_v2 *grab = relay->method->keyboard_grab;
     wlr_input_method_keyboard_grab_v2_set_keyboard(grab, keyboard);
@@ -603,7 +611,7 @@ bool seaside_text_input_key(struct seaside_text_input *relay, struct wlr_keyboar
             return false;
         }
         struct wlr_input_method_keyboard_grab_v2 *grab =
-            relay->method ? relay->method->keyboard_grab : NULL;
+            relay->method ? relay->method->keyboard_grab : nullptr;
         if (grab && pressed == relay->grab_generation) {
             wlr_input_method_keyboard_grab_v2_send_key(grab, event->time_msec, event->keycode,
                                                        event->state);
@@ -616,13 +624,13 @@ bool seaside_text_input_key(struct seaside_text_input *relay, struct wlr_keyboar
         wlr_input_method_keyboard_grab_v2_send_key(grab, event->time_msec, event->keycode,
                                                    event->state);
     }
-    return grab != NULL;
+    return grab != nullptr;
 }
 
 bool seaside_text_input_modifiers(struct seaside_text_input *relay, struct wlr_keyboard *keyboard) {
-    struct wlr_input_method_keyboard_grab_v2 *grab = relay ? active_grab(relay, keyboard) : NULL;
+    struct wlr_input_method_keyboard_grab_v2 *grab = relay ? active_grab(relay, keyboard) : nullptr;
     if (grab) {
         wlr_input_method_keyboard_grab_v2_send_modifiers(grab, &keyboard->modifiers);
     }
-    return grab != NULL;
+    return grab != nullptr;
 }

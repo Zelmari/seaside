@@ -1,5 +1,5 @@
 #define _GNU_SOURCE
-#include "tty_input.h"
+#include "tty_input.hpp"
 
 #include "cursor-shape-v1-client-protocol.h"
 #include "pointer-constraints-client-protocol.h"

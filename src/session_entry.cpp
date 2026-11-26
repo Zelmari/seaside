@@ -13,8 +13,8 @@
 #include "session_services.hpp"
 #include "session_systemd.hpp"
 #include "trace.hpp"
-#include "tty_drm.h"
-#include "tty_input.h"
+#include "tty_drm.hpp"
+#include "tty_input.hpp"
 #include "wlroots_bridge.hpp"
 
 #include <algorithm>

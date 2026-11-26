@@ -1,7 +1,7 @@
 #ifndef SEASIDE_TEXT_INPUT_H
 #define SEASIDE_TEXT_INPUT_H
 
-#include "tty_input.h"
+#include "tty_input.hpp"
 
 struct wlr_keyboard;
 struct wlr_keyboard_key_event;

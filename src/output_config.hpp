@@ -3,7 +3,7 @@
 
 #include "config.hpp"
 #include "desktop.hpp"
-#include "tty_drm.h"
+#include "tty_drm.hpp"
 
 namespace seaside {
 

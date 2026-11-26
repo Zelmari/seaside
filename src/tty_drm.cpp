@@ -1,15 +1,17 @@
-#define _POSIX_C_SOURCE 200809L
 
-#include "tty_drm.h"
+#include "tty_drm.hpp"
 #include "cursor_layout.hpp"
+#include "wlr_compat.hpp"
 
+#include <atomic>
 #include <drm_fourcc.h>
 #include <errno.h>
 #include <inttypes.h>
 #include <limits.h>
 #include <linux/vt.h>
 #include <math.h>
-#include <stdatomic.h>
+#include <memory>
+#include <new>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,8 +19,12 @@
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
 #include <time.h>
+#include <type_traits>
 #include <unistd.h>
+#include <vector>
 #include <wayland-server-core.h>
+
+extern "C" {
 #include <wlr/backend/drm.h>
 #include <wlr/backend/libinput.h>
 #include <wlr/backend/multi.h>
@@ -33,6 +39,7 @@
 #include <wlr/util/log.h>
 #include <wlr/util/transform.h>
 #include <wlr/xcursor.h>
+}
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 
@@ -73,6 +80,7 @@ struct seaside_tty_drm {
     bool cursor_position_set;
     bool fixture_mode;
 };
+static_assert(std::is_standard_layout_v<seaside_tty_drm>);
 
 struct tty_output {
     struct seaside_tty_drm *owner;
@@ -105,57 +113,62 @@ struct tty_output {
     int presented_x;
     int presented_y;
 };
+static_assert(std::is_standard_layout_v<tty_output>);
 
 struct cursor_buffer {
     struct wlr_buffer base;
-    uint32_t pixels[];
+    std::vector<uint32_t> pixels;
 };
+static_assert(std::is_standard_layout_v<cursor_buffer>);
 
-static void destroy_cursor_buffer(struct wlr_buffer *base) {
+static void destroy_cursor_buffer(struct wlr_buffer *base) noexcept {
     struct cursor_buffer *buffer = wl_container_of(base, buffer, base);
     wlr_buffer_finish(base);
-    free(buffer);
+    delete buffer;
 }
 
 static bool read_cursor_buffer(struct wlr_buffer *base, uint32_t flags, void **data,
-                               uint32_t *format, size_t *stride) {
+                               uint32_t *format, size_t *stride) noexcept {
     struct cursor_buffer *buffer = wl_container_of(base, buffer, base);
     if (flags != WLR_BUFFER_DATA_PTR_ACCESS_READ) {
         return false;
     }
-    *data = buffer->pixels;
+    *data = buffer->pixels.data();
     *format = DRM_FORMAT_ARGB8888;
     *stride = (size_t)base->width * sizeof(buffer->pixels[0]);
     return true;
 }
 
-static void end_cursor_buffer_access(struct wlr_buffer *base) {
+static void end_cursor_buffer_access(struct wlr_buffer *base) noexcept {
     (void)base;
 }
 
 static const struct wlr_buffer_impl cursor_buffer_impl = {
     .destroy = destroy_cursor_buffer,
+    .get_dmabuf = nullptr,
+    .get_shm = nullptr,
     .begin_data_ptr_access = read_cursor_buffer,
     .end_data_ptr_access = end_cursor_buffer_access,
 };
 
-static struct cursor_buffer *new_cursor_buffer(int width, int height) {
+static struct cursor_buffer *new_cursor_buffer(int width, int height) noexcept {
     if (width <= 0 || height <= 0 || width > MAX_CURSOR_IMAGE || height > MAX_CURSOR_IMAGE) {
-        return NULL;
+        return nullptr;
     }
-    struct cursor_buffer *buffer =
-        calloc(1, sizeof(*buffer) + (size_t)width * height * sizeof(buffer->pixels[0]));
-    if (!buffer) {
-        return NULL;
+    try {
+        auto buffer = std::make_unique<cursor_buffer>();
+        buffer->pixels.resize(static_cast<size_t>(width) * static_cast<size_t>(height));
+        wlr_buffer_init(&buffer->base, &cursor_buffer_impl, width, height);
+        return buffer.release();
+    } catch (...) {
+        return nullptr;
     }
-    wlr_buffer_init(&buffer->base, &cursor_buffer_impl, width, height);
-    return buffer;
 }
 
 static struct wlr_buffer *make_cursor_buffer(bool visible, bool fixture) {
     struct cursor_buffer *buffer = new_cursor_buffer(CURSOR_SIZE, CURSOR_SIZE);
     if (!buffer) {
-        return NULL;
+        return nullptr;
     }
     if (visible && fixture) {
         /* Keep the qualification fixture independent of the desktop artwork. */
@@ -190,7 +203,7 @@ static struct cursor_buffer *copy_cursor_surface(struct wlr_surface *surface) {
     if (!texture || width <= 0 || height <= 0 || width > MAX_CURSOR_IMAGE ||
         height > MAX_CURSOR_IMAGE || texture->width == 0 || texture->height == 0 ||
         texture->width > MAX_CLIENT_CURSOR_TEXTURE || texture->height > MAX_CLIENT_CURSOR_TEXTURE) {
-        return NULL;
+        return nullptr;
     }
     struct wlr_linux_drm_syncobj_surface_v1_state *sync =
         wlr_linux_drm_syncobj_v1_get_surface_state(surface);
@@ -199,7 +212,7 @@ static struct cursor_buffer *copy_cursor_surface(struct wlr_surface *surface) {
         if (!wlr_drm_syncobj_timeline_check(sync->acquire_timeline, sync->acquire_point, 0,
                                             &ready) ||
             !ready) {
-            return NULL;
+            return nullptr;
         }
     }
     uint32_t pixels[MAX_CLIENT_CURSOR_TEXTURE * MAX_CLIENT_CURSOR_TEXTURE];
@@ -208,23 +221,23 @@ static struct cursor_buffer *copy_cursor_surface(struct wlr_surface *surface) {
         format != DRM_FORMAT_XRGB8888 && format != DRM_FORMAT_XBGR8888) {
         format = DRM_FORMAT_ARGB8888;
     }
-    if (!wlr_texture_read_pixels(texture, &(struct wlr_texture_read_pixels_options){
-                                              .data = pixels,
-                                              .format = format,
-                                              .stride = texture->width * sizeof(pixels[0]),
-                                          })) {
-        return NULL;
+    wlr_texture_read_pixels_options read_options{};
+    read_options.data = pixels;
+    read_options.format = format;
+    read_options.stride = texture->width * static_cast<uint32_t>(sizeof(pixels[0]));
+    if (!wlr_texture_read_pixels(texture, &read_options)) {
+        return nullptr;
     }
     struct wlr_fbox source;
     wlr_surface_get_buffer_source_box(surface, &source);
     if (!(source.x >= 0 && source.y >= 0 && source.width > 0 && source.height > 0 &&
           source.x + source.width <= texture->width &&
           source.y + source.height <= texture->height)) {
-        return NULL;
+        return nullptr;
     }
     struct cursor_buffer *image = new_cursor_buffer(width, height);
     if (!image) {
-        return NULL;
+        return nullptr;
     }
     const enum wl_output_transform transform =
         wlr_output_transform_invert(surface->current.transform);
@@ -232,7 +245,8 @@ static struct cursor_buffer *copy_cursor_surface(struct wlr_surface *surface) {
     const bool opaque = format == DRM_FORMAT_XRGB8888 || format == DRM_FORMAT_XBGR8888;
     for (int y = 0; y < height; ++y) {
         for (int x = 0; x < width; ++x) {
-            struct wlr_fbox point = {.x = (x + 0.5) / width, .y = (y + 0.5) / height};
+            wlr_fbox point{
+                .x = (x + 0.5) / width, .y = (y + 0.5) / height, .width = 0, .height = 0};
             wlr_fbox_transform(&point, &point, transform, 1, 1);
             const unsigned sx = (unsigned)(source.x + point.x * source.width);
             const unsigned sy = (unsigned)(source.y + point.y * source.height);
@@ -267,13 +281,14 @@ static int64_t monotonic_ms(void) {
     return (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
 }
 
-static atomic_bool drm_seat_paused;
-static atomic_int_fast64_t drm_log_start_ms;
+static std::atomic_bool drm_seat_paused{};
+static std::atomic_int_fast64_t drm_log_start_ms{};
 
-static void log_wlroots(enum wlr_log_importance importance, const char *format, va_list args) {
+static void log_wlroots(enum wlr_log_importance importance, const char *format,
+                        va_list args) noexcept {
     /* wlroots 0.20.2 destroys outputs on seat pause. Its CRTC disable returns
      * before reaching KMS when the seat is inactive, then emits this error. */
-    if (importance == WLR_ERROR && atomic_load_explicit(&drm_seat_paused, memory_order_relaxed) &&
+    if (importance == WLR_ERROR && drm_seat_paused.load(std::memory_order_relaxed) &&
         strcmp(format, "[%s:%d] connector %s: Failed to disable CRTC %" PRIu32) == 0) {
         va_list copy;
         va_copy(copy, args);
@@ -292,15 +307,16 @@ static void log_wlroots(enum wlr_log_importance importance, const char *format, 
     if ((unsigned)importance > (unsigned)wlr_log_get_verbosity()) {
         return;
     }
-    static const struct {
+    static constexpr struct {
         const char *label, *color;
     } levels[] = {
-        [WLR_SILENT] = {"", ""},
-        [WLR_ERROR] = {"[ERROR] ", "\033[1;31m"},
-        [WLR_INFO] = {"[INFO] ", "\033[1;34m"},
-        [WLR_DEBUG] = {"[DEBUG] ", "\033[1;90m"},
+        {"", ""},
+        {"[ERROR] ", "\033[1;31m"},
+        {"[INFO] ", "\033[1;34m"},
+        {"[DEBUG] ", "\033[1;90m"},
     };
-    const int64_t started = atomic_load_explicit(&drm_log_start_ms, memory_order_relaxed);
+    static_assert(WLR_SILENT == 0 && WLR_ERROR == 1 && WLR_INFO == 2 && WLR_DEBUG == 3);
+    const int64_t started = drm_log_start_ms.load(std::memory_order_relaxed);
     const int64_t now = monotonic_ms();
     const int64_t ms = started >= 0 && now >= started ? now - started : 0;
     const bool color = isatty(STDERR_FILENO);
@@ -313,7 +329,7 @@ static void log_wlroots(enum wlr_log_importance importance, const char *format, 
     funlockfile(stderr);
 }
 
-static void on_session_destroy(struct wl_listener *listener, void *data) {
+static void on_session_destroy(struct wl_listener *listener, void *data) noexcept {
     (void)data;
     struct seaside_tty_drm *drm = wl_container_of(listener, drm, session_destroy);
     if (drm->backend) {
@@ -321,16 +337,16 @@ static void on_session_destroy(struct wl_listener *listener, void *data) {
     }
     unlink_listener(&drm->session_destroy);
     unlink_listener(&drm->session_active);
-    drm->session = NULL;
+    drm->session = nullptr;
     drm->evidence.active = false;
-    atomic_store_explicit(&drm_seat_paused, false, memory_order_relaxed);
+    drm_seat_paused.store(false, std::memory_order_relaxed);
 }
 
-static void on_session_active(struct wl_listener *listener, void *data) {
+static void on_session_active(struct wl_listener *listener, void *data) noexcept {
     (void)data;
     struct seaside_tty_drm *drm = wl_container_of(listener, drm, session_active);
     drm->evidence.active = drm->session->active;
-    atomic_store_explicit(&drm_seat_paused, !drm->session->active, memory_order_relaxed);
+    drm_seat_paused.store(!drm->session->active, std::memory_order_relaxed);
     if (!drm->session->active) {
         /* wlroots destroys DRM outputs on VT pause and advertises fresh
          * handles on resume. Reverify the plane on the new presentation. */
@@ -347,12 +363,12 @@ static void on_session_active(struct wl_listener *listener, void *data) {
     }
 }
 
-static void on_backend_destroy(struct wl_listener *listener, void *data) {
+static void on_backend_destroy(struct wl_listener *listener, void *data) noexcept {
     (void)data;
     struct seaside_tty_drm *drm = wl_container_of(listener, drm, backend_destroy);
     unlink_listener(&drm->backend_destroy);
     unlink_listener(&drm->new_output);
-    drm->backend = NULL;
+    drm->backend = nullptr;
 }
 
 static char *output_identity(const struct wlr_output *output);
@@ -376,7 +392,7 @@ static void remove_usable_output(struct tty_output *view) {
     }
     view->usable = false;
     if (drm->pointer_output == view) {
-        drm->pointer_output = NULL;
+        drm->pointer_output = nullptr;
     }
     unlink_listener(&view->commit);
     unlink_listener(&view->present);
@@ -389,10 +405,10 @@ static void destroy_output_view(struct tty_output *view) {
     remove_usable_output(view);
     unlink_listener(&view->destroy);
     wl_list_remove(&view->link);
-    free(view);
+    delete view;
 }
 
-static void on_output_destroy(struct wl_listener *listener, void *data) {
+static void on_output_destroy(struct wl_listener *listener, void *data) noexcept {
     (void)data;
     struct tty_output *view = wl_container_of(listener, view, destroy);
     /* wlroots destroys the cursor after emitting the output destroy event. */
@@ -401,17 +417,17 @@ static void on_output_destroy(struct wl_listener *listener, void *data) {
     destroy_output_view(view);
 }
 
-static void on_output_commit(struct wl_listener *listener, void *data);
-static void on_output_present(struct wl_listener *listener, void *data);
+static void on_output_commit(struct wl_listener *listener, void *data) noexcept;
+static void on_output_present(struct wl_listener *listener, void *data) noexcept;
 
-static void on_new_output(struct wl_listener *listener, void *data) {
+static void on_new_output(struct wl_listener *listener, void *data) noexcept {
     struct seaside_tty_drm *drm = wl_container_of(listener, drm, new_output);
-    struct wlr_output *output = data;
+    auto *output = static_cast<wlr_output *>(data);
     if (drm->evidence.failed || !wlr_output_is_drm(output) || output->non_desktop ||
         wl_list_empty(&output->modes)) {
         return;
     }
-    struct tty_output *view = calloc(1, sizeof(*view));
+    struct tty_output *view = new (std::nothrow) tty_output{};
     if (!view) {
         fail(drm, "could not allocate DRM output state");
         return;
@@ -518,17 +534,17 @@ static void reject_output(struct tty_output *view, const char *reason) {
     /* Remove a possible software cursor before another scene frame. Defer
      * the output commit until outside input and page-flip callbacks. */
     wlr_output_cursor_destroy(view->cursor);
-    view->cursor = NULL;
+    view->cursor = nullptr;
     view->disabled_reason = reason;
     view->rejected = true;
     view->cursor_presented = false;
     view->commit_pending = false;
 }
 
-static void on_output_commit(struct wl_listener *listener, void *data) {
+static void on_output_commit(struct wl_listener *listener, void *data) noexcept {
     struct tty_output *view = wl_container_of(listener, view, commit);
     struct seaside_tty_drm *drm = view->owner;
-    const struct wlr_output_event_commit *event = data;
+    auto *event = static_cast<const wlr_output_event_commit *>(data);
     if (drm->evidence.failed || !drm->evidence.active || view->rejected || view->sleeping ||
         !view->output->enabled || (event->state->committed & WLR_OUTPUT_STATE_BUFFER) == 0) {
         return;
@@ -544,10 +560,10 @@ static void on_output_commit(struct wl_listener *listener, void *data) {
     view->commit_pending = true;
 }
 
-static void on_output_present(struct wl_listener *listener, void *data) {
+static void on_output_present(struct wl_listener *listener, void *data) noexcept {
     struct tty_output *view = wl_container_of(listener, view, present);
     struct seaside_tty_drm *drm = view->owner;
-    const struct wlr_output_event_present *event = data;
+    auto *event = static_cast<const wlr_output_event_present *>(data);
     if (!view->commit_pending || event->commit_seq != view->commit_seq) {
         return;
     }
@@ -617,7 +633,7 @@ static bool primary_card_path(const char *path) {
 
 bool seaside_tty_active_console(void) {
     char path[64];
-    struct vt_stat active = {0};
+    struct vt_stat active = {};
     static const char prefix[] = "/dev/tty";
     if (ttyname_r(STDIN_FILENO, path, sizeof(path)) != 0 ||
         strncmp(path, prefix, sizeof(prefix) - 1) != 0) {
@@ -628,7 +644,7 @@ bool seaside_tty_active_console(void) {
         return false;
     }
     errno = 0;
-    const unsigned long vt = strtoul(digits, NULL, 10);
+    const unsigned long vt = strtoul(digits, nullptr, 10);
     return errno == 0 && vt > 0 && tcgetpgrp(STDIN_FILENO) == getpgrp() &&
            ioctl(STDIN_FILENO, VT_GETSTATE, &active) == 0 && vt == active.v_active;
 }
@@ -670,7 +686,7 @@ static struct wlr_device *find_primary_device(struct wlr_session *session, const
     struct wlr_device *devices[MAX_KMS_CARDS];
     const ssize_t count = wlr_session_find_gpus(session, MAX_KMS_CARDS, devices);
     if (count <= 0) {
-        return NULL;
+        return nullptr;
     }
     for (ssize_t i = 1; i < count; ++i) {
         wlr_session_close_file(session, devices[i]);
@@ -682,18 +698,18 @@ struct seaside_tty_drm *seaside_tty_drm_create(struct wl_display *display, const
                                                struct wlr_backend **backend,
                                                struct wlr_renderer **renderer) {
     if (!display || !backend || !renderer) {
-        return NULL;
+        return nullptr;
     }
-    *backend = NULL;
-    *renderer = NULL;
+    *backend = nullptr;
+    *renderer = nullptr;
     if (device_path && !primary_card_path(device_path)) {
         fprintf(stderr, "TTY DRM: missing or invalid primary DRM node: %s\n", device_path);
-        return NULL;
+        return nullptr;
     }
-    struct seaside_tty_drm *drm = calloc(1, sizeof(*drm));
+    struct seaside_tty_drm *drm = new (std::nothrow) seaside_tty_drm{};
     if (!drm) {
         fprintf(stderr, "TTY DRM: failed to allocate device owner\n");
-        return NULL;
+        return nullptr;
     }
     drm->display = display;
     drm->session_destroy.notify = on_session_destroy;
@@ -707,27 +723,35 @@ struct seaside_tty_drm *seaside_tty_drm_create(struct wl_display *display, const
     wl_list_init(&drm->backend_destroy.link);
     wl_list_init(&drm->new_output.link);
 
-    atomic_store_explicit(&drm_log_start_ms, monotonic_ms(), memory_order_relaxed);
+    const auto cleanup = [](seaside_tty_drm *owner) noexcept {
+        // A successful DRM backend owns its device. Session teardown closes
+        // any device left over when creating the backend fails.
+        wlr_backend_destroy(owner->backend);
+        seaside_tty_drm_destroy(owner);
+    };
+    std::unique_ptr<seaside_tty_drm, decltype(cleanup)> owner(drm, cleanup);
+
+    drm_log_start_ms.store(monotonic_ms(), std::memory_order_relaxed);
     wlr_log_init(WLR_INFO, log_wlroots);
     struct wl_event_loop *loop = wl_display_get_event_loop(display);
     drm->session = wlr_session_create(loop);
     if (!drm->session) {
         fail(drm, "libseat could not acquire the console session");
-        goto error;
+        return nullptr;
     }
     wl_signal_add(&drm->session->events.destroy, &drm->session_destroy);
     /* Observe the seat before the DRM backend's VT teardown listener. */
     wl_signal_add(&drm->session->events.active, &drm->session_active);
     if (!wait_for_active_seat(drm, loop)) {
         fail(drm, "console seat did not become active");
-        goto error;
+        return nullptr;
     }
     drm->evidence.active = true;
 
     drm->backend = wlr_multi_backend_create(loop);
     if (!drm->backend) {
         fail(drm, "could not create the combined DRM and libinput backend");
-        goto error;
+        return nullptr;
     }
     wl_signal_add(&drm->backend->events.destroy, &drm->backend_destroy);
     wl_signal_add(&drm->backend->events.new_output, &drm->new_output);
@@ -735,30 +759,23 @@ struct seaside_tty_drm *seaside_tty_drm_create(struct wl_display *display, const
     struct wlr_device *device = find_primary_device(drm->session, device_path);
     if (!device || drmGetNodeTypeFromFd(device->fd) != DRM_NODE_PRIMARY) {
         fail(drm, "libseat could not open the selected primary DRM node");
-        goto error;
+        return nullptr;
     }
-    if (!add_backend(drm->backend, wlr_drm_backend_create(drm->session, device, NULL))) {
+    if (!add_backend(drm->backend, wlr_drm_backend_create(drm->session, device, nullptr))) {
         fail(drm, "could not create the DRM backend for the selected device");
-        goto error;
+        return nullptr;
     }
     if (!add_backend(drm->backend, wlr_libinput_backend_create(drm->session))) {
         fail(drm, "could not create the libinput backend for the active seat");
-        goto error;
+        return nullptr;
     }
     *renderer = wlr_renderer_autocreate(drm->backend);
     if (!*renderer) {
         fail(drm, "wlroots could not select a DRM renderer");
-        goto error;
+        return nullptr;
     }
     *backend = drm->backend;
-    return drm;
-
-error:
-    /* wlroots transfers an opened device to its DRM backend on success.
-     * Session teardown closes any device left over by an early create error. */
-    wlr_backend_destroy(drm->backend);
-    seaside_tty_drm_destroy(drm);
-    return NULL;
+    return owner.release();
 }
 
 void seaside_tty_drm_destroy(struct seaside_tty_drm *drm) {
@@ -767,7 +784,7 @@ void seaside_tty_drm_destroy(struct seaside_tty_drm *drm) {
     }
     unlink_listener(&drm->backend_destroy);
     unlink_listener(&drm->new_output);
-    drm->callbacks = (struct seaside_tty_drm_output_callbacks){0};
+    drm->callbacks = seaside_tty_drm_output_callbacks{};
     struct wl_list *link = drm->outputs.next;
     while (link != &drm->outputs) {
         struct tty_output *view = wl_container_of(link, view, link);
@@ -784,17 +801,17 @@ void seaside_tty_drm_destroy(struct seaside_tty_drm *drm) {
     unlink_listener(&drm->session_destroy);
     unlink_listener(&drm->session_active);
     if (drm->session) {
-        atomic_store_explicit(&drm_seat_paused, false, memory_order_relaxed);
+        drm_seat_paused.store(false, std::memory_order_relaxed);
     }
     if (!drm->backend) {
         wlr_session_destroy(drm->session);
     }
-    free(drm);
+    delete drm;
 }
 
 static struct wlr_output_mode *initial_mode(struct wlr_output *output) {
-    struct seaside_drm_output_settings settings = {0};
-    return seaside_tty_drm_select_mode(output, &settings) ? settings.mode : NULL;
+    struct seaside_drm_output_settings settings = {};
+    return seaside_tty_drm_select_mode(output, &settings) ? settings.mode : nullptr;
 }
 
 static bool set_output_enabled(struct wlr_output *output, bool enabled,
@@ -814,8 +831,8 @@ void seaside_tty_drm_set_output_callbacks(struct seaside_tty_drm *drm,
                                           const struct seaside_tty_drm_output_callbacks *callbacks,
                                           void *data) {
     if (drm) {
-        drm->callbacks = callbacks ? *callbacks : (struct seaside_tty_drm_output_callbacks){0};
-        drm->callback_data = callbacks ? data : NULL;
+        drm->callbacks = callbacks ? *callbacks : seaside_tty_drm_output_callbacks{};
+        drm->callback_data = callbacks ? data : nullptr;
     }
 }
 
@@ -825,7 +842,7 @@ struct mode_rank {
 };
 
 static struct mode_rank maximum_mode_rank(const struct wlr_output *output) {
-    struct mode_rank rank = {0};
+    struct mode_rank rank = {};
     struct wlr_output_mode *mode;
     wl_list_for_each(mode, &output->modes, link) {
         if (mode->refresh > rank.refresh) {
@@ -842,7 +859,7 @@ static struct mode_rank maximum_mode_rank(const struct wlr_output *output) {
 struct seaside_drm_output_description seaside_tty_drm_describe_output(struct wlr_output *output) {
     const struct wlr_output_mode *preferred = wlr_output_preferred_mode(output);
     const struct mode_rank rank = maximum_mode_rank(output);
-    return (struct seaside_drm_output_description){
+    return seaside_drm_output_description{
         .make = output->make,
         .model = output->model,
         .preferred_width = preferred ? preferred->width : 0,
@@ -880,7 +897,7 @@ static unsigned usable_output_count(const struct seaside_tty_drm *drm) {
 }
 
 static struct tty_output *next_pending(struct seaside_tty_drm *drm, struct wlr_output *preferred) {
-    struct tty_output *next = NULL;
+    struct tty_output *next = nullptr;
     struct tty_output *view;
     wl_list_for_each(view, &drm->outputs, link) {
         if (!view->pending && !view->parked) {
@@ -927,11 +944,11 @@ static void disable_output(struct tty_output *view) {
     remove_usable_output(view);
     view->rejected = false;
     wlr_output_cursor_destroy(view->cursor);
-    view->cursor = NULL;
+    view->cursor = nullptr;
     if (view->output->global) {
         wlr_output_destroy_global(view->output);
     }
-    if (view->output->enabled && !set_output_enabled(view->output, false, NULL)) {
+    if (view->output->enabled && !set_output_enabled(view->output, false, nullptr)) {
         fprintf(stderr, "TTY DRM: could not disable output %s\n", view->output->name);
     }
     observe_output(view, true);
@@ -960,7 +977,7 @@ static struct cursor_buffer *scale_cursor_buffer(struct wlr_buffer *buffer, doub
     const int height = (int)ceil(buffer->height * scale);
     struct cursor_buffer *image = new_cursor_buffer(width, height);
     if (!image) {
-        return NULL;
+        return nullptr;
     }
     void *data;
     uint32_t format;
@@ -968,12 +985,12 @@ static struct cursor_buffer *scale_cursor_buffer(struct wlr_buffer *buffer, doub
     if (!wlr_buffer_begin_data_ptr_access(buffer, WLR_BUFFER_DATA_PTR_ACCESS_READ, &data, &format,
                                           &stride)) {
         wlr_buffer_drop(&image->base);
-        return NULL;
+        return nullptr;
     }
     if (format != DRM_FORMAT_ARGB8888) {
         wlr_buffer_end_data_ptr_access(buffer);
         wlr_buffer_drop(&image->base);
-        return NULL;
+        return nullptr;
     }
     for (int y = 0; y < height; ++y) {
         const unsigned sy = (unsigned)(y * buffer->height / height);
@@ -1029,15 +1046,15 @@ static bool load_cursor_image(struct tty_output *view, bool visible) {
 
 static char *output_identity(const struct wlr_output *output) {
     if (!output->serial || !*output->serial) {
-        return NULL;
+        return nullptr;
     }
     const char *make = output->make ? output->make : "";
     const char *model = output->model ? output->model : "";
-    int length = snprintf(NULL, 0, "%s %s %s", make, model, output->serial);
+    int length = snprintf(nullptr, 0, "%s %s %s", make, model, output->serial);
     if (length < 0) {
-        return NULL;
+        return nullptr;
     }
-    char *identity = malloc((size_t)length + 1);
+    char *identity = static_cast<char *>(malloc(static_cast<size_t>(length) + 1));
     if (identity) {
         snprintf(identity, (size_t)length + 1, "%s %s %s", make, model, output->serial);
     }
@@ -1081,7 +1098,7 @@ static bool enable_output(struct tty_output *view, struct wlr_allocator *allocat
         drm->pointer_output = view;
     }
     view->usable = true;
-    view->disabled_reason = NULL;
+    view->disabled_reason = nullptr;
     wl_signal_add(&output->events.commit, &view->commit);
     wl_signal_add(&output->events.present, &view->present);
     if (drm->callbacks.added) {
@@ -1105,12 +1122,12 @@ static bool available(const struct tty_output *view) {
 }
 
 static struct seaside_cursor_box cursor_box(const struct tty_output *view) {
-    return (struct seaside_cursor_box){view->x, view->y, view->width, view->height};
+    return seaside_cursor_box{view->x, view->y, view->width, view->height};
 }
 
 static struct tty_output *nearest_output(const struct seaside_tty_drm *drm, double x, double y,
                                          double *result_x, double *result_y) {
-    struct tty_output *selected = NULL;
+    struct tty_output *selected = nullptr;
     double best_distance = 0;
     struct tty_output *view;
     wl_list_for_each(view, &drm->outputs, link) {
@@ -1118,7 +1135,7 @@ static struct tty_output *nearest_output(const struct seaside_tty_drm *drm, doub
             continue;
         }
         const struct seaside_cursor_point inside =
-            seaside_cursor_clamp(cursor_box(view), (struct seaside_cursor_point){x, y});
+            seaside_cursor_clamp(cursor_box(view), seaside_cursor_point{x, y});
         const double dx = x - inside.x;
         const double dy = y - inside.y;
         const double distance = dx * dx + dy * dy;
@@ -1178,12 +1195,12 @@ static struct tty_output *find_output(struct seaside_tty_drm *drm, struct wlr_ou
             return view;
         }
     }
-    return NULL;
+    return nullptr;
 }
 
 static struct seaside_drm_output_settings current_settings(const struct tty_output *view) {
     const struct wlr_output *output = view->output;
-    return (struct seaside_drm_output_settings){
+    return seaside_drm_output_settings{
         .mode = output->current_mode,
         .width = output->width,
         .height = output->height,
@@ -1203,7 +1220,7 @@ bool seaside_tty_drm_output_status(struct seaside_tty_drm *drm, struct wlr_outpu
         return false;
     }
     const struct seaside_drm_output_settings applied = current_settings(view);
-    *status = (struct seaside_drm_output_status){
+    *status = seaside_drm_output_status{
         .settings = view->sleeping ? view->sleep_settings : applied,
         .last_mode = {applied.width, applied.height, applied.refresh_millihz},
         .logical_width = view->width,
@@ -1229,7 +1246,7 @@ bool seaside_tty_drm_select_mode(struct wlr_output *output,
     }
     const int width = settings->width ? settings->width : preferred->width;
     const int height = settings->height ? settings->height : preferred->height;
-    struct wlr_output_mode *mode, *selected = NULL;
+    struct wlr_output_mode *mode, *selected = nullptr;
     int64_t best_distance = 500; // Half a Hz covers nominal rates from EDID timings.
     wl_list_for_each(mode, &output->modes, link) {
         if (mode->width != width || mode->height != height) {
@@ -1265,7 +1282,7 @@ static bool configure_output(struct wlr_output *output,
     if (output->scale != settings->scale) {
         wlr_output_state_set_scale(&state, settings->scale);
     }
-    const enum wl_output_transform transform = settings->rotation / 90;
+    const auto transform = static_cast<wl_output_transform>(settings->rotation / 90);
     if (output->transform != transform) {
         wlr_output_state_set_transform(&state, transform);
     }
@@ -1362,7 +1379,7 @@ bool seaside_tty_drm_set_output_power(struct seaside_tty_drm *drm, struct wlr_ou
         wlr_output_schedule_frame(output);
     } else {
         view->sleep_settings = current_settings(view);
-        if (!set_output_enabled(output, false, NULL)) {
+        if (!set_output_enabled(output, false, nullptr)) {
             fprintf(stderr, "TTY DRM: %s rejected display sleep\n", output->name);
             return false;
         }
@@ -1372,7 +1389,7 @@ bool seaside_tty_drm_set_output_power(struct seaside_tty_drm *drm, struct wlr_ou
         view->cursor_plane_id = 0;
         view->commit_pending = false;
         wlr_output_cursor_destroy(view->cursor);
-        view->cursor = NULL;
+        view->cursor = nullptr;
     }
     fprintf(stderr, "TTY DRM: output %s display power %s\n", output->name, on ? "on" : "off");
     return true;
@@ -1460,20 +1477,20 @@ struct wlr_output *seaside_tty_drm_enable(struct seaside_tty_drm *drm,
                                           struct wlr_renderer *renderer) {
     if (!drm || !drm->evidence.active || drm->evidence.failed || drm->pointer_output ||
         !allocator || !renderer) {
-        return NULL;
+        return nullptr;
     }
     drm->fixture_mode = true;
-    struct tty_output *view = next_pending(drm, NULL);
+    struct tty_output *view = next_pending(drm, nullptr);
     if (!view) {
         fail(drm, "DRM backend announced no connected desktop output with modes");
-        return NULL;
+        return nullptr;
     }
     if (!prepare_cursor_buffers(drm)) {
-        return NULL;
+        return nullptr;
     }
     if (!enable_output(view, allocator, renderer)) {
         disable_output(view);
-        return NULL;
+        return nullptr;
     }
     return view->output;
 }
@@ -1490,7 +1507,7 @@ bool seaside_tty_drm_cursor_position(const struct seaside_tty_drm *drm, double *
 struct wlr_output *seaside_tty_drm_pointer_output(const struct seaside_tty_drm *drm) {
     return drm && drm->evidence.active && available(drm->pointer_output)
                ? drm->pointer_output->output
-               : NULL;
+               : nullptr;
 }
 
 bool seaside_tty_drm_absolute_delta(const struct seaside_tty_drm *drm, double x, double y,
@@ -1586,8 +1603,8 @@ static struct cursor_buffer *make_resize_cursor(const char *shape) {
     static const char *const names[][2] = {
         {"ew-resize", "col-resize"},
         {"ns-resize", "row-resize"},
-        {"nwse-resize", NULL},
-        {"nesw-resize", NULL},
+        {"nwse-resize", nullptr},
+        {"nesw-resize", nullptr},
     };
     for (int direction = 0; direction < 4; ++direction) {
         if (strcmp(shape, names[direction][0]) != 0 &&
@@ -1596,7 +1613,7 @@ static struct cursor_buffer *make_resize_cursor(const char *shape) {
         }
         struct cursor_buffer *buffer = new_cursor_buffer(CURSOR_SIZE, CURSOR_SIZE);
         if (!buffer) {
-            return NULL;
+            return nullptr;
         }
         // Keep the common bidirectional resize shapes available even when
         // the installed Xcursor theme provides only the legacy side shapes.
@@ -1616,7 +1633,7 @@ static struct cursor_buffer *make_resize_cursor(const char *shape) {
         }
         return buffer;
     }
-    return NULL;
+    return nullptr;
 }
 
 bool seaside_tty_drm_set_cursor_shape(struct seaside_tty_drm *drm, const char *shape) {
@@ -1625,10 +1642,10 @@ bool seaside_tty_drm_set_cursor_shape(struct seaside_tty_drm *drm, const char *s
     }
     if (shape && strcmp(shape, "default") != 0) {
         if (!drm->cursor_theme) {
-            drm->cursor_theme = wlr_xcursor_theme_load(NULL, CURSOR_SIZE);
+            drm->cursor_theme = wlr_xcursor_theme_load(nullptr, CURSOR_SIZE);
         }
         struct wlr_xcursor *cursor =
-            drm->cursor_theme ? wlr_xcursor_theme_get_cursor(drm->cursor_theme, shape) : NULL;
+            drm->cursor_theme ? wlr_xcursor_theme_get_cursor(drm->cursor_theme, shape) : nullptr;
         if (cursor && cursor->image_count > 0) {
             struct wlr_xcursor_image *image = cursor->images[0];
             if (image->width <= MAX_CURSOR_IMAGE && image->height <= MAX_CURSOR_IMAGE &&
@@ -1646,7 +1663,7 @@ bool seaside_tty_drm_set_cursor_shape(struct seaside_tty_drm *drm, const char *s
             return displayed;
         }
     }
-    return set_cursor_image(drm, NULL, 0, 0, false);
+    return set_cursor_image(drm, nullptr, 0, 0, false);
 }
 
 bool seaside_tty_drm_set_cursor_surface(struct seaside_tty_drm *drm, struct wlr_surface *surface,
@@ -1655,15 +1672,15 @@ bool seaside_tty_drm_set_cursor_surface(struct seaside_tty_drm *drm, struct wlr_
         return false;
     }
     if (!surface || !wlr_surface_has_buffer(surface)) {
-        return set_cursor_image(drm, NULL, 0, 0, true);
+        return set_cursor_image(drm, nullptr, 0, 0, true);
     }
     if (hotspot_x < -MAX_CURSOR_IMAGE || hotspot_x > MAX_CURSOR_IMAGE ||
         hotspot_y < -MAX_CURSOR_IMAGE || hotspot_y > MAX_CURSOR_IMAGE) {
-        return seaside_tty_drm_set_cursor_shape(drm, NULL);
+        return seaside_tty_drm_set_cursor_shape(drm, nullptr);
     }
     struct cursor_buffer *image = copy_cursor_surface(surface);
     if (!image) {
-        return seaside_tty_drm_set_cursor_shape(drm, NULL);
+        return seaside_tty_drm_set_cursor_shape(drm, nullptr);
     }
     const bool displayed = set_cursor_image(drm, &image->base, hotspot_x, hotspot_y, false);
     wlr_buffer_drop(&image->base);
@@ -1684,7 +1701,7 @@ static struct seaside_cursor_point route_relative_cursor(const struct seaside_tt
             return seaside_cursor_route_relative(current, origin, target, &destination);
         }
     }
-    return seaside_cursor_route_relative(current, origin, target, NULL);
+    return seaside_cursor_route_relative(current, origin, target, nullptr);
 }
 
 bool seaside_tty_drm_move(struct seaside_tty_drm *drm, enum seaside_pointer_motion kind, double x,
@@ -1710,7 +1727,7 @@ bool seaside_tty_drm_change_vt(struct seaside_tty_drm *drm, unsigned vt) {
 
 struct seaside_tty_drm_observation seaside_tty_drm_observation(const struct seaside_tty_drm *drm) {
     if (!drm) {
-        return (struct seaside_tty_drm_observation){0};
+        return {};
     }
     struct seaside_tty_drm_observation result = drm->evidence;
     const struct tty_output *pointer = drm->pointer_output;

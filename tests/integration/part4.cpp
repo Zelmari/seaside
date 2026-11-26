@@ -3,7 +3,7 @@
 #include "part3_bridge.h"
 #include "server.hpp"
 #include "test_directory.hpp"
-#include "tty_input.h"
+#include "tty_input.hpp"
 #include "wlr_layer_shell_client_compat.hpp"
 #include "wlroots_bridge.hpp"
 #include "xdg-activation-v1-client-protocol.h"

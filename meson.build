@@ -279,9 +279,9 @@ test('part7-selected-capture', capture_test, args: ['part7'], suite: ['integrati
 )
 
 tty_dependencies = [wlroots, wayland_server, pixman, libdrm, libinput, xkbcommon, glib,
-                    meson.get_compiler('c').find_library('m')]
+                    cpp.find_library('m')]
 tty_foundation = static_library(
-  'seaside-tty-foundation', ['src/tty_drm.c', 'src/tty_input.c', 'src/text_input.c', 'src/cursor_layout.cpp'],
+  'seaside-tty-foundation', ['src/tty_drm.cpp', 'src/tty_input.cpp', 'src/text_input.cpp', 'src/cursor_layout.cpp'],
   include_directories: include_directories('src'),
   dependencies: tty_dependencies, install: false,
 )
@@ -291,7 +291,7 @@ tty_foundation = static_library(
 foreach level : ['2', '3']
   if get_option('optimization') != level
     static_library(
-      'seaside-tty-compile-o' + level, 'src/tty_drm.c',
+      'seaside-tty-compile-o' + level, 'src/tty_drm.cpp',
       dependencies: tty_dependencies, override_options: ['optimization=' + level],
       install: false,
     )

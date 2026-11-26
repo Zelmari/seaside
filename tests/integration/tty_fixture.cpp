@@ -1,7 +1,7 @@
 #include "scene.hpp"
 #include "server.hpp"
-#include "tty_drm.h"
-#include "tty_input.h"
+#include "tty_drm.hpp"
+#include "tty_input.hpp"
 #include "tty_terminal.hpp"
 #include "wlroots_bridge.hpp"
 
