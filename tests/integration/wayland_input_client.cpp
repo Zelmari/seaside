@@ -15,6 +15,7 @@
 
 struct client {
     struct wl_display *display;
+    struct wl_registry *registry;
     struct wl_compositor *compositor;
     struct wl_shm *shm;
     struct wl_seat *seat;
@@ -26,8 +27,11 @@ struct client {
     struct zwp_virtual_keyboard_manager_v1 *virtual_manager;
     struct zwp_text_input_v3 *text, *secondary;
     struct zwp_input_method_v2 *method;
+    struct zwp_input_popup_surface_v2 *method_popup;
+    struct zwp_input_method_keyboard_grab_v2 *grab;
     struct zwp_virtual_keyboard_v1 *forwarder;
     struct wl_surface *surface, *popup_surface;
+    struct xdg_surface *xdg;
     struct xdg_toplevel *toplevel;
     struct wl_buffer *content, *icon, *popup;
     unsigned enters, leaves, activations, deactivations, method_serial, text_serial;
@@ -396,9 +400,10 @@ static const struct wl_registry_listener registry_listener = {
 };
 
 static bool setup(struct client *client) noexcept {
-    struct wl_registry *registry = wl_display_get_registry(client->display);
-    wl_registry_add_listener(registry, &registry_listener, client);
-    if (wl_display_roundtrip(client->display) < 0 || !client->compositor || !client->shell ||
+    client->registry = wl_display_get_registry(client->display);
+    if (!client->registry ||
+        wl_registry_add_listener(client->registry, &registry_listener, client) < 0 ||
+        wl_display_roundtrip(client->display) < 0 || !client->compositor || !client->shell ||
         !client->seat || !client->text_manager || !client->method_manager || !client->icons ||
         !client->virtual_manager || !client->shm) {
         return false;
@@ -419,9 +424,9 @@ static bool setup(struct client *client) noexcept {
     client->forwarder = zwp_virtual_keyboard_manager_v1_create_virtual_keyboard(
         client->virtual_manager, client->seat);
     client->surface = wl_compositor_create_surface(client->compositor);
-    struct xdg_surface *xdg_surface = xdg_wm_base_get_xdg_surface(client->shell, client->surface);
-    xdg_surface_add_listener(xdg_surface, &surface_listener, client);
-    client->toplevel = xdg_surface_get_toplevel(xdg_surface);
+    client->xdg = xdg_wm_base_get_xdg_surface(client->shell, client->surface);
+    xdg_surface_add_listener(client->xdg, &surface_listener, client);
+    client->toplevel = xdg_surface_get_toplevel(client->xdg);
     xdg_toplevel_add_listener(client->toplevel, &toplevel_listener, client);
     xdg_toplevel_set_app_id(client->toplevel, "seaside-wayland-input-test");
     xdg_toplevel_set_title(client->toplevel, "Seaside Wayland input test");
@@ -465,15 +470,14 @@ static bool run(struct client *client) noexcept {
     }
 
     client->popup_surface = wl_compositor_create_surface(client->compositor);
-    struct zwp_input_popup_surface_v2 *popup =
+    client->method_popup =
         zwp_input_method_v2_get_input_popup_surface(client->method, client->popup_surface);
-    zwp_input_popup_surface_v2_add_listener(popup, &popup_listener, client);
+    zwp_input_popup_surface_v2_add_listener(client->method_popup, &popup_listener, client);
     wl_surface_attach(client->popup_surface, client->popup, 0, 0);
     wl_surface_damage(client->popup_surface, 0, 0, 60, 24);
     wl_surface_commit(client->popup_surface);
-    struct zwp_input_method_keyboard_grab_v2 *grab =
-        zwp_input_method_v2_grab_keyboard(client->method);
-    zwp_input_method_keyboard_grab_v2_add_listener(grab, &grab_listener, client);
+    client->grab = zwp_input_method_v2_grab_keyboard(client->method);
+    zwp_input_method_keyboard_grab_v2_add_listener(client->grab, &grab_listener, client);
     zwp_input_method_v2_commit_string(client->method, "stale");
     zwp_input_method_v2_commit(client->method, client->method_serial - 1);
     zwp_input_method_v2_set_preedit_string(client->method, "é", 2, 2);
@@ -532,6 +536,7 @@ static bool verify_focus(struct client *client) noexcept {
     }
     client->cleared_preedit = false;
     zwp_input_method_v2_destroy(client->method);
+    client->method = nullptr;
     if (!roundtrip(client) || !client->cleared_preedit) {
         fputs("input method disconnect did not clear composition\n", stderr);
         return false;
@@ -540,6 +545,42 @@ static bool verify_focus(struct client *client) noexcept {
         zwp_input_method_manager_v2_get_input_method(client->method_manager, client->seat);
     zwp_input_method_v2_add_listener(client->method, &method_listener, client);
     return roundtrip(client) && client->activations == 4 && !client->unavailable;
+}
+
+static void disconnect(struct client &client) noexcept {
+    // Free client-side proxies while leaving server resources to socket teardown.
+    // The input method's first popup and grab may already be destroyed on the server.
+    struct wl_proxy *proxies[] = {
+        reinterpret_cast<wl_proxy *>(client.grab),
+        reinterpret_cast<wl_proxy *>(client.method_popup),
+        reinterpret_cast<wl_proxy *>(client.popup_surface),
+        reinterpret_cast<wl_proxy *>(client.method),
+        reinterpret_cast<wl_proxy *>(client.forwarder),
+        reinterpret_cast<wl_proxy *>(client.secondary),
+        reinterpret_cast<wl_proxy *>(client.text),
+        reinterpret_cast<wl_proxy *>(client.toplevel),
+        reinterpret_cast<wl_proxy *>(client.xdg),
+        reinterpret_cast<wl_proxy *>(client.surface),
+        reinterpret_cast<wl_proxy *>(client.popup),
+        reinterpret_cast<wl_proxy *>(client.icon),
+        reinterpret_cast<wl_proxy *>(client.content),
+        reinterpret_cast<wl_proxy *>(client.keyboard),
+        reinterpret_cast<wl_proxy *>(client.virtual_manager),
+        reinterpret_cast<wl_proxy *>(client.method_manager),
+        reinterpret_cast<wl_proxy *>(client.text_manager),
+        reinterpret_cast<wl_proxy *>(client.icons),
+        reinterpret_cast<wl_proxy *>(client.shell),
+        reinterpret_cast<wl_proxy *>(client.seat),
+        reinterpret_cast<wl_proxy *>(client.shm),
+        reinterpret_cast<wl_proxy *>(client.compositor),
+        reinterpret_cast<wl_proxy *>(client.registry),
+    };
+    for (auto *proxy : proxies) {
+        if (proxy) {
+            wl_proxy_destroy(proxy);
+        }
+    }
+    wl_display_disconnect(client.display);
 }
 
 int main(int argc, char **argv) {
@@ -569,6 +610,6 @@ int main(int argc, char **argv) {
     }
     while (passed && hold && !client.closed && wl_display_dispatch(client.display) >= 0) {
     }
-    wl_display_disconnect(client.display);
+    disconnect(client);
     return passed ? EXIT_SUCCESS : EXIT_FAILURE;
 }
