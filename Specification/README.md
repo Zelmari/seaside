@@ -18,6 +18,7 @@ session. Find detailed workflows and verification below.
 - [Reproduce an Arch package in a clean chroot](CONTRIBUTING.md#build-in-a-clean-arch-chroot).
 - [Share changes and test evidence](CONTRIBUTING.md#share-changes-and-evidence).
 - [Desktop repair plan](Research/DESKTOP_REPAIR_PLAN.md) covers session reliability, window management, display, capture, and integration fixes.
+- [C to C++23 migration plan](Research/CtoCPPMigration.md) covers migrating all handwritten C modules, tests, and tools to C++23.
 - [Native Arch desktop checklist](Research/NATIVE_ARCH_CHECKLIST.md) and [performance investigations](Research/PERFORMANCE.md) describe hardware and measurement workloads.
 
 ## Development parts
