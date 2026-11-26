@@ -1,10 +1,10 @@
 # Response time and performance investigations
 
-Updated: 2026-11-20
+Updated 2026-11-26
 
-These notes describe candidates for performance investigation.
-Each item below is an unmeasured investigation candidate.
-It is not a promise of lower latency or a request for additional functionality.
+These notes catalogue performance investigations. The [performance plan](PERFORMANCE_PLAN.md)
+records the migration benchmark baseline and schedules the IPC, scene, build,
+and native display follow-up work.
 
 For the day-to-day desktop trial on the native installation, see the
 [native Arch desktop checklist](NATIVE_ARCH_CHECKLIST.md).
@@ -23,10 +23,10 @@ For the day-to-day desktop trial on the native installation, see the
 - Bounded, opt-in diagnostics under §12.1; ordinary operation does not acquire
   continuous performance tracing or an overlay.
 
-The part 1 lifecycle owner now uses C++23 with a thin C bridge to wlroots; the
-real-client headless fixture and probes retain C. Arch WSL2 software checks do
-not measure a complete desktop compositor, native AMD presentation or physical
-input-to-screen response. No comparative latency results are available yet.
+Seaside's handwritten sources use C++23. Wayland protocol generation still
+emits C build artifacts. The migration comparison includes headless CPU
+timings and live Arch VirtualBox results. Native AMD presentation and
+physical input-to-screen measurements require native hardware.
 
 ## Measurements needed first
 
@@ -58,9 +58,8 @@ runs as separate correctness evidence. Define no arbitrary millisecond target.
 
 ## Investigation list
 
-All entries start as **not measured**. Start with baseline instrumentation and
-the first four entries once the native output path works; investigate the
-remaining entries as the corresponding modules exist and profiles justify it.
+Use the [performance plan](PERFORMANCE_PLAN.md) for the active investigations.
+Use the other entries as profiles identify work worth measuring.
 
 | ID | Investigation | Evidence to collect and behavior to preserve |
 |---|---|---|
