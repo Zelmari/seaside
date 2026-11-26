@@ -190,7 +190,7 @@ def prepare(source, result_dir, state):
         state["software_checks"] = "not-run"
         event("build", revision[:12])
         if (run_logged(["meson", "setup", "build", "--buildtype=debug"], repo, log, 120, env=env) or
-                run_logged(["ninja", "-C", "build", "-j2", "seaside"], repo, log, 240, env=env)):
+                run_logged(["ninja", "-C", "build", "-j2", "seaside", "seasidectl"], repo, log, 240, env=env)):
             raise RuntimeError("Could not build the isolated checkout")
     else:
         # Run static analysis locally. The guest runs the real portal and TTY
