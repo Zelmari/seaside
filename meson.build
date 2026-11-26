@@ -238,8 +238,8 @@ work_foundation = static_library(
 
 core = static_library(
   'seaside-core',
-  ['src/server.cpp', 'src/server_c.cpp', 'src/wlroots_bridge.c',
-   'src/scene.cpp', 'src/scene_bridge.c', 'src/scene_blur.c', 'src/layer_scene.c', 'src/popup_grab.c', layer_server,
+  ['src/server.cpp', 'src/wlroots_bridge.cpp',
+   'src/scene.cpp', 'src/scene_bridge.c', 'src/scene_blur.c', 'src/layer_scene.c', 'src/popup_grab.cpp', layer_server,
    'src/window_capture.c', 'src/render_assets.cpp'],
   include_directories: include_directories('src'),
   dependencies: [wlroots, wayland_server, pixman, threads, libdrm, libpng, turbojpeg, libwebp, pangocairo, glib],
@@ -547,7 +547,7 @@ test('part6-cli', python, args: [files('tests/integration/test_seasidectl.py'), 
 )
 
 idle_foundation = static_library(
-  'seaside-idle-foundation', ['src/idle_power.cpp', 'src/idle_inhibit.c'],
+  'seaside-idle-foundation', 'src/idle_power.cpp',
   include_directories: include_directories('src'),
   dependencies: [wlroots, wayland_server], install: false,
 )
@@ -628,7 +628,7 @@ test('part10-worker-assembly', python,
 
 headless_fixture = executable(
   'seaside-headless-fixture',
-  'tests/integration/headless.c',
+  'tests/integration/headless.cpp',
   include_directories: include_directories('src'),
   dependencies: [wlroots, wayland_server, wayland_client, pixman, threads],
   link_with: core,

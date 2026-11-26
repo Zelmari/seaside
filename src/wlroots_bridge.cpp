@@ -1,6 +1,11 @@
-#include "wlroots_bridge.h"
+#include "wlroots_bridge.hpp"
 
-#include <stdlib.h>
+#include "wlr_compat.hpp"
+
+#include <new>
+#include <type_traits>
+
+extern "C" {
 #include <wlr/backend.h>
 #include <wlr/config.h>
 #if WLR_HAS_GLES2_RENDERER
@@ -20,6 +25,7 @@
 #include <wlr/types/wlr_presentation_time.h>
 #include <wlr/types/wlr_subcompositor.h>
 #include <wlr/types/wlr_viewporter.h>
+}
 
 struct surface_sync_tracking {
     struct wlr_addon addon;
@@ -32,17 +38,20 @@ struct compositor_sync_tracking {
     struct wl_listener new_surface, destroy;
 };
 
-static void destroy_surface_sync(struct wlr_addon *addon) {
+static_assert(std::is_standard_layout_v<surface_sync_tracking>);
+static_assert(std::is_standard_layout_v<compositor_sync_tracking>);
+
+static void destroy_surface_sync(struct wlr_addon *addon) noexcept {
     struct surface_sync_tracking *tracking = wl_container_of(addon, tracking, addon);
     wl_list_remove(&tracking->commit.link);
     wlr_addon_finish(addon);
-    free(tracking);
+    delete tracking;
 }
 
 static const struct wlr_addon_interface surface_sync_tracking_impl = {
     .name = "seaside-surface-sync-tracking", .destroy = destroy_surface_sync};
 
-static void track_surface_commit(struct wl_listener *listener, void *data) {
+static void track_surface_commit(struct wl_listener *listener, void *data) noexcept {
     (void)data;
     struct surface_sync_tracking *tracking = wl_container_of(listener, tracking, commit);
     struct wlr_surface *surface = tracking->surface;
@@ -53,10 +62,10 @@ static void track_surface_commit(struct wl_listener *listener, void *data) {
     }
 }
 
-static void track_new_surface(struct wl_listener *listener, void *data) {
+static void track_new_surface(struct wl_listener *listener, void *data) noexcept {
     (void)listener;
-    struct wlr_surface *surface = data;
-    struct surface_sync_tracking *tracking = calloc(1, sizeof(*tracking));
+    auto *surface = static_cast<wlr_surface *>(data);
+    auto *tracking = new (std::nothrow) surface_sync_tracking{};
     if (!tracking) {
         wl_resource_post_no_memory(surface->resource);
         return;
@@ -68,12 +77,12 @@ static void track_new_surface(struct wl_listener *listener, void *data) {
     wl_signal_add(&surface->events.commit, &tracking->commit);
 }
 
-static void destroy_compositor_sync(struct wl_listener *listener, void *data) {
+static void destroy_compositor_sync(struct wl_listener *listener, void *data) noexcept {
     (void)data;
     struct compositor_sync_tracking *tracking = wl_container_of(listener, tracking, destroy);
     wl_list_remove(&tracking->new_surface.link);
     wl_list_remove(&tracking->destroy.link);
-    free(tracking);
+    delete tracking;
 }
 
 bool seaside_wlr_surface_waits_for_sync_replacement(struct wlr_surface *surface) {
@@ -122,12 +131,12 @@ struct wlr_compositor *seaside_wlr_compositor_create(struct wl_display *display,
     /* These globals are display-owned, including on partial creation failure. */
     struct wlr_compositor *compositor = wlr_compositor_create(display, 6, renderer);
     if (!compositor || !wlr_subcompositor_create(display) || !wlr_viewporter_create(display)) {
-        return NULL;
+        return nullptr;
     }
     if (renderer && renderer->features.timeline) {
-        struct compositor_sync_tracking *tracking = calloc(1, sizeof(*tracking));
+        auto *tracking = new (std::nothrow) compositor_sync_tracking{};
         if (!tracking) {
-            return NULL;
+            return nullptr;
         }
         tracking->new_surface.notify = track_new_surface;
         tracking->destroy.notify = destroy_compositor_sync;
@@ -151,7 +160,7 @@ void seaside_wlr_allocator_destroy(struct wlr_allocator *allocator) {
 
 const char *seaside_wlr_renderer_name(struct wlr_renderer *renderer) {
     if (!renderer) {
-        return NULL;
+        return nullptr;
     }
     if (wlr_renderer_is_pixman(renderer)) {
         return "pixman";
@@ -166,7 +175,7 @@ const char *seaside_wlr_renderer_name(struct wlr_renderer *renderer) {
         return "vulkan";
     }
 #endif
-    return NULL;
+    return nullptr;
 }
 
 void seaside_wlr_renderer_destroy(struct wlr_renderer *renderer) {

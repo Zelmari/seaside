@@ -1,6 +1,5 @@
-#include "server.h"
 #include "server.hpp"
-#include "wlroots_bridge.h"
+#include "wlroots_bridge.hpp"
 #include "wlroots_fixture.h"
 
 #include <array>
@@ -162,25 +161,4 @@ TEST_F(ServerTest, StartupFailuresRetainOwnedResourcesUntilOrderedCleanup) {
                   point == Failure::allocator ? "BRD" : "BARD");
         failure = Failure::none;
     }
-}
-
-TEST_F(ServerTest, CFacadeRetainsBorrowedHandlesAndRejectsDuplicateInitialization) {
-    seaside_server server{};
-    ASSERT_TRUE(seaside_server_init(&server));
-    auto *display = server.display;
-    EXPECT_FALSE(seaside_server_init(&server));
-    EXPECT_EQ(server.display, display);
-    ASSERT_TRUE(seaside_server_start(&server, seaside_test_backend_create(display),
-                                     seaside_test_renderer_create()));
-    EXPECT_NE(server.allocator, nullptr);
-    EXPECT_NE(server.compositor, nullptr);
-    seaside_server_finish(&server);
-    seaside_server_finish(&server);
-    EXPECT_EQ(server.owner, nullptr);
-    EXPECT_EQ(server.display, nullptr);
-    EXPECT_EQ(server.backend, nullptr);
-    EXPECT_EQ(server.renderer, nullptr);
-    EXPECT_EQ(server.allocator, nullptr);
-    EXPECT_EQ(server.compositor, nullptr);
-    EXPECT_EQ(std::string_view(destruction.data(), destruction_count), "BARD");
 }

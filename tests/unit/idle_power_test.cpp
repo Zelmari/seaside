@@ -1,6 +1,6 @@
 #include "idle-inhibit-client-protocol.h"
 #include "idle_power.hpp"
-#include "wlroots_bridge.h"
+#include "wlroots_bridge.hpp"
 
 #include <algorithm>
 #include <cerrno>

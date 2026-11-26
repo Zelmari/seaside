@@ -1,5 +1,5 @@
-#ifndef SEASIDE_POPUP_GRAB_H
-#define SEASIDE_POPUP_GRAB_H
+#ifndef SEASIDE_POPUP_GRAB_HPP
+#define SEASIDE_POPUP_GRAB_HPP
 
 #include <wayland-server-core.h>
 

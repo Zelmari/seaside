@@ -1,6 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "window_capture.h"
-#include "wlroots_bridge.h"
+#include "wlroots_bridge.hpp"
 
 #include <drm.h>
 #include <drm_fourcc.h>

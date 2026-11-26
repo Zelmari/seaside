@@ -1,10 +1,18 @@
-#include "popup_grab.h"
+#include "popup_grab.hpp"
 
+#include "wlr_compat.hpp"
+
+#include <type_traits>
+
+extern "C" {
 #include <wlr/types/wlr_keyboard.h>
 #include <wlr/types/wlr_seat.h>
 #include <wlr/types/wlr_xdg_shell.h>
+}
 
-static struct wlr_surface *owner_surface(struct wlr_surface *surface) {
+static_assert(std::is_standard_layout_v<seaside_popup_focus>);
+
+static struct wlr_surface *owner_surface(struct wlr_surface *surface) noexcept {
     while (surface) {
         struct wlr_xdg_popup *parent = wlr_xdg_popup_try_from_wlr_surface(surface);
         if (!parent) {
@@ -15,7 +23,7 @@ static struct wlr_surface *owner_surface(struct wlr_surface *surface) {
     return surface;
 }
 
-static void enter(struct wlr_seat *seat, struct wlr_surface *surface) {
+static void enter(struct wlr_seat *seat, struct wlr_surface *surface) noexcept {
     struct wlr_keyboard *keyboard = wlr_seat_get_keyboard(seat);
     if (keyboard) {
         // The XDG grab intentionally ignores notify_enter. Give the topmost
@@ -25,7 +33,7 @@ static void enter(struct wlr_seat *seat, struct wlr_surface *surface) {
     }
 }
 
-static void on_map(struct wl_listener *listener, void *data) {
+static void on_map(struct wl_listener *listener, void *data) noexcept {
     (void)data;
     struct seaside_popup_focus *focus = wl_container_of(listener, focus, map);
     struct wlr_xdg_popup *popup = focus->role;
@@ -44,7 +52,7 @@ static void on_map(struct wl_listener *listener, void *data) {
     }
 }
 
-static void on_unmap(struct wl_listener *listener, void *data) {
+static void on_unmap(struct wl_listener *listener, void *data) noexcept {
     (void)data;
     struct seaside_popup_focus *focus = wl_container_of(listener, focus, unmap);
     struct wlr_xdg_popup *popup = focus->role;
@@ -68,7 +76,7 @@ void seaside_popup_focus_finish(struct seaside_popup_focus *focus) {
 }
 
 static struct wlr_xdg_popup *unfocused_popup(struct wlr_xdg_shell *shell,
-                                             struct wlr_surface *target) {
+                                             struct wlr_surface *target) noexcept {
     struct wlr_xdg_popup_grab *grab;
     wl_list_for_each(grab, &shell->popup_grabs, link) {
         // When the seat has no target, also finish grabs that sent popup_done
@@ -83,7 +91,7 @@ static struct wlr_xdg_popup *unfocused_popup(struct wlr_xdg_shell *shell,
             }
         }
     }
-    return NULL;
+    return nullptr;
 }
 
 void seaside_popup_dismiss_unfocused(struct wlr_xdg_shell *shell, struct wlr_surface *target) {

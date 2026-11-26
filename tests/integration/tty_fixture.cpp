@@ -3,7 +3,7 @@
 #include "tty_drm.h"
 #include "tty_input.h"
 #include "tty_terminal.hpp"
-#include "wlroots_bridge.h"
+#include "wlroots_bridge.hpp"
 
 #include <algorithm>
 #include <chrono>

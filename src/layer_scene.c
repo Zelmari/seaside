@@ -1,5 +1,5 @@
 #include "layer_scene.h"
-#include "popup_grab.h"
+#include "popup_grab.hpp"
 
 #include <limits.h>
 #include <stdlib.h>

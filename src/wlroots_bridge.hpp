@@ -1,5 +1,5 @@
-#ifndef SEASIDE_WLROOTS_BRIDGE_H
-#define SEASIDE_WLROOTS_BRIDGE_H
+#ifndef SEASIDE_WLROOTS_BRIDGE_HPP
+#define SEASIDE_WLROOTS_BRIDGE_HPP
 
 #include <stdbool.h>
 
@@ -11,8 +11,7 @@ struct wlr_linux_dmabuf_v1;
 struct wlr_renderer;
 struct wlr_surface;
 
-/* wlroots 0.20 headers use C-only array parameters. Keep them in C translation
- * units rather than rewriting upstream headers or redefining C keywords. */
+/* Server ownership and capture tests wrap selected bridge symbols at link time. */
 #ifdef __cplusplus
 extern "C" {
 #endif

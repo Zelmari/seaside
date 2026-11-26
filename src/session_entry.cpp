@@ -15,7 +15,7 @@
 #include "trace.hpp"
 #include "tty_drm.h"
 #include "tty_input.h"
-#include "wlroots_bridge.h"
+#include "wlroots_bridge.hpp"
 
 #include <algorithm>
 #include <array>

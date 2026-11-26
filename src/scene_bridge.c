@@ -1,7 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "scene_bridge.h"
 #include "layer_scene.h"
-#include "popup_grab.h"
+#include "popup_grab.hpp"
 #include "scene_blur.h"
 #include "window_capture.h"
 

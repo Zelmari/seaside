@@ -5,7 +5,7 @@
 #include "test_directory.hpp"
 #include "tty_input.h"
 #include "wlr_layer_shell_client_compat.hpp"
-#include "wlroots_bridge.h"
+#include "wlroots_bridge.hpp"
 #include "xdg-activation-v1-client-protocol.h"
 #include "xdg-decoration-unstable-v1-client-protocol.h"
 #include "xdg-shell-client-protocol.h"

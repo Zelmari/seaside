@@ -1,7 +1,7 @@
 #include "part3_bridge.h"
 #include "scene.hpp"
 #include "server.hpp"
-#include "wlroots_bridge.h"
+#include "wlroots_bridge.hpp"
 
 #include <chrono>
 #include <gtest/gtest.h>

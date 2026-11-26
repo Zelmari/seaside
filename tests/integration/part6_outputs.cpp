@@ -4,7 +4,7 @@
 #include "session_control.hpp"
 #include "test_directory.hpp"
 #include "trace.hpp"
-#include "wlroots_bridge.h"
+#include "wlroots_bridge.hpp"
 
 #include <algorithm>
 #include <array>

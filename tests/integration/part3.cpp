@@ -3,7 +3,7 @@
 #include "presentation-time-client-protocol.h"
 #include "scene.hpp"
 #include "server.hpp"
-#include "wlroots_bridge.h"
+#include "wlroots_bridge.hpp"
 #include "xdg-shell-client-protocol.h"
 
 #include <atomic>

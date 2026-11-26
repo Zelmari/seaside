@@ -1,5 +1,5 @@
 #include "server.hpp"
-#include "wlroots_bridge.h"
+#include "wlroots_bridge.hpp"
 
 #include <new>
 #include <pthread.h>

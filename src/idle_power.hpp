@@ -7,7 +7,6 @@
 #include <memory>
 #include <optional>
 
-struct seaside_idle_inhibit;
 struct wl_display;
 struct wl_event_loop;
 struct wl_event_source;
@@ -49,10 +48,10 @@ class IdlePower {
         bool sleeping = false;
     };
 
+    struct Inhibitors;
+
     IdlePower(Power power, VisibleOutput visible_output, Fullscreen fullscreen, Now now);
     static int on_timer(void *data) noexcept;
-    static void inhibitor_changed(void *data) noexcept;
-    static void visit_inhibitor(void *data, wlr_surface *surface) noexcept;
     void update();
     void arm(int milliseconds) noexcept;
 
@@ -61,7 +60,7 @@ class IdlePower {
     Fullscreen fullscreen_;
     Now now_;
     wl_event_source *timer_ = nullptr;
-    seaside_idle_inhibit *inhibit_ = nullptr;
+    std::unique_ptr<Inhibitors> inhibitors_;
     std::map<wlr_output *, Output> outputs_;
     std::chrono::minutes timeout_{15};
     Clock::time_point last_activity_{};
@@ -69,7 +68,6 @@ class IdlePower {
     bool check_queued_ = false;
     bool sleeping_ = false;
     bool inhibited_ = false;
-    bool visible_inhibitor_ = false;
 };
 
 } // namespace seaside

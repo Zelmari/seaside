@@ -4,7 +4,7 @@
 #include "server.hpp"
 #include "session_bus.hpp"
 #include "session_portal.hpp"
-#include "wlroots_bridge.h"
+#include "wlroots_bridge.hpp"
 
 #include <cerrno>
 #include <chrono>
