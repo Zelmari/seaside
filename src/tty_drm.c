@@ -1,7 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "tty_drm.h"
-#include "cursor_layout.h"
+#include "cursor_layout.hpp"
 
 #include <drm_fourcc.h>
 #include <errno.h>

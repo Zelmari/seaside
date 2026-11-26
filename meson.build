@@ -281,7 +281,7 @@ test('part7-selected-capture', capture_test, args: ['part7'], suite: ['integrati
 tty_dependencies = [wlroots, wayland_server, pixman, libdrm, libinput, xkbcommon, glib,
                     meson.get_compiler('c').find_library('m')]
 tty_foundation = static_library(
-  'seaside-tty-foundation', ['src/tty_drm.c', 'src/tty_input.c', 'src/text_input.c', 'src/cursor_layout.c'],
+  'seaside-tty-foundation', ['src/tty_drm.c', 'src/tty_input.c', 'src/text_input.c', 'src/cursor_layout.cpp'],
   include_directories: include_directories('src'),
   dependencies: tty_dependencies, install: false,
 )
@@ -518,7 +518,7 @@ test('part7-satellite', satellite_tests, suite: ['unit', 'part7'], timeout: 20,
 )
 
 executable(
-  'seaside-part7-x11-client', 'tests/integration/part7_x11_client.c',
+  'seaside-part7-x11-client', 'tests/integration/part7_x11_client.cpp',
   dependencies: dependency('xcb', method: 'pkg-config'), install: false,
 )
 
@@ -579,7 +579,8 @@ test('part9-trace', trace_tests, suite: ['unit', 'part9'], timeout: 30,
 )
 
 executable('seaside-part9-panel',
-  ['tests/integration/part9_panel.c', layer_client, layer_client_code, xdg_shell_private_code],
+  ['tests/integration/part9_panel.cpp', layer_client, layer_client_code, xdg_shell_private_code],
+  include_directories: include_directories('src'),
   dependencies: wayland_client, install: false,
 )
 
@@ -747,7 +748,7 @@ portal_stream = executable('seaside-portal-stream', 'tests/integration/portal_st
   dependencies: [systemd, pipewire], install: false,
 )
 part7_native_client = executable('seaside-part7-native-client',
-  ['tests/integration/part7_native_client.c', xdg_shell_client_header, xdg_shell_private_code],
+  ['tests/integration/part7_native_client.cpp', xdg_shell_client_header, xdg_shell_private_code],
   dependencies: wayland_client, install: false,
 )
 wayland_input_protocols = [xdg_shell_client_header, xdg_shell_private_code]
@@ -769,7 +770,7 @@ foreach protocol : [
   )
 endforeach
 wayland_input_client = executable('seaside-wayland-input-client',
-  ['tests/integration/wayland_input_client.c', wayland_input_protocols],
+  ['tests/integration/wayland_input_client.cpp', wayland_input_protocols],
   dependencies: [wayland_client], install: false,
 )
 test('native-wayland-input', part4_fixture, args: ['wayland-input', wayland_input_client],
@@ -797,14 +798,14 @@ test('part7-headless-portal-stream', python,
 
 drm_probe = executable(
   'seaside-probe-drm',
-  'tools/probe-drm.c',
+  'tools/probe-drm.cpp',
   dependencies: libdrm,
   install: false,
 )
 
 drm_report_fixture = executable(
   'seaside-probe-report-fixture',
-  'tests/probe/report-fixture.c',
+  'tests/probe/report-fixture.cpp',
   dependencies: libdrm,
   install: false,
 )

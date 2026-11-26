@@ -1,4 +1,3 @@
-#define _GNU_SOURCE
 #include "input-method-unstable-v2-client-protocol.h"
 #include "text-input-unstable-v3-client-protocol.h"
 #include "virtual-keyboard-unstable-v1-client-protocol.h"
@@ -37,7 +36,8 @@ struct client {
     bool surrounds, private_surrounds, leaked_private_surrounds, stale_commit, cleared_preedit;
 };
 
-static struct wl_buffer *make_buffer(struct client *client, int width, int height, uint32_t pixel) {
+static struct wl_buffer *make_buffer(struct client *client, int width, int height,
+                                     uint32_t pixel) noexcept {
     const int size = width * height * 4;
     const int fd = memfd_create("seaside-wayland-input-test", MFD_CLOEXEC);
     if (fd < 0) {
@@ -47,7 +47,8 @@ static struct wl_buffer *make_buffer(struct client *client, int width, int heigh
         close(fd);
         return NULL;
     }
-    uint32_t *image = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    auto *image =
+        static_cast<uint32_t *>(mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0));
     if (image == MAP_FAILED) {
         close(fd);
         return NULL;
@@ -64,8 +65,8 @@ static struct wl_buffer *make_buffer(struct client *client, int width, int heigh
     return buffer;
 }
 
-static void configure(void *data, struct xdg_surface *surface, uint32_t serial) {
-    struct client *client = data;
+static void configure(void *data, struct xdg_surface *surface, uint32_t serial) noexcept {
+    auto *client = static_cast<struct client *>(data);
     xdg_surface_ack_configure(surface, serial);
     if (!client->mapped) {
         wl_surface_attach(client->surface, client->content, 0, 0);
@@ -76,7 +77,7 @@ static void configure(void *data, struct xdg_surface *surface, uint32_t serial) 
 }
 
 static void toplevel_configure(void *data, struct xdg_toplevel *role, int32_t width, int32_t height,
-                               struct wl_array *states) {
+                               struct wl_array *states) noexcept {
     (void)data;
     (void)role;
     (void)width;
@@ -84,12 +85,12 @@ static void toplevel_configure(void *data, struct xdg_toplevel *role, int32_t wi
     (void)states;
 }
 
-static void toplevel_close(void *data, struct xdg_toplevel *role) {
+static void toplevel_close(void *data, struct xdg_toplevel *role) noexcept {
     (void)role;
     ((struct client *)data)->closed = true;
 }
 
-static void shell_ping(void *data, struct xdg_wm_base *shell, uint32_t serial) {
+static void shell_ping(void *data, struct xdg_wm_base *shell, uint32_t serial) noexcept {
     (void)data;
     xdg_wm_base_pong(shell, serial);
 }
@@ -99,10 +100,12 @@ static const struct xdg_surface_listener surface_listener = {.configure = config
 static const struct xdg_toplevel_listener toplevel_listener = {
     .configure = toplevel_configure,
     .close = toplevel_close,
+    .configure_bounds = nullptr,
+    .wm_capabilities = nullptr,
 };
 
 static void keymap(void *data, struct wl_keyboard *keyboard, uint32_t format, int fd,
-                   uint32_t size) {
+                   uint32_t size) noexcept {
     (void)data;
     (void)keyboard;
     (void)format;
@@ -111,7 +114,7 @@ static void keymap(void *data, struct wl_keyboard *keyboard, uint32_t format, in
 }
 
 static void keyboard_enter(void *data, struct wl_keyboard *keyboard, uint32_t serial,
-                           struct wl_surface *surface, struct wl_array *keys) {
+                           struct wl_surface *surface, struct wl_array *keys) noexcept {
     (void)data;
     (void)keyboard;
     (void)serial;
@@ -120,7 +123,7 @@ static void keyboard_enter(void *data, struct wl_keyboard *keyboard, uint32_t se
 }
 
 static void keyboard_leave(void *data, struct wl_keyboard *keyboard, uint32_t serial,
-                           struct wl_surface *surface) {
+                           struct wl_surface *surface) noexcept {
     (void)data;
     (void)keyboard;
     (void)serial;
@@ -128,7 +131,7 @@ static void keyboard_leave(void *data, struct wl_keyboard *keyboard, uint32_t se
 }
 
 static void keyboard_key(void *data, struct wl_keyboard *keyboard, uint32_t serial, uint32_t time,
-                         uint32_t key, uint32_t state) {
+                         uint32_t key, uint32_t state) noexcept {
     (void)keyboard;
     (void)serial;
     (void)time;
@@ -140,7 +143,7 @@ static void keyboard_key(void *data, struct wl_keyboard *keyboard, uint32_t seri
 
 static void keyboard_modifiers(void *data, struct wl_keyboard *keyboard, uint32_t serial,
                                uint32_t depressed, uint32_t latched, uint32_t locked,
-                               uint32_t group) {
+                               uint32_t group) noexcept {
     (void)data;
     (void)keyboard;
     (void)serial;
@@ -156,12 +159,13 @@ static const struct wl_keyboard_listener keyboard_listener = {
     .leave = keyboard_leave,
     .key = keyboard_key,
     .modifiers = keyboard_modifiers,
+    .repeat_info = nullptr,
 };
 
 static void grab_keymap(void *data, struct zwp_input_method_keyboard_grab_v2 *grab, uint32_t format,
-                        int fd, uint32_t size) {
+                        int fd, uint32_t size) noexcept {
     (void)grab;
-    struct client *client = data;
+    auto *client = static_cast<struct client *>(data);
     if (!client->keymap && format == WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1 && size) {
         zwp_virtual_keyboard_v1_keymap(client->forwarder, format, fd, size);
         client->keymap = true;
@@ -170,10 +174,10 @@ static void grab_keymap(void *data, struct zwp_input_method_keyboard_grab_v2 *gr
 }
 
 static void grab_key(void *data, struct zwp_input_method_keyboard_grab_v2 *grab, uint32_t serial,
-                     uint32_t time, uint32_t key, uint32_t state) {
+                     uint32_t time, uint32_t key, uint32_t state) noexcept {
     (void)grab;
     (void)serial;
-    struct client *client = data;
+    auto *client = static_cast<struct client *>(data);
     if (client->keymap) {
         zwp_virtual_keyboard_v1_key(client->forwarder, time, key, state);
         ++client->grabbed_keys;
@@ -183,17 +187,17 @@ static void grab_key(void *data, struct zwp_input_method_keyboard_grab_v2 *grab,
 
 static void grab_modifiers(void *data, struct zwp_input_method_keyboard_grab_v2 *grab,
                            uint32_t serial, uint32_t depressed, uint32_t latched, uint32_t locked,
-                           uint32_t group) {
+                           uint32_t group) noexcept {
     (void)grab;
     (void)serial;
-    struct client *client = data;
+    auto *client = static_cast<struct client *>(data);
     if (client->keymap) {
         zwp_virtual_keyboard_v1_modifiers(client->forwarder, depressed, latched, locked, group);
     }
 }
 
 static void grab_repeat(void *data, struct zwp_input_method_keyboard_grab_v2 *grab, int32_t rate,
-                        int32_t delay) {
+                        int32_t delay) noexcept {
     (void)data;
     (void)grab;
     (void)rate;
@@ -207,17 +211,19 @@ static const struct zwp_input_method_keyboard_grab_v2_listener grab_listener = {
     .repeat_info = grab_repeat,
 };
 
-static void text_enter(void *data, struct zwp_text_input_v3 *input, struct wl_surface *surface) {
+static void text_enter(void *data, struct zwp_text_input_v3 *input,
+                       struct wl_surface *surface) noexcept {
     (void)input;
-    struct client *client = data;
+    auto *client = static_cast<struct client *>(data);
     if (surface == client->surface) {
         ++client->enters;
     }
 }
 
-static void text_leave(void *data, struct zwp_text_input_v3 *input, struct wl_surface *surface) {
+static void text_leave(void *data, struct zwp_text_input_v3 *input,
+                       struct wl_surface *surface) noexcept {
     (void)input;
-    struct client *client = data;
+    auto *client = static_cast<struct client *>(data);
     if (surface == client->surface) {
         ++client->leaves;
         puts("text input focus left");
@@ -225,27 +231,27 @@ static void text_leave(void *data, struct zwp_text_input_v3 *input, struct wl_su
 }
 
 static void text_preedit(void *data, struct zwp_text_input_v3 *input, const char *text,
-                         int32_t begin, int32_t end) {
-    struct client *client = data;
+                         int32_t begin, int32_t end) noexcept {
+    auto *client = static_cast<struct client *>(data);
     client->cleared_preedit |= input == client->text && !text;
     client->previewed |=
         input == client->text && text && strcmp(text, "é") == 0 && begin == 2 && end == 2;
 }
 
-static void text_commit(void *data, struct zwp_text_input_v3 *input, const char *text) {
-    struct client *client = data;
+static void text_commit(void *data, struct zwp_text_input_v3 *input, const char *text) noexcept {
+    auto *client = static_cast<struct client *>(data);
     client->stale_commit |= text && strcmp(text, "stale") == 0;
     client->committed |= input == client->text && text && strcmp(text, "界") == 0;
 }
 
 static void text_delete(void *data, struct zwp_text_input_v3 *input, uint32_t before,
-                        uint32_t after) {
-    struct client *client = data;
+                        uint32_t after) noexcept {
+    auto *client = static_cast<struct client *>(data);
     client->deleted |= input == client->text && before == 1 && after == 0;
 }
 
-static void text_done(void *data, struct zwp_text_input_v3 *input, uint32_t serial) {
-    struct client *client = data;
+static void text_done(void *data, struct zwp_text_input_v3 *input, uint32_t serial) noexcept {
+    auto *client = static_cast<struct client *>(data);
     if (input == client->text) {
         client->text_serial = serial;
     }
@@ -258,48 +264,51 @@ static const struct zwp_text_input_v3_listener text_listener = {
     .commit_string = text_commit,
     .delete_surrounding_text = text_delete,
     .done = text_done,
+    .action = nullptr,
+    .language = nullptr,
+    .preedit_hint = nullptr,
 };
 
-static void activate(void *data, struct zwp_input_method_v2 *method) {
+static void activate(void *data, struct zwp_input_method_v2 *method) noexcept {
     (void)method;
     ++((struct client *)data)->activations;
 }
 
-static void deactivate(void *data, struct zwp_input_method_v2 *method) {
+static void deactivate(void *data, struct zwp_input_method_v2 *method) noexcept {
     (void)method;
     ++((struct client *)data)->deactivations;
     puts("input method deactivated");
 }
 
 static void surrounding(void *data, struct zwp_input_method_v2 *method, const char *text,
-                        uint32_t cursor, uint32_t anchor) {
+                        uint32_t cursor, uint32_t anchor) noexcept {
     (void)method;
-    struct client *client = data;
+    auto *client = static_cast<struct client *>(data);
     client->surrounds |= strcmp(text, "abc") == 0 && cursor == 1 && anchor == 1;
     client->private_surrounds |= !*text && cursor == 0 && anchor == 0;
     client->leaked_private_surrounds |= strcmp(text, "private") == 0;
 }
 
-static void cause(void *data, struct zwp_input_method_v2 *method, uint32_t type) {
+static void cause(void *data, struct zwp_input_method_v2 *method, uint32_t type) noexcept {
     (void)data;
     (void)method;
     (void)type;
 }
 
 static void content_type(void *data, struct zwp_input_method_v2 *method, uint32_t hint,
-                         uint32_t purpose) {
+                         uint32_t purpose) noexcept {
     (void)data;
     (void)method;
     (void)hint;
     (void)purpose;
 }
 
-static void method_done(void *data, struct zwp_input_method_v2 *method) {
+static void method_done(void *data, struct zwp_input_method_v2 *method) noexcept {
     (void)method;
     ++((struct client *)data)->method_serial;
 }
 
-static void unavailable(void *data, struct zwp_input_method_v2 *method) {
+static void unavailable(void *data, struct zwp_input_method_v2 *method) noexcept {
     (void)method;
     ((struct client *)data)->unavailable = true;
 }
@@ -315,7 +324,7 @@ static const struct zwp_input_method_v2_listener method_listener = {
 };
 
 static void popup_rectangle(void *data, struct zwp_input_popup_surface_v2 *popup, int32_t x,
-                            int32_t y, int32_t width, int32_t height) {
+                            int32_t y, int32_t width, int32_t height) noexcept {
     (void)popup;
     (void)x;
     (void)y;
@@ -326,13 +335,14 @@ static const struct zwp_input_popup_surface_v2_listener popup_listener = {
     .text_input_rectangle = popup_rectangle,
 };
 
-static void icon_size(void *data, struct xdg_toplevel_icon_manager_v1 *icons, int32_t size) {
+static void icon_size(void *data, struct xdg_toplevel_icon_manager_v1 *icons,
+                      int32_t size) noexcept {
     (void)data;
     (void)icons;
     (void)size;
 }
 
-static void icon_sizes_done(void *data, struct xdg_toplevel_icon_manager_v1 *icons) {
+static void icon_sizes_done(void *data, struct xdg_toplevel_icon_manager_v1 *icons) noexcept {
     (void)data;
     (void)icons;
 }
@@ -343,35 +353,38 @@ static const struct xdg_toplevel_icon_manager_v1_listener icon_listener = {
 };
 
 static void registry_add(void *data, struct wl_registry *registry, uint32_t name,
-                         const char *interface, uint32_t version) {
+                         const char *interface, uint32_t version) noexcept {
     (void)version;
-    struct client *client = data;
+    auto *client = static_cast<struct client *>(data);
     if (strcmp(interface, wl_compositor_interface.name) == 0) {
-        client->compositor = wl_registry_bind(registry, name, &wl_compositor_interface, 1);
+        client->compositor = static_cast<wl_compositor *>(
+            wl_registry_bind(registry, name, &wl_compositor_interface, 1));
     } else if (strcmp(interface, wl_shm_interface.name) == 0) {
-        client->shm = wl_registry_bind(registry, name, &wl_shm_interface, 1);
+        client->shm = static_cast<wl_shm *>(wl_registry_bind(registry, name, &wl_shm_interface, 1));
     } else if (strcmp(interface, wl_seat_interface.name) == 0) {
-        client->seat = wl_registry_bind(registry, name, &wl_seat_interface, 1);
+        client->seat =
+            static_cast<wl_seat *>(wl_registry_bind(registry, name, &wl_seat_interface, 1));
     } else if (strcmp(interface, xdg_wm_base_interface.name) == 0) {
-        client->shell = wl_registry_bind(registry, name, &xdg_wm_base_interface, 1);
+        client->shell =
+            static_cast<xdg_wm_base *>(wl_registry_bind(registry, name, &xdg_wm_base_interface, 1));
         xdg_wm_base_add_listener(client->shell, &shell_listener, client);
     } else if (strcmp(interface, xdg_toplevel_icon_manager_v1_interface.name) == 0) {
-        client->icons =
-            wl_registry_bind(registry, name, &xdg_toplevel_icon_manager_v1_interface, 1);
+        client->icons = static_cast<xdg_toplevel_icon_manager_v1 *>(
+            wl_registry_bind(registry, name, &xdg_toplevel_icon_manager_v1_interface, 1));
         xdg_toplevel_icon_manager_v1_add_listener(client->icons, &icon_listener, client);
     } else if (strcmp(interface, zwp_text_input_manager_v3_interface.name) == 0) {
-        client->text_manager =
-            wl_registry_bind(registry, name, &zwp_text_input_manager_v3_interface, 1);
+        client->text_manager = static_cast<zwp_text_input_manager_v3 *>(
+            wl_registry_bind(registry, name, &zwp_text_input_manager_v3_interface, 1));
     } else if (strcmp(interface, zwp_input_method_manager_v2_interface.name) == 0) {
-        client->method_manager =
-            wl_registry_bind(registry, name, &zwp_input_method_manager_v2_interface, 1);
+        client->method_manager = static_cast<zwp_input_method_manager_v2 *>(
+            wl_registry_bind(registry, name, &zwp_input_method_manager_v2_interface, 1));
     } else if (strcmp(interface, zwp_virtual_keyboard_manager_v1_interface.name) == 0) {
-        client->virtual_manager =
-            wl_registry_bind(registry, name, &zwp_virtual_keyboard_manager_v1_interface, 1);
+        client->virtual_manager = static_cast<zwp_virtual_keyboard_manager_v1 *>(
+            wl_registry_bind(registry, name, &zwp_virtual_keyboard_manager_v1_interface, 1));
     }
 }
 
-static void registry_remove(void *data, struct wl_registry *registry, uint32_t name) {
+static void registry_remove(void *data, struct wl_registry *registry, uint32_t name) noexcept {
     (void)data;
     (void)registry;
     (void)name;
@@ -382,7 +395,7 @@ static const struct wl_registry_listener registry_listener = {
     .global_remove = registry_remove,
 };
 
-static bool setup(struct client *client) {
+static bool setup(struct client *client) noexcept {
     struct wl_registry *registry = wl_display_get_registry(client->display);
     wl_registry_add_listener(registry, &registry_listener, client);
     if (wl_display_roundtrip(client->display) < 0 || !client->compositor || !client->shell ||
@@ -433,11 +446,11 @@ static bool setup(struct client *client) {
     return wl_display_roundtrip(client->display) >= 0 && !client->unavailable;
 }
 
-static bool roundtrip(struct client *client) {
+static bool roundtrip(struct client *client) noexcept {
     return wl_display_roundtrip(client->display) >= 0;
 }
 
-static bool run(struct client *client) {
+static bool run(struct client *client) noexcept {
     zwp_text_input_v3_enable(client->text);
     zwp_text_input_v3_set_surrounding_text(client->text, "abc", 1, 1);
     zwp_text_input_v3_set_cursor_rectangle(client->text, 20, 16, 2, 18);
@@ -499,7 +512,7 @@ static bool run(struct client *client) {
     return roundtrip(client) && client->activations == 2;
 }
 
-static bool verify_focus(struct client *client) {
+static bool verify_focus(struct client *client) noexcept {
     while (client->enters < 4 || client->leaves < 2) {
         if (wl_display_dispatch(client->display) < 0) {
             return false;
@@ -536,7 +549,8 @@ int main(int argc, char **argv) {
         return EXIT_FAILURE;
     }
     setvbuf(stdout, NULL, _IOLBF, 0);
-    struct client client = {.display = wl_display_connect(NULL)};
+    struct client client{};
+    client.display = wl_display_connect(nullptr);
     if (!client.display) {
         fputs("could not connect to the compositor\n", stderr);
         return EXIT_FAILURE;

@@ -1,7 +1,7 @@
 #ifndef SEASIDE_TTY_INPUT_H
 #define SEASIDE_TTY_INPUT_H
 
-#include "cursor_layout.h"
+#include "cursor_layout.hpp"
 
 #include <stdbool.h>
 #include <stddef.h>

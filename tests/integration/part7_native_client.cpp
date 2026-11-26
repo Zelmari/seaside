@@ -1,7 +1,7 @@
-#define _GNU_SOURCE
 #include "xdg-shell-client-protocol.h"
 
 #include <errno.h>
+#include <new>
 #include <poll.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <type_traits>
 #include <unistd.h>
 #include <wayland-client.h>
 
@@ -36,11 +37,13 @@ struct pending_buffer {
     struct wl_list link;
 };
 
-static void draw(struct client *client);
+static_assert(std::is_standard_layout_v<pending_buffer>);
 
-static void frame_done(void *data, struct wl_callback *callback, uint32_t time) {
+static void draw(struct client *client) noexcept;
+
+static void frame_done(void *data, struct wl_callback *callback, uint32_t time) noexcept {
     (void)time;
-    struct client *client = data;
+    auto *client = static_cast<struct client *>(data);
     wl_callback_destroy(callback);
     client->frame = NULL;
     if (client->dirty) {
@@ -49,17 +52,17 @@ static void frame_done(void *data, struct wl_callback *callback, uint32_t time) 
     puts("frame-callback");
 }
 
-static void buffer_released(void *data, struct wl_buffer *buffer) {
-    struct pending_buffer *pending = data;
+static void buffer_released(void *data, struct wl_buffer *buffer) noexcept {
+    auto *pending = static_cast<pending_buffer *>(data);
     wl_buffer_destroy(buffer);
     wl_list_remove(&pending->link);
-    free(pending);
+    delete pending;
 }
 
 static const struct wl_callback_listener frame_listener = {.done = frame_done};
 static const struct wl_buffer_listener buffer_listener = {.release = buffer_released};
 
-static void draw(struct client *client) {
+static void draw(struct client *client) noexcept {
     const int32_t stride = client->width * 4;
     const int32_t length = stride * client->height;
     const int fd = memfd_create("seaside-part7-pixels", MFD_CLOEXEC);
@@ -72,7 +75,8 @@ static void draw(struct client *client) {
         client->failed = true;
         return;
     }
-    uint32_t *pixels = mmap(NULL, (size_t)length, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    auto *pixels = static_cast<uint32_t *>(
+        mmap(NULL, (size_t)length, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0));
     if (pixels == MAP_FAILED) {
         close(fd);
         client->failed = true;
@@ -95,7 +99,7 @@ static void draw(struct client *client) {
         client->failed = true;
         return;
     }
-    struct pending_buffer *pending = calloc(1, sizeof(*pending));
+    auto *pending = new (std::nothrow) pending_buffer{};
     if (!pending) {
         wl_buffer_destroy(buffer);
         client->failed = true;
@@ -120,8 +124,8 @@ static void draw(struct client *client) {
     printf("color %06x %d %d\n", client->pixel & 0xffffffU, client->width, client->height);
 }
 
-static void surface_configured(void *data, struct xdg_surface *surface, uint32_t serial) {
-    struct client *client = data;
+static void surface_configured(void *data, struct xdg_surface *surface, uint32_t serial) noexcept {
+    auto *client = static_cast<struct client *>(data);
     xdg_surface_ack_configure(surface, serial);
     if (client->configured && client->dirty && client->resize_delay_ms) {
         // Flush the acknowledgment before delaying the matching buffer commit.
@@ -138,10 +142,10 @@ static void surface_configured(void *data, struct xdg_surface *surface, uint32_t
 }
 
 static void toplevel_configured(void *data, struct xdg_toplevel *toplevel, int32_t width,
-                                int32_t height, struct wl_array *states) {
+                                int32_t height, struct wl_array *states) noexcept {
     (void)toplevel;
     (void)states;
-    struct client *client = data;
+    auto *client = static_cast<struct client *>(data);
     if (!client->fixed_size && width > 0 && height > 0 && width <= 4096 && height <= 4096 &&
         (width != client->width || height != client->height)) {
         client->width = width;
@@ -150,12 +154,12 @@ static void toplevel_configured(void *data, struct xdg_toplevel *toplevel, int32
     }
 }
 
-static void toplevel_close(void *data, struct xdg_toplevel *toplevel) {
+static void toplevel_close(void *data, struct xdg_toplevel *toplevel) noexcept {
     (void)toplevel;
     ((struct client *)data)->stop = true;
 }
 
-static void shell_ping(void *data, struct xdg_wm_base *shell, uint32_t serial) {
+static void shell_ping(void *data, struct xdg_wm_base *shell, uint32_t serial) noexcept {
     (void)data;
     xdg_wm_base_pong(shell, serial);
 }
@@ -163,23 +167,27 @@ static void shell_ping(void *data, struct xdg_wm_base *shell, uint32_t serial) {
 static const struct xdg_wm_base_listener shell_listener = {.ping = shell_ping};
 static const struct xdg_surface_listener surface_listener = {.configure = surface_configured};
 static const struct xdg_toplevel_listener toplevel_listener = {.configure = toplevel_configured,
-                                                               .close = toplevel_close};
+                                                               .close = toplevel_close,
+                                                               .configure_bounds = nullptr,
+                                                               .wm_capabilities = nullptr};
 
 static void registry_add(void *data, struct wl_registry *registry, uint32_t name,
-                         const char *interface, uint32_t version) {
+                         const char *interface, uint32_t version) noexcept {
     (void)version;
-    struct client *client = data;
+    auto *client = static_cast<struct client *>(data);
     if (strcmp(interface, wl_compositor_interface.name) == 0) {
-        client->compositor = wl_registry_bind(registry, name, &wl_compositor_interface, 1);
+        client->compositor = static_cast<wl_compositor *>(
+            wl_registry_bind(registry, name, &wl_compositor_interface, 1));
     } else if (strcmp(interface, wl_shm_interface.name) == 0) {
-        client->shm = wl_registry_bind(registry, name, &wl_shm_interface, 1);
+        client->shm = static_cast<wl_shm *>(wl_registry_bind(registry, name, &wl_shm_interface, 1));
     } else if (strcmp(interface, xdg_wm_base_interface.name) == 0) {
-        client->shell = wl_registry_bind(registry, name, &xdg_wm_base_interface, 1);
+        client->shell =
+            static_cast<xdg_wm_base *>(wl_registry_bind(registry, name, &xdg_wm_base_interface, 1));
         xdg_wm_base_add_listener(client->shell, &shell_listener, NULL);
     }
 }
 
-static void registry_remove(void *data, struct wl_registry *registry, uint32_t name) {
+static void registry_remove(void *data, struct wl_registry *registry, uint32_t name) noexcept {
     (void)data;
     (void)registry;
     (void)name;
@@ -188,7 +196,7 @@ static void registry_remove(void *data, struct wl_registry *registry, uint32_t n
 static const struct wl_registry_listener registry_listener = {.global = registry_add,
                                                               .global_remove = registry_remove};
 
-static bool parse_pixel(const char *word, uint32_t *pixel) {
+static bool parse_pixel(const char *word, uint32_t *pixel) noexcept {
     char *end = NULL;
     const unsigned long value = strtoul(word, &end, 16);
     if (word == end || (*end && *end != '\n') || value > 0xffffffUL) {
@@ -198,7 +206,7 @@ static bool parse_pixel(const char *word, uint32_t *pixel) {
     return true;
 }
 
-static bool parse_option(const char *word, struct client *client) {
+static bool parse_option(const char *word, struct client *client) noexcept {
     if (strcmp(word, "--fixed-size") == 0) {
         client->fixed_size = true;
         return true;
@@ -216,7 +224,7 @@ static bool parse_option(const char *word, struct client *client) {
     return false;
 }
 
-static void read_command(struct client *client) {
+static void read_command(struct client *client) noexcept {
     char line[24];
     if (!fgets(line, sizeof(line), stdin) || strcmp(line, "close\n") == 0) {
         client->stop = true;
@@ -231,9 +239,10 @@ static void read_command(struct client *client) {
     }
 }
 
-static void run(struct client *client) {
-    struct pollfd fds[] = {{.fd = wl_display_get_fd(client->display), .events = POLLIN},
-                           {.fd = STDIN_FILENO, .events = POLLIN}};
+static void run(struct client *client) noexcept {
+    struct pollfd fds[] = {
+        {.fd = wl_display_get_fd(client->display), .events = POLLIN, .revents = 0},
+        {.fd = STDIN_FILENO, .events = POLLIN, .revents = 0}};
     while (!client->stop && !client->failed) {
         if (wl_display_dispatch_pending(client->display) < 0) {
             client->failed = true;
@@ -259,7 +268,7 @@ static void run(struct client *client) {
     }
 }
 
-static void destroy_client(struct client *client, struct wl_registry *registry) {
+static void destroy_client(struct client *client, struct wl_registry *registry) noexcept {
     if (client->frame) {
         wl_callback_destroy(client->frame);
     }
@@ -287,7 +296,10 @@ static void destroy_client(struct client *client, struct wl_registry *registry) 
 }
 
 int main(int argc, char **argv) {
-    struct client client = {.width = 264, .height = 176, .dirty = true};
+    struct client client{};
+    client.width = 264;
+    client.height = 176;
+    client.dirty = true;
     if (argc < 3 || argc > 4 || (argc == 4 && !parse_option(argv[3], &client)) ||
         !parse_pixel(argv[2], &client.pixel)) {
         fputs("Usage: seaside-part7-native-client TITLE RRGGBB [--fixed-size|--delay-resize=MS]\n",

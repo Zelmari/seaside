@@ -1,5 +1,4 @@
-#define _GNU_SOURCE
-#include "wlr-layer-shell-unstable-v1-client-protocol.h"
+#include "wlr_layer_shell_client_compat.hpp"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -19,19 +18,20 @@ struct panel {
 };
 
 static void global(void *data, struct wl_registry *registry, uint32_t id, const char *interface,
-                   uint32_t version) {
-    struct panel *panel = data;
+                   uint32_t version) noexcept {
+    auto *panel = static_cast<struct panel *>(data);
     if (strcmp(interface, wl_compositor_interface.name) == 0) {
-        panel->compositor = wl_registry_bind(registry, id, &wl_compositor_interface, 4);
+        panel->compositor = static_cast<wl_compositor *>(
+            wl_registry_bind(registry, id, &wl_compositor_interface, 4));
     } else if (strcmp(interface, wl_shm_interface.name) == 0) {
-        panel->shm = wl_registry_bind(registry, id, &wl_shm_interface, 1);
+        panel->shm = static_cast<wl_shm *>(wl_registry_bind(registry, id, &wl_shm_interface, 1));
     } else if (strcmp(interface, zwlr_layer_shell_v1_interface.name) == 0) {
-        panel->shell = wl_registry_bind(registry, id, &zwlr_layer_shell_v1_interface,
-                                        version < 3 ? version : 3);
+        panel->shell = static_cast<zwlr_layer_shell_v1 *>(wl_registry_bind(
+            registry, id, &zwlr_layer_shell_v1_interface, version < 3 ? version : 3));
     }
 }
 
-static void removed(void *data, struct wl_registry *registry, uint32_t id) {
+static void removed(void *data, struct wl_registry *registry, uint32_t id) noexcept {
     (void)data;
     (void)registry;
     (void)id;
@@ -40,7 +40,8 @@ static void removed(void *data, struct wl_registry *registry, uint32_t id) {
 static const struct wl_registry_listener registry_listener = {.global = global,
                                                               .global_remove = removed};
 
-static struct wl_buffer *create_buffer(struct wl_shm *shm, uint32_t width, uint32_t height) {
+static struct wl_buffer *create_buffer(struct wl_shm *shm, uint32_t width,
+                                       uint32_t height) noexcept {
     if (!width || !height || width > 8192 || height > 128) {
         return NULL;
     }
@@ -51,7 +52,7 @@ static struct wl_buffer *create_buffer(struct wl_shm *shm, uint32_t width, uint3
     }
     struct wl_buffer *buffer = NULL;
     if (ftruncate(fd, (off_t)size) == 0) {
-        uint32_t *pixels = mmap(NULL, size, PROT_WRITE, MAP_SHARED, fd, 0);
+        auto *pixels = static_cast<uint32_t *>(mmap(NULL, size, PROT_WRITE, MAP_SHARED, fd, 0));
         if (pixels != MAP_FAILED) {
             for (size_t i = 0; i < size / sizeof(*pixels); ++i) {
                 pixels[i] = 0xff2a8060;
@@ -70,8 +71,8 @@ static struct wl_buffer *create_buffer(struct wl_shm *shm, uint32_t width, uint3
 }
 
 static void configure(void *data, struct zwlr_layer_surface_v1 *layer, uint32_t serial,
-                      uint32_t width, uint32_t height) {
-    struct panel *panel = data;
+                      uint32_t width, uint32_t height) noexcept {
+    auto *panel = static_cast<struct panel *>(data);
     zwlr_layer_surface_v1_ack_configure(layer, serial);
     struct wl_buffer *buffer = create_buffer(panel->shm, width, height);
     if (!buffer) {
@@ -86,7 +87,7 @@ static void configure(void *data, struct zwlr_layer_surface_v1 *layer, uint32_t 
     fflush(stdout);
 }
 
-static void closed(void *data, struct zwlr_layer_surface_v1 *layer) {
+static void closed(void *data, struct zwlr_layer_surface_v1 *layer) noexcept {
     (void)layer;
     ((struct panel *)data)->closed = true;
 }
@@ -99,7 +100,7 @@ int main(void) {
     if (!display) {
         return EXIT_FAILURE;
     }
-    struct panel panel = {0};
+    struct panel panel{};
     struct wl_registry *registry = wl_display_get_registry(display);
     struct zwlr_layer_surface_v1 *layer = NULL;
     if (registry && wl_registry_add_listener(registry, &registry_listener, &panel) == 0 &&

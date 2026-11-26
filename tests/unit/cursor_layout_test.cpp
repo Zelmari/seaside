@@ -1,4 +1,4 @@
-#include "cursor_layout.h"
+#include "cursor_layout.hpp"
 
 #include <gtest/gtest.h>
 #include <limits>

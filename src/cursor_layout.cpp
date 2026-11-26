@@ -1,4 +1,4 @@
-#include "cursor_layout.h"
+#include "cursor_layout.hpp"
 
 #include <math.h>
 
@@ -12,8 +12,8 @@ struct seaside_cursor_point seaside_cursor_clamp(struct seaside_cursor_box box,
     // Clamp to a half-open extent while keeping subpixel motion at its edge.
     const double right = (double)box.x + box.width - 0.000001;
     const double bottom = (double)box.y + box.height - 0.000001;
-    return (struct seaside_cursor_point){fmax(box.x, fmin(right, point.x)),
-                                         fmax(box.y, fmin(bottom, point.y))};
+    return seaside_cursor_point{fmax(box.x, fmin(right, point.x)),
+                                fmax(box.y, fmin(bottom, point.y))};
 }
 
 static bool map_side(struct seaside_cursor_box current, struct seaside_cursor_box destination,
@@ -86,7 +86,7 @@ static void consider_axis(struct seaside_cursor_box current, struct seaside_curs
     // Cross an aligned edge without shifting the pointer along the other axis.
     if (!best->found || crossing < best->crossing ||
         (crossing == best->crossing && gap < best->gap)) {
-        *best = (struct cursor_gap){seaside_cursor_clamp(destination, point), crossing, gap, true};
+        *best = cursor_gap{seaside_cursor_clamp(destination, point), crossing, gap, true};
     }
 }
 
@@ -104,7 +104,7 @@ seaside_cursor_route_relative(struct seaside_cursor_box current, struct seaside_
     if (seaside_cursor_contains(*destination, requested)) {
         return requested;
     }
-    struct cursor_gap gap = {0};
+    cursor_gap gap{};
     consider_axis(current, *destination, origin, requested, true, &gap);
     consider_axis(current, *destination, origin, requested, false, &gap);
     return gap.found ? gap.point : seaside_cursor_clamp(current, requested);

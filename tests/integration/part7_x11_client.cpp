@@ -13,7 +13,7 @@ static xcb_atom_t atom(xcb_connection_t *connection, const char *name) {
     const xcb_intern_atom_cookie_t cookie =
         xcb_intern_atom(connection, false, (uint16_t)strlen(name), name);
     xcb_intern_atom_reply_t *reply = xcb_intern_atom_reply(connection, cookie, NULL);
-    const xcb_atom_t value = reply ? reply->atom : XCB_ATOM_NONE;
+    const xcb_atom_t value = reply ? reply->atom : static_cast<xcb_atom_t>(XCB_ATOM_NONE);
     free(reply);
     return value;
 }
@@ -63,8 +63,9 @@ static bool done(xcb_connection_t *connection, xcb_atom_t protocols, xcb_atom_t 
 
 static bool serve(xcb_connection_t *connection, const xcb_screen_t *screen, xcb_window_t window,
                   xcb_atom_t protocols, xcb_atom_t close_atom) {
-    struct pollfd watched[] = {{.fd = STDIN_FILENO, .events = POLLIN},
-                               {.fd = xcb_get_file_descriptor(connection), .events = POLLIN}};
+    struct pollfd watched[] = {
+        {.fd = STDIN_FILENO, .events = POLLIN, .revents = 0},
+        {.fd = xcb_get_file_descriptor(connection), .events = POLLIN, .revents = 0}};
     while (!xcb_connection_has_error(connection)) {
         if (done(connection, protocols, close_atom)) {
             return true;

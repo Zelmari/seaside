@@ -1,7 +1,7 @@
 /* Simulated metadata only. Reuse the report/classification functions without
  * replacing libdrm or treating this fixture as a successful hardware probe. */
 #define main seaside_probe_application_main
-#include "../../tools/probe-drm.c"
+#include "../../tools/probe-drm.cpp"
 #undef main
 
 static void require(bool condition, const char *message) {
@@ -21,7 +21,8 @@ int main(void) {
     require(!card_basename("/dev/dri/card0-DP-1"), "connector name excluded");
     require(!card_basename("/dev/dri/renderD128"), "render node excluded");
 
-    struct device_info *device = calloc(1, sizeof(*device));
+    const std::unique_ptr<device_info> storage{new (std::nothrow) device_info{}};
+    auto *device = storage.get();
     require(device != NULL, "allocate snapshot");
     int pipe_fds[2];
     require(pipe(pipe_fds) == 0, "create non-device inherited fd");
@@ -39,36 +40,60 @@ int main(void) {
     device->enumerated = true;
     device->observation = OBS_COMPLETE;
     device->crtc_count = 32;
-    for (size_t i = 0; i < device->crtc_count; ++i) device->crtcs[i].id = 100 + i * 7;
+    for (size_t i = 0; i < device->crtc_count; ++i)
+        device->crtcs[i].id = 100 + i * 7;
     device->encoder_count = 1;
-    device->encoders[0] = (struct encoder_info){
-        .id = 51, .crtc_id = 107, .possible_crtcs = UINT32_C(0x80000002),
+    device->encoders[0] = encoder_info{
+        .id = 51,
+        .crtc_id = 107,
+        .possible_crtcs = UINT32_C(0x80000002),
     };
     device->connector_count = 1;
-    device->connectors[0] = (struct connector_info){
-        .id = 61, .type = DRM_MODE_CONNECTOR_DisplayPort, .type_id = 1,
-        .encoder_id = 51, .current_crtc_id = 107,
-        .possible_crtcs = UINT32_C(0x80000002), .connection = DRM_MODE_CONNECTED,
+    device->connectors[0] = connector_info{
+        .id = 61,
+        .type = DRM_MODE_CONNECTOR_DisplayPort,
+        .type_id = 1,
+        .encoder_id = 51,
+        .current_crtc_id = 107,
+        .possible_crtcs = UINT32_C(0x80000002),
+        .connection = DRM_MODE_CONNECTED,
     };
     device->plane_count = 2;
-    device->planes[0] = (struct plane_info){
-        .id = 71, .type_known = true, .type = DRM_PLANE_TYPE_CURSOR,
-        .crtc_id = 107, .fb_id = 81, .possible_crtcs = 2,
-        .format_count = 1, .property_count = 1,
+    device->planes[0] = plane_info{
+        .id = 71,
+        .crtc_id = 107,
+        .fb_id = 81,
+        .possible_crtcs = 2,
+        .format_count = 1,
+        .type_known = true,
+        .type = DRM_PLANE_TYPE_CURSOR,
+        .property_count = 1,
+        .properties = {},
     };
-    device->planes[0].properties[0] = (struct property_info){
-        .id = 91, .flags = DRM_MODE_PROP_ENUM, .value = DRM_PLANE_TYPE_CURSOR,
+    device->planes[0].properties[0] = property_info{
+        .name = {},
+        .id = 91,
+        .flags = DRM_MODE_PROP_ENUM,
+        .value = DRM_PLANE_TYPE_CURSOR,
     };
-    snprintf(device->planes[0].properties[0].name,
-             sizeof(device->planes[0].properties[0].name), "type");
-    device->planes[1] = (struct plane_info){
-        .id = 72, .type_known = true, .type = DRM_PLANE_TYPE_PRIMARY,
+    snprintf(device->planes[0].properties[0].name, sizeof(device->planes[0].properties[0].name),
+             "type");
+    device->planes[1] = plane_info{
+        .id = 72,
+        .crtc_id = 0,
+        .fb_id = 0,
         .possible_crtcs = UINT32_C(0x80000000),
+        .format_count = 0,
+        .type_known = true,
+        .type = DRM_PLANE_TYPE_PRIMARY,
+        .property_count = 0,
+        .properties = {},
     };
     device->cursor_width_known = true;
     device->cursor_width = 64;
     fputs("{\"simulated\":true,\"hardware_cursor_qualified\":false,"
-          "\"actual_cursor_use_tested\":false,\"devices\":[", stdout);
+          "\"actual_cursor_use_tested\":false,\"devices\":[",
+          stdout);
     report_device(stdout, device);
 
     /* A complete universal-plane observation with no cursor is distinct from
@@ -89,6 +114,5 @@ int main(void) {
     fputc(',', stdout);
     report_device(stdout, device);
     fputs("]}\n", stdout);
-    free(device);
     return fflush(stdout) == 0 && !ferror(stdout) ? 0 : 1;
 }

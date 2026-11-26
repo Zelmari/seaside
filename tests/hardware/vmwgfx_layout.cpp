@@ -23,7 +23,8 @@ int main(int argc, char **argv) {
         return 2;
     }
     struct drm_vmw_rect outputs[] = {{0, 0, 1280, 800}, {1280, 0, 800, 600}, {2080, 0, 640, 480}};
-    struct drm_vmw_update_layout_arg layout = {.num_outputs = count, .rects = (uintptr_t)outputs};
+    struct drm_vmw_update_layout_arg layout = {
+        .num_outputs = count, .pad64 = 0, .rects = reinterpret_cast<uintptr_t>(outputs)};
     const int fd = open("/dev/dri/renderD128", O_RDWR | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0) {
         perror("open vmwgfx");
