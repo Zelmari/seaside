@@ -11,12 +11,16 @@
 #include <glib.h>
 #include <limits.h>
 #include <math.h>
+#include <memory>
+#include <new>
 #include <png.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <string>
 #include <time.h>
 #include <type_traits>
+#include <unordered_map>
 #include <wayland-server-core.h>
 #include <xf86drm.h>
 
@@ -42,6 +46,23 @@ static_assert(std::is_standard_layout_v<wlr_scene_node>);
 static_assert(std::is_standard_layout_v<wlr_xdg_popup>);
 static_assert(std::is_standard_layout_v<wlr_xdg_toplevel_icon_v1_buffer>);
 
+struct SceneListener {
+    wl_listener listener;
+    seaside_scene_bridge *scene;
+
+    void connect(wl_signal &signal, seaside_scene_bridge &owner,
+                 void (*notify)(wl_listener *, void *) noexcept) noexcept {
+        scene = &owner;
+        listener.notify = notify;
+        wl_signal_add(&signal, &listener);
+    }
+
+    static seaside_scene_bridge *owner(wl_listener *listener) noexcept {
+        return reinterpret_cast<SceneListener *>(listener)->scene;
+    }
+};
+static_assert(std::is_standard_layout_v<SceneListener>);
+
 struct seaside_scene_bridge {
     struct wl_display *display;
     struct wlr_scene *scene;
@@ -50,22 +71,22 @@ struct seaside_scene_bridge {
     struct wlr_buffer *wallpaper;
     struct wlr_xdg_shell *shell;
     struct wlr_xdg_activation_v1 *activation;
-    struct wl_listener new_decoration;
-    struct wl_listener set_icon, icon_manager_destroy;
+    SceneListener new_decoration;
+    SceneListener set_icon, icon_manager_destroy;
     struct wlr_tearing_control_manager_v1 *tearing;
     struct seaside_window_capture *capture;
     struct seaside_layer_scene *layers;
     double cursor_x, cursor_y;
     bool cursor_known;
     struct wl_list views;
-    GHashTable *views_by_id;
+    std::unordered_map<uint64_t, struct scene_view *> views_by_id;
     struct wl_list popups;
     struct wl_list input_popup_views;
     struct wl_list outputs;
-    struct wl_listener new_toplevel;
-    struct wl_listener new_popup;
-    struct wl_listener shell_destroy;
-    struct wl_listener activation_destroy, request_activation;
+    SceneListener new_toplevel;
+    SceneListener new_popup;
+    SceneListener shell_destroy;
+    SceneListener activation_destroy, request_activation;
     struct seaside_scene_snapshot snapshot;
     seaside_scene_window_fn window;
     void *window_data;
@@ -83,13 +104,12 @@ struct seaside_scene_bridge {
     double blur_strength;
     int blur_passes;
     struct wl_list blur_surfaces;
-    struct wl_listener blur_new_surface, blur_compositor_destroy;
+    SceneListener blur_new_surface, blur_compositor_destroy;
     seaside_scene_frame_fn frame_observer;
     void *frame_observer_data;
     seaside_scene_before_frame_fn before_frame;
     void *before_frame_data;
 };
-static_assert(std::is_standard_layout_v<seaside_scene_bridge>);
 
 struct window_projection {
     double scale_x, scale_y;
@@ -100,7 +120,7 @@ struct scene_view {
     struct seaside_scene_bridge *owner;
     struct wlr_xdg_toplevel *toplevel;
     struct wlr_xdg_toplevel_icon_v1 *pending_icon;
-    char *icon_name, *icon_png_base64;
+    std::string icon_name, icon_png_base64;
     bool icon_dirty;
     struct wlr_xdg_toplevel_decoration_v1 *decoration;
     struct wl_listener request_decoration, decoration_destroy;
@@ -238,7 +258,7 @@ static void blur_surface_destroy(struct wl_listener *listener, void *data) noexc
 }
 
 static void blur_new_surface(struct wl_listener *listener, void *data) noexcept {
-    struct seaside_scene_bridge *scene = wl_container_of(listener, scene, blur_new_surface);
+    auto *scene = SceneListener::owner(listener);
     struct wlr_surface *surface = static_cast<wlr_surface *>(data);
     struct blur_surface *watched = static_cast<blur_surface *>(calloc(1, sizeof(*watched)));
     if (!watched) {
@@ -253,10 +273,10 @@ static void blur_new_surface(struct wl_listener *listener, void *data) noexcept 
 }
 
 static void remove_blur_watches(struct seaside_scene_bridge *scene) {
-    wl_list_remove(&scene->blur_new_surface.link);
-    wl_list_init(&scene->blur_new_surface.link);
-    wl_list_remove(&scene->blur_compositor_destroy.link);
-    wl_list_init(&scene->blur_compositor_destroy.link);
+    wl_list_remove(&scene->blur_new_surface.listener.link);
+    wl_list_init(&scene->blur_new_surface.listener.link);
+    wl_list_remove(&scene->blur_compositor_destroy.listener.link);
+    wl_list_init(&scene->blur_compositor_destroy.listener.link);
     struct blur_surface *surface, *next;
     wl_list_for_each_safe(surface, next, &scene->blur_surfaces, link) {
         remove_blur_surface(surface);
@@ -265,7 +285,7 @@ static void remove_blur_watches(struct seaside_scene_bridge *scene) {
 
 static void blur_compositor_destroy(struct wl_listener *listener, void *data) noexcept {
     (void)data;
-    struct seaside_scene_bridge *scene = wl_container_of(listener, scene, blur_compositor_destroy);
+    auto *scene = SceneListener::owner(listener);
     remove_blur_watches(scene);
 }
 
@@ -320,8 +340,11 @@ void seaside_scene_drop_image(struct wlr_buffer *buffer) {
 }
 
 static struct scene_view *find_view(const struct seaside_scene_bridge *scene, uint64_t id) {
-    return scene && id ? static_cast<scene_view *>(g_hash_table_lookup(scene->views_by_id, &id))
-                       : nullptr;
+    if (!scene || !id) {
+        return nullptr;
+    }
+    const auto view = scene->views_by_id.find(id);
+    return view == scene->views_by_id.end() ? nullptr : view->second;
 }
 
 static struct scene_view *toplevel_view(const struct seaside_scene_bridge *scene,
@@ -957,7 +980,7 @@ static void decoration_destroy(struct wl_listener *listener, void *data) noexcep
 }
 
 static void new_decoration(struct wl_listener *listener, void *data) noexcept {
-    struct seaside_scene_bridge *scene = wl_container_of(listener, scene, new_decoration);
+    auto *scene = SceneListener::owner(listener);
     struct wlr_xdg_toplevel_decoration_v1 *decoration =
         static_cast<wlr_xdg_toplevel_decoration_v1 *>(data);
     struct scene_view *view = toplevel_view(scene, decoration->toplevel);
@@ -1014,7 +1037,7 @@ static bool copy_icon_pixels(struct wlr_buffer *buffer, int size, uint8_t *rgba)
     return supported;
 }
 
-static char *encode_icon(const struct wlr_xdg_toplevel_icon_v1 *icon) {
+static std::string encode_icon(const struct wlr_xdg_toplevel_icon_v1 *icon) {
     struct wlr_xdg_toplevel_icon_v1_buffer *entry;
     uint8_t pixels[window_icon_size * window_icon_size * 4];
     int size = 0;
@@ -1026,7 +1049,7 @@ static char *encode_icon(const struct wlr_xdg_toplevel_icon_v1 *icon) {
         }
     }
     if (!size) {
-        return nullptr;
+        return {};
     }
     png_image image{};
     image.version = PNG_IMAGE_VERSION;
@@ -1034,39 +1057,44 @@ static char *encode_icon(const struct wlr_xdg_toplevel_icon_v1 *icon) {
     image.height = static_cast<png_uint_32>(size);
     image.format = PNG_FORMAT_RGBA;
     png_alloc_size_t length = 0;
-    char *encoded = nullptr;
+    std::unique_ptr<char, decltype(&g_free)> encoded{nullptr, g_free};
     if (png_image_write_to_memory(&image, nullptr, &length, 0, pixels, 0, nullptr)) {
         void *png = malloc(length);
         if (png && png_image_write_to_memory(&image, png, &length, 0, pixels, 0, nullptr)) {
-            encoded = g_base64_encode(static_cast<const guchar *>(png), length);
+            encoded.reset(g_base64_encode(static_cast<const guchar *>(png), length));
         }
         free(png);
     }
     png_image_free(&image);
-    return encoded;
+    return encoded ? std::string{encoded.get()} : std::string{};
 }
 
-static void apply_icon(struct scene_view *view) {
+static void apply_icon(struct scene_view *view) noexcept {
     if (!view->icon_dirty) {
         return;
     }
     view->icon_dirty = false;
-    g_clear_pointer(&view->icon_name, g_free);
-    g_clear_pointer(&view->icon_png_base64, g_free);
+    view->icon_name.clear();
+    view->icon_png_base64.clear();
     struct wlr_xdg_toplevel_icon_v1 *icon = view->pending_icon;
     if (icon) {
-        if (icon->name && *icon->name && !strchr(icon->name, '/') && strcmp(icon->name, ".") != 0 &&
-            strcmp(icon->name, "..") != 0 && strlen(icon->name) <= 255) {
-            view->icon_name = g_strdup(icon->name);
+        try {
+            if (icon->name && *icon->name && !strchr(icon->name, '/') &&
+                strcmp(icon->name, ".") != 0 && strcmp(icon->name, "..") != 0 &&
+                strlen(icon->name) <= 255) {
+                view->icon_name = icon->name;
+            }
+            view->icon_png_base64 = encode_icon(icon);
+        } catch (...) {
+            fputs("seaside: could not prepare window icon\n", stderr);
         }
-        view->icon_png_base64 = encode_icon(icon);
         wlr_xdg_toplevel_icon_v1_unref(icon);
         view->pending_icon = nullptr;
     }
 }
 
 static void set_icon(struct wl_listener *listener, void *data) noexcept {
-    struct seaside_scene_bridge *scene = wl_container_of(listener, scene, set_icon);
+    auto *scene = SceneListener::owner(listener);
     const struct wlr_xdg_toplevel_icon_manager_v1_set_icon_event *event =
         static_cast<const wlr_xdg_toplevel_icon_manager_v1_set_icon_event *>(data);
     struct scene_view *view = toplevel_view(scene, event->toplevel);
@@ -1080,15 +1108,15 @@ static void set_icon(struct wl_listener *listener, void *data) noexcept {
 }
 
 static void remove_icon_manager_watch(struct seaside_scene_bridge *scene) {
-    wl_list_remove(&scene->set_icon.link);
-    wl_list_init(&scene->set_icon.link);
-    wl_list_remove(&scene->icon_manager_destroy.link);
-    wl_list_init(&scene->icon_manager_destroy.link);
+    wl_list_remove(&scene->set_icon.listener.link);
+    wl_list_init(&scene->set_icon.listener.link);
+    wl_list_remove(&scene->icon_manager_destroy.listener.link);
+    wl_list_init(&scene->icon_manager_destroy.listener.link);
 }
 
 static void icon_manager_destroy(struct wl_listener *listener, void *data) noexcept {
     (void)data;
-    struct seaside_scene_bridge *scene = wl_container_of(listener, scene, icon_manager_destroy);
+    auto *scene = SceneListener::owner(listener);
     remove_icon_manager_watch(scene);
 }
 
@@ -1192,8 +1220,6 @@ static void destroy_view(struct scene_view *view) {
     if (view->pending_icon) {
         wlr_xdg_toplevel_icon_v1_unref(view->pending_icon);
     }
-    g_free(view->icon_name);
-    g_free(view->icon_png_base64);
     detach_decoration(view);
     seaside_window_capture_unmap(view->capture);
     if (view->owner->focused_view == view) {
@@ -1215,7 +1241,7 @@ static void destroy_view(struct scene_view *view) {
     wl_list_remove(&view->set_parent.link);
     wl_list_remove(&view->link);
     if (view->id) {
-        g_hash_table_remove(view->owner->views_by_id, &view->id);
+        view->owner->views_by_id.erase(view->id);
     }
     wlr_scene_node_set_enabled(&view->tree->node, false);
     if (view->popup_tree) {
@@ -1223,7 +1249,7 @@ static void destroy_view(struct scene_view *view) {
     }
     emit_window(view, SEASIDE_WINDOW_DESTROYED, false, false);
     wlr_scene_node_destroy(&view->tree->node);
-    free(view);
+    delete view;
 }
 
 static void view_destroy(struct wl_listener *listener, void *data) noexcept {
@@ -1233,9 +1259,9 @@ static void view_destroy(struct wl_listener *listener, void *data) noexcept {
 }
 
 static void new_toplevel(struct wl_listener *listener, void *data) noexcept {
-    struct seaside_scene_bridge *scene = wl_container_of(listener, scene, new_toplevel);
+    auto *scene = SceneListener::owner(listener);
     struct wlr_xdg_toplevel *toplevel = static_cast<wlr_xdg_toplevel *>(data);
-    struct scene_view *view = static_cast<scene_view *>(calloc(1, sizeof(*view)));
+    auto *view = new (std::nothrow) scene_view{};
     if (!view) {
         scene->snapshot.failed = true;
         wl_client_post_no_memory(wl_resource_get_client(toplevel->resource));
@@ -1252,7 +1278,7 @@ static void new_toplevel(struct wl_listener *listener, void *data) noexcept {
         if (view->tree) {
             wlr_scene_node_destroy(&view->tree->node);
         }
-        free(view);
+        delete view;
         scene->snapshot.failed = true;
         wl_client_post_no_memory(wl_resource_get_client(toplevel->resource));
         return;
@@ -1279,9 +1305,16 @@ static void new_toplevel(struct wl_listener *listener, void *data) noexcept {
     wl_signal_add(&toplevel->events.set_parent, &view->set_parent);
     wl_list_insert(&scene->views, &view->link);
     view->id = emit_window(view, SEASIDE_WINDOW_CREATED, false, false);
+    bool indexed = false;
     if (view->id) {
-        g_hash_table_insert(scene->views_by_id, &view->id, view);
-    } else if (scene->window) {
+        try {
+            scene->views_by_id.insert_or_assign(view->id, view);
+            indexed = true;
+        } catch (...) {
+            // The registered surface still owns its listeners until its destroy event.
+        }
+    }
+    if (!indexed && scene->window) {
         scene->snapshot.failed = true;
         wl_client_post_no_memory(wl_resource_get_client(toplevel->resource));
     }
@@ -1380,7 +1413,7 @@ static void popup_destroy(struct wl_listener *listener, void *data) noexcept {
 }
 
 static void new_popup(struct wl_listener *listener, void *data) noexcept {
-    struct seaside_scene_bridge *scene = wl_container_of(listener, scene, new_popup);
+    auto *scene = SceneListener::owner(listener);
     struct wlr_xdg_popup *xdg = static_cast<wlr_xdg_popup *>(data);
     if (!xdg->parent) {
         // A layer-shell popup receives its parent via zwlr_layer_surface.get_popup.
@@ -1880,13 +1913,13 @@ static void detach(struct seaside_scene_bridge *scene) {
     scene->watched_pid = 0;
     scene->focus = nullptr;
     scene->focus_data = nullptr;
-    wl_list_remove(&scene->new_toplevel.link);
-    wl_list_remove(&scene->new_popup.link);
-    wl_list_remove(&scene->new_decoration.link);
-    wl_list_remove(&scene->shell_destroy.link);
+    wl_list_remove(&scene->new_toplevel.listener.link);
+    wl_list_remove(&scene->new_popup.listener.link);
+    wl_list_remove(&scene->new_decoration.listener.link);
+    wl_list_remove(&scene->shell_destroy.listener.link);
     if (scene->activation) {
-        wl_list_remove(&scene->request_activation.link);
-        wl_list_remove(&scene->activation_destroy.link);
+        wl_list_remove(&scene->request_activation.listener.link);
+        wl_list_remove(&scene->activation_destroy.listener.link);
         scene->activation = nullptr;
     }
     struct scene_view *view, *next_view;
@@ -1911,20 +1944,20 @@ static void detach(struct seaside_scene_bridge *scene) {
 
 static void shell_destroy(struct wl_listener *listener, void *data) noexcept {
     (void)data;
-    struct seaside_scene_bridge *scene = wl_container_of(listener, scene, shell_destroy);
+    auto *scene = SceneListener::owner(listener);
     detach(scene);
 }
 
 static void activation_destroy(struct wl_listener *listener, void *data) noexcept {
     (void)data;
-    struct seaside_scene_bridge *scene = wl_container_of(listener, scene, activation_destroy);
-    wl_list_remove(&scene->request_activation.link);
-    wl_list_remove(&scene->activation_destroy.link);
+    auto *scene = SceneListener::owner(listener);
+    wl_list_remove(&scene->request_activation.listener.link);
+    wl_list_remove(&scene->activation_destroy.listener.link);
     scene->activation = nullptr;
 }
 
 static void request_activation(struct wl_listener *listener, void *data) noexcept {
-    struct seaside_scene_bridge *scene = wl_container_of(listener, scene, request_activation);
+    auto *scene = SceneListener::owner(listener);
     const struct wlr_xdg_activation_v1_request_activate_event *request =
         static_cast<const wlr_xdg_activation_v1_request_activate_event *>(data);
     struct wlr_surface *root = wlr_surface_get_root_surface(request->surface);
@@ -1939,11 +1972,11 @@ struct seaside_scene_bridge *seaside_scene_create(struct wl_display *display) {
     if (!display) {
         return nullptr;
     }
-    struct seaside_scene_bridge *scene =
-        static_cast<seaside_scene_bridge *>(calloc(1, sizeof(*scene)));
-    if (!scene) {
+    std::unique_ptr<seaside_scene_bridge> owner{new (std::nothrow) seaside_scene_bridge{}};
+    if (!owner) {
         return nullptr;
     }
+    auto *scene = owner.get();
     scene->display = display;
     scene->direct_scanout = true;
     scene->titlebars = true;
@@ -1955,11 +1988,10 @@ struct seaside_scene_bridge *seaside_scene_create(struct wl_display *display) {
     wl_list_init(&scene->input_popup_views);
     wl_list_init(&scene->outputs);
     wl_list_init(&scene->blur_surfaces);
-    wl_list_init(&scene->blur_new_surface.link);
-    wl_list_init(&scene->blur_compositor_destroy.link);
+    wl_list_init(&scene->blur_new_surface.listener.link);
+    wl_list_init(&scene->blur_compositor_destroy.listener.link);
     scene->scene = wlr_scene_create();
     if (!scene->scene) {
-        free(scene);
         return nullptr;
     }
     scene->backgrounds = wlr_scene_tree_create(&scene->scene->tree);
@@ -1970,13 +2002,11 @@ struct seaside_scene_bridge *seaside_scene_create(struct wl_display *display) {
     if (!scene->backgrounds || !scene->windows || !scene->drag_icons || !scene->input_popups ||
         !scene->decorations) {
         wlr_scene_node_destroy(&scene->scene->tree.node);
-        free(scene);
         return nullptr;
     }
     scene->shell = wlr_xdg_shell_create(display, 6);
     if (!scene->shell) {
         wlr_scene_node_destroy(&scene->scene->tree.node);
-        free(scene);
         return nullptr;
     }
     scene->activation = wlr_xdg_activation_v1_create(display);
@@ -1990,40 +2020,34 @@ struct seaside_scene_bridge *seaside_scene_create(struct wl_display *display) {
         !scene->layers) {
         seaside_layer_scene_destroy(scene->layers);
         wlr_scene_node_destroy(&scene->scene->tree.node);
-        free(scene);
         return nullptr;
     }
     wlr_scene_node_place_below(&scene->input_popups->node, &scene->drag_icons->node);
-    scene->views_by_id = g_hash_table_new(g_int64_hash, g_int64_equal);
-    scene->new_toplevel.notify = new_toplevel;
-    scene->new_popup.notify = new_popup;
-    scene->new_decoration.notify = new_decoration;
-    scene->set_icon.notify = set_icon;
-    scene->icon_manager_destroy.notify = icon_manager_destroy;
-    scene->shell_destroy.notify = shell_destroy;
-    scene->activation_destroy.notify = activation_destroy;
-    scene->request_activation.notify = request_activation;
-    wl_signal_add(&scene->shell->events.new_toplevel, &scene->new_toplevel);
-    wl_signal_add(&scene->shell->events.new_popup, &scene->new_popup);
-    wl_signal_add(&decoration_manager->events.new_toplevel_decoration, &scene->new_decoration);
+
+    scene->new_toplevel.connect(scene->shell->events.new_toplevel, *scene, new_toplevel);
+    scene->new_popup.connect(scene->shell->events.new_popup, *scene, new_popup);
+    scene->new_decoration.connect(decoration_manager->events.new_toplevel_decoration, *scene,
+                                  new_decoration);
     int icon_sizes[] = {32, window_icon_size};
     wlr_xdg_toplevel_icon_manager_v1_set_sizes(icon_manager, icon_sizes, 2);
-    wl_signal_add(&icon_manager->events.set_icon, &scene->set_icon);
-    wl_signal_add(&icon_manager->events.destroy, &scene->icon_manager_destroy);
-    wl_signal_add(&scene->shell->events.destroy, &scene->shell_destroy);
-    wl_signal_add(&scene->activation->events.destroy, &scene->activation_destroy);
-    wl_signal_add(&scene->activation->events.request_activate, &scene->request_activation);
+    scene->set_icon.connect(icon_manager->events.set_icon, *scene, set_icon);
+    scene->icon_manager_destroy.connect(icon_manager->events.destroy, *scene, icon_manager_destroy);
+    scene->shell_destroy.connect(scene->shell->events.destroy, *scene, shell_destroy);
+    scene->activation_destroy.connect(scene->activation->events.destroy, *scene,
+                                      activation_destroy);
+    scene->request_activation.connect(scene->activation->events.request_activate, *scene,
+                                      request_activation);
     scene->attached = true;
-    return scene;
+    return owner.release();
 }
 
 void seaside_scene_watch_surfaces(struct seaside_scene_bridge *scene,
                                   struct wlr_compositor *compositor) {
-    if (compositor && wl_list_empty(&scene->blur_new_surface.link)) {
-        scene->blur_new_surface.notify = blur_new_surface;
-        scene->blur_compositor_destroy.notify = blur_compositor_destroy;
-        wl_signal_add(&compositor->events.new_surface, &scene->blur_new_surface);
-        wl_signal_add(&compositor->events.destroy, &scene->blur_compositor_destroy);
+    if (compositor && wl_list_empty(&scene->blur_new_surface.listener.link)) {
+
+        scene->blur_new_surface.connect(compositor->events.new_surface, *scene, blur_new_surface);
+        scene->blur_compositor_destroy.connect(compositor->events.destroy, *scene,
+                                               blur_compositor_destroy);
     }
 }
 
@@ -2164,8 +2188,7 @@ void seaside_scene_move_drag_icon(struct seaside_scene_bridge *scene, int x, int
 void seaside_scene_destroy(struct seaside_scene_bridge *scene) {
     if (scene) {
         detach(scene);
-        g_hash_table_unref(scene->views_by_id);
-        free(scene);
+        delete scene;
     }
 }
 
@@ -2625,8 +2648,8 @@ seaside_scene_get_window_metadata(struct seaside_scene_bridge *scene, uint64_t i
     return seaside_scene_window_metadata{
         .app_id = view->toplevel->app_id,
         .title = view->toplevel->title,
-        .icon_name = view->icon_name,
-        .icon_png_base64 = view->icon_png_base64,
+        .icon_name = view->icon_name.empty() ? nullptr : view->icon_name.c_str(),
+        .icon_png_base64 = view->icon_png_base64.empty() ? nullptr : view->icon_png_base64.c_str(),
     };
 }
 
