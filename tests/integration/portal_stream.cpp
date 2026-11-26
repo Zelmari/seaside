@@ -51,7 +51,7 @@ Message make_call(sd_bus *bus, const char *path, const char *interface, const ch
 
 Message call(sd_bus *bus, const Message &request, const char *method) {
     sd_bus_message *raw = nullptr;
-    sd_bus_error error = SD_BUS_ERROR_NULL;
+    sd_bus_error error{};
     const int status = sd_bus_call(bus, request.get(), bus_timeout, &error, &raw);
     Message result(raw, sd_bus_message_unref);
     if (status < 0 && error.message) {
@@ -287,14 +287,25 @@ class VideoReceiver {
         events_.process = process;
         pw_stream_add_listener(stream_, &listener_, &events_, this);
         std::array<std::uint8_t, 512> storage{};
-        spa_pod_builder builder = SPA_POD_BUILDER_INIT(storage.data(), storage.size());
-        const auto *format = static_cast<const spa_pod *>(spa_pod_builder_add_object(
-            &builder, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat, SPA_FORMAT_mediaType,
-            SPA_POD_Id(SPA_MEDIA_TYPE_video), SPA_FORMAT_mediaSubtype,
-            SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw), SPA_FORMAT_VIDEO_format,
-            SPA_POD_CHOICE_ENUM_Id(5, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_BGRx,
-                                   SPA_VIDEO_FORMAT_BGRA, SPA_VIDEO_FORMAT_RGBx,
-                                   SPA_VIDEO_FORMAT_RGBA)));
+        spa_pod_builder builder{};
+        spa_pod_frame frame{};
+        spa_pod_builder_init(&builder, storage.data(), static_cast<std::uint32_t>(storage.size()));
+        check(spa_pod_builder_push_object(&builder, &frame, SPA_TYPE_OBJECT_Format,
+                                          SPA_PARAM_EnumFormat),
+              "start the PipeWire video format");
+        check(spa_pod_builder_add(
+                  &builder, SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
+                  SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
+                  SPA_FORMAT_VIDEO_format,
+                  SPA_POD_CHOICE_ENUM_Id(5, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_BGRx,
+                                         SPA_VIDEO_FORMAT_BGRA, SPA_VIDEO_FORMAT_RGBx,
+                                         SPA_VIDEO_FORMAT_RGBA),
+                  0),
+              "build the PipeWire video format");
+        const auto *format = static_cast<const spa_pod *>(spa_pod_builder_pop(&builder, &frame));
+        if (!format) {
+            throw std::runtime_error("cannot finish the PipeWire video format");
+        }
         // PipeWire defines these enum values as combinable flags.
         // NOLINTBEGIN(clang-analyzer-optin.core.EnumCastOutOfRange)
         const auto flags =
@@ -335,11 +346,20 @@ class VideoReceiver {
         std::fprintf(stderr, "PipeWire format %u %ux%u\n", self.format_.format,
                      self.format_.size.width, self.format_.size.height);
         std::array<std::uint8_t, 256> storage{};
-        spa_pod_builder builder = SPA_POD_BUILDER_INIT(storage.data(), storage.size());
-        const auto *parameters = static_cast<const spa_pod *>(spa_pod_builder_add_object(
-            &builder, SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers, SPA_PARAM_BUFFERS_dataType,
-            SPA_POD_CHOICE_FLAGS_Int((1 << SPA_DATA_MemPtr) | (1 << SPA_DATA_MemFd))));
-        if (pw_stream_update_params(self.stream_, &parameters, 1) < 0) {
+        spa_pod_builder builder{};
+        spa_pod_frame frame{};
+        spa_pod_builder_init(&builder, storage.data(), static_cast<std::uint32_t>(storage.size()));
+        if (spa_pod_builder_push_object(&builder, &frame, SPA_TYPE_OBJECT_ParamBuffers,
+                                        SPA_PARAM_Buffers) < 0 ||
+            spa_pod_builder_add(
+                &builder, SPA_PARAM_BUFFERS_dataType,
+                SPA_POD_CHOICE_FLAGS_Int((1 << SPA_DATA_MemPtr) | (1 << SPA_DATA_MemFd)), 0) < 0) {
+            self.ended_ = true;
+            return;
+        }
+        const auto *parameters =
+            static_cast<const spa_pod *>(spa_pod_builder_pop(&builder, &frame));
+        if (!parameters || pw_stream_update_params(self.stream_, &parameters, 1) < 0) {
             self.ended_ = true;
         }
     }
