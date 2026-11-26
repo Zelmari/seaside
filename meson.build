@@ -308,7 +308,7 @@ test('part6-cursor-layout', cursor_layout_tests, suite: ['unit', 'part6'], timeo
 )
 
 drm_mode_tests = executable(
-  'seaside-part8-drm-modes', 'tests/unit/part8_drm_modes.c',
+  'seaside-part8-drm-modes', 'tests/unit/part8_drm_modes.cpp',
   include_directories: include_directories('src'),
   dependencies: [wlroots, wayland_server, libdrm, libinput, pixman],
   link_with: tty_foundation, install: false,
@@ -329,7 +329,7 @@ test('part3-tty-guard', python, args: [files('tests/integration/test_tty_guard.p
 )
 
 tty_input_test = executable(
-  'seaside-tty-input-test', ['tests/unit/tty_input_test.c', seat_protocols],
+  'seaside-tty-input-test', ['tests/unit/tty_input_test.cpp', seat_protocols],
   include_directories: include_directories('src'),
   dependencies: [wlroots, wayland_server, wayland_client, pixman, xkbcommon],
   link_with: tty_foundation, install: false,

@@ -1,7 +1,11 @@
 #include "tty_drm.hpp"
+#include "wlr_compat.hpp"
 
 #include <stdio.h>
+
+extern "C" {
 #include <wlr/types/wlr_output.h>
+}
 
 #define CHECK(condition)                                                                           \
     do {                                                                                           \
@@ -12,16 +16,37 @@
     } while (0)
 
 int main(void) {
-    struct wlr_output output = {.adaptive_sync_supported = true};
+    wlr_output output{};
+    output.adaptive_sync_supported = true;
     wl_list_init(&output.modes);
-    struct seaside_drm_output_settings automatic = {0};
+    struct seaside_drm_output_settings automatic = {};
     CHECK(!seaside_tty_drm_select_mode(&output, &automatic));
 
     struct wlr_output_mode modes[] = {
-        {.width = 1280, .height = 720, .refresh = 240000},
-        {.width = 1920, .height = 1080, .refresh = 60000, .preferred = true},
-        {.width = 1920, .height = 1080, .refresh = 143856},
-        {.width = 2560, .height = 1440, .refresh = 120000},
+        {.width = 1280,
+         .height = 720,
+         .refresh = 240000,
+         .preferred = false,
+         .picture_aspect_ratio = {},
+         .link = {}},
+        {.width = 1920,
+         .height = 1080,
+         .refresh = 60000,
+         .preferred = true,
+         .picture_aspect_ratio = {},
+         .link = {}},
+        {.width = 1920,
+         .height = 1080,
+         .refresh = 143856,
+         .preferred = false,
+         .picture_aspect_ratio = {},
+         .link = {}},
+        {.width = 2560,
+         .height = 1440,
+         .refresh = 120000,
+         .preferred = false,
+         .picture_aspect_ratio = {},
+         .link = {}},
     };
     for (size_t i = 0; i < sizeof(modes) / sizeof(*modes); ++i) {
         wl_list_insert(output.modes.prev, &modes[i].link);
@@ -39,12 +64,15 @@ int main(void) {
     CHECK(automatic.width == 1920 && automatic.height == 1080);
     CHECK(automatic.refresh_millihz == 143856);
 
-    struct seaside_drm_output_settings resolution = {.width = 2560, .height = 1440};
+    seaside_drm_output_settings resolution{};
+    resolution.width = 2560;
+    resolution.height = 1440;
     CHECK(seaside_tty_drm_select_mode(&output, &resolution));
     CHECK(resolution.mode == &modes[3]);
     CHECK(resolution.refresh_millihz == 120000);
 
-    struct seaside_drm_output_settings refresh = {.refresh_millihz = 60000};
+    seaside_drm_output_settings refresh{};
+    refresh.refresh_millihz = 60000;
     CHECK(seaside_tty_drm_select_mode(&output, &refresh));
     CHECK(refresh.mode == &modes[1]);
 
@@ -54,9 +82,10 @@ int main(void) {
     const int nominal[] = {60000, 144000, 165000};
     int matched = 0;
     for (size_t i = 0; i < 3; ++i) {
-        struct seaside_drm_output_settings request = {.width = modes[i + 1].width,
-                                                      .height = modes[i + 1].height,
-                                                      .refresh_millihz = nominal[i]};
+        seaside_drm_output_settings request{};
+        request.width = modes[i + 1].width;
+        request.height = modes[i + 1].height;
+        request.refresh_millihz = nominal[i];
         if (seaside_tty_drm_select_mode(&output, &request) && request.mode == &modes[i + 1] &&
             request.refresh_millihz == modes[i + 1].refresh) {
             ++matched;
@@ -67,7 +96,8 @@ int main(void) {
     }
     CHECK(matched == 3);
     modes[2].refresh = 180003;
-    struct seaside_drm_output_settings nominal_180 = {.refresh_millihz = 180000};
+    seaside_drm_output_settings nominal_180{};
+    nominal_180.refresh_millihz = 180000;
     automatic.refresh_millihz = 0;
     CHECK(seaside_tty_drm_select_mode(&output, &nominal_180));
     CHECK(seaside_tty_drm_select_mode(&output, &automatic));
@@ -83,7 +113,8 @@ int main(void) {
     refresh.refresh_millihz = 61000;
     CHECK(!seaside_tty_drm_select_mode(&output, &refresh));
 
-    struct seaside_drm_output_settings unsupported = {.refresh_millihz = 240000};
+    seaside_drm_output_settings unsupported{};
+    unsupported.refresh_millihz = 240000;
     CHECK(!seaside_tty_drm_select_mode(&output, &unsupported));
     CHECK(!unsupported.mode);
     return 0;

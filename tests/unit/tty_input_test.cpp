@@ -1,5 +1,6 @@
-#define _GNU_SOURCE
 #include "tty_input.hpp"
+#include "wl_array_span.hpp"
+#include "wlr_compat.hpp"
 
 #include "cursor-shape-v1-client-protocol.h"
 #include "pointer-constraints-client-protocol.h"
@@ -16,12 +17,15 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #include <wayland-client.h>
+
+extern "C" {
 #include <wlr/backend/interface.h>
 #include <wlr/interfaces/wlr_keyboard.h>
 #include <wlr/interfaces/wlr_pointer.h>
 #include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_data_device.h>
 #include <wlr/types/wlr_shm.h>
+}
 #include <xkbcommon/xkbcommon-keysyms.h>
 
 static void check(bool condition, const char *message) {
@@ -50,94 +54,97 @@ struct observation {
     double x, y;
 };
 
-static void record_motion(void *data, enum seaside_pointer_motion kind, double x, double y) {
-    struct observation *observation = data;
-    ++observation->motions;
-    observation->kind = kind;
-    observation->x = x;
-    observation->y = y;
+static void record_motion(void *data, enum seaside_pointer_motion kind, double x,
+                          double y) noexcept {
+    auto *observed = static_cast<observation *>(data);
+    ++observed->motions;
+    observed->kind = kind;
+    observed->x = x;
+    observed->y = y;
 }
 
-static void record_exit(void *data) {
-    struct observation *observation = data;
-    ++observation->exits;
+static void record_exit(void *data) noexcept {
+    auto *observed = static_cast<observation *>(data);
+    ++observed->exits;
 }
 
-static void record_launch(void *data) {
-    struct observation *observation = data;
-    ++observation->launches;
+static void record_launch(void *data) noexcept {
+    auto *observed = static_cast<observation *>(data);
+    ++observed->launches;
 }
 
-static bool record_shortcut(void *data, uint8_t modifiers, uint32_t keysym) {
-    struct observation *observation = data;
+static bool record_shortcut(void *data, uint8_t modifiers, uint32_t keysym) noexcept {
+    auto *observed = static_cast<observation *>(data);
     if (modifiers == 2 && keysym == XKB_KEY_Return) {
-        ++observation->configured_shortcuts;
+        ++observed->configured_shortcuts;
         return true;
     }
     if (keysym == XKB_KEY_XF86Switch_VT_2) {
-        ++observation->vt_switches;
+        ++observed->vt_switches;
         return true;
     }
     if (modifiers == 1) {
         switch (keysym) {
         case XKB_KEY_D:
-            ++observation->alternate_case_shortcuts;
+            ++observed->alternate_case_shortcuts;
             return true;
         case XKB_KEY_e:
-            ++observation->exact_case_shortcuts;
+            ++observed->exact_case_shortcuts;
             return true;
         case XKB_KEY_E:
-            ++observation->shadowed_case_shortcuts;
+            ++observed->shadowed_case_shortcuts;
             return true;
         }
     }
     if (modifiers == (1 | 8)) {
         switch (keysym) {
         case XKB_KEY_2:
-            ++observation->digit_shortcuts;
+            ++observed->digit_shortcuts;
             return true;
         case XKB_KEY_dollar:
-            ++observation->explicit_symbol_shortcuts;
+            ++observed->explicit_symbol_shortcuts;
             return true;
         case XKB_KEY_4:
-            ++observation->shadowed_digit_shortcuts;
+            ++observed->shadowed_digit_shortcuts;
             return true;
         }
     }
     return false;
 }
 
-static void record_modifiers(void *data, uint8_t modifiers) {
-    struct observation *observation = data;
-    ++observation->modifier_changes;
-    observation->modifiers = modifiers;
+static void record_modifiers(void *data, uint8_t modifiers) noexcept {
+    auto *observed = static_cast<observation *>(data);
+    ++observed->modifier_changes;
+    observed->modifiers = modifiers;
 }
 
-static void record_keyboard_activity(void *data, bool pointer) {
+static void record_keyboard_activity(void *data, bool pointer) noexcept {
     check(!pointer, "unexpected pointer activity in the keyboard fixture");
-    struct observation *observation = data;
-    ++observation->keyboard_activity;
+    auto *observed = static_cast<observation *>(data);
+    ++observed->keyboard_activity;
 }
 
-static const struct wlr_backend_impl backend_impl = {0};
-static const struct wlr_keyboard_impl keyboard_impl = {.name = "test"};
+static const struct wlr_backend_impl backend_impl = {};
+static constexpr wlr_keyboard_impl keyboard_impl{.name = "test", .led_update = nullptr};
 static const struct wlr_pointer_impl pointer_impl = {.name = "test"};
-static const struct seaside_tty_input_callbacks callbacks = {
-    .motion = record_motion,
-    .exit_requested = record_exit,
-};
+static constexpr auto callbacks = [] {
+    seaside_tty_input_callbacks result{};
+    result.motion = record_motion;
+    result.exit_requested = record_exit;
+    return result;
+}();
 
-static void exercise(bool backend_first) {
-    struct wlr_backend backend = {0};
+static void exercise(bool backend_first) noexcept {
+    struct wlr_backend backend = {};
     wlr_backend_init(&backend, &backend_impl);
-    struct observation observation = {0};
+    struct observation observation = {};
     struct seaside_tty_input *input = seaside_tty_input_create(&backend, &callbacks, &observation);
-    check(input != NULL, "cannot create input bridge");
+    check(input != nullptr, "cannot create input bridge");
 
-    struct wlr_keyboard keyboard = {0};
+    struct wlr_keyboard keyboard = {};
     wlr_keyboard_init(&keyboard, &keyboard_impl, "test keyboard");
     wl_signal_emit_mutable(&backend.events.new_input, &keyboard.base);
-    struct wlr_pointer pointer = {0};
+    struct wlr_pointer pointer = {};
     wlr_pointer_init(&pointer, &pointer_impl, "test pointer");
     wl_signal_emit_mutable(&backend.events.new_input, &pointer.base);
 
@@ -146,6 +153,7 @@ static void exercise(bool backend_first) {
           "input discovery did not register both devices");
     struct wlr_pointer_motion_event relative = {
         .pointer = &pointer,
+        .time_msec = 0,
         .delta_x = 10.5,
         .delta_y = -4,
         .unaccel_dx = 7,
@@ -155,14 +163,17 @@ static void exercise(bool backend_first) {
     check(observation.motions == 1 && observation.kind == SEASIDE_POINTER_RELATIVE &&
               observation.x == 10.5 && observation.y == -4,
           "relative pointer did not report the accelerated deltas");
-    struct wlr_pointer_motion_absolute_event absolute = {.pointer = &pointer, .x = 0.25, .y = 0.75};
+    wlr_pointer_motion_absolute_event absolute{
+        .pointer = &pointer, .time_msec = 0, .x = 0.25, .y = 0.75};
     wl_signal_emit_mutable(&pointer.events.motion_absolute, &absolute);
     check(observation.motions == 2 && observation.kind == SEASIDE_POINTER_ABSOLUTE &&
               observation.x == 0.25 && observation.y == 0.75,
           "absolute pointer did not report the normalized coordinates");
 
-    struct wlr_keyboard_key_event event = {.keycode = KEY_ENTER,
-                                           .state = WL_KEYBOARD_KEY_STATE_PRESSED};
+    wlr_keyboard_key_event event{.time_msec = 0,
+                                 .keycode = KEY_ENTER,
+                                 .update_state = false,
+                                 .state = WL_KEYBOARD_KEY_STATE_PRESSED};
     wlr_keyboard_notify_key(&keyboard, &event);
     event.keycode = KEY_ESC;
     event.state = WL_KEYBOARD_KEY_STATE_RELEASED;
@@ -238,31 +249,30 @@ struct keyboard_client {
 };
 
 static void client_keymap(void *data, struct wl_keyboard *keyboard, uint32_t format, int fd,
-                          uint32_t size) {
+                          uint32_t size) noexcept {
     (void)keyboard;
-    struct keyboard_client *client = data;
+    auto *client = static_cast<keyboard_client *>(data);
     check(format == WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1 && size > 0, "missing XKB keymap");
     close(fd);
     ++client->keymaps;
 }
 
 static void client_enter(void *data, struct wl_keyboard *keyboard, uint32_t serial,
-                         struct wl_surface *surface, struct wl_array *keys) {
+                         struct wl_surface *surface, struct wl_array *keys) noexcept {
     (void)keyboard;
     (void)serial;
     (void)surface;
-    struct keyboard_client *client = data;
+    auto *client = static_cast<keyboard_client *>(data);
     ++client->enters;
-    const uint32_t *key;
-    wl_array_for_each(key, keys) {
-        if (*key == KEY_ENTER) {
+    for (const uint32_t key : wl_array_span<uint32_t>(keys)) {
+        if (key == KEY_ENTER) {
             client->entered_with_return = true;
         }
     }
 }
 
 static void client_leave(void *data, struct wl_keyboard *keyboard, uint32_t serial,
-                         struct wl_surface *surface) {
+                         struct wl_surface *surface) noexcept {
     (void)data;
     (void)keyboard;
     (void)serial;
@@ -270,10 +280,10 @@ static void client_leave(void *data, struct wl_keyboard *keyboard, uint32_t seri
 }
 
 static void client_key(void *data, struct wl_keyboard *keyboard, uint32_t serial, uint32_t time,
-                       uint32_t key, uint32_t state) {
+                       uint32_t key, uint32_t state) noexcept {
     (void)keyboard;
     (void)time;
-    struct keyboard_client *client = data;
+    auto *client = static_cast<keyboard_client *>(data);
     ++client->key_events;
     client->key = key;
     client->key_state = state;
@@ -285,19 +295,20 @@ static void client_key(void *data, struct wl_keyboard *keyboard, uint32_t serial
 
 static void client_modifiers(void *data, struct wl_keyboard *keyboard, uint32_t serial,
                              uint32_t depressed, uint32_t latched, uint32_t locked,
-                             uint32_t group) {
+                             uint32_t group) noexcept {
     (void)keyboard;
     (void)serial;
     (void)latched;
     (void)locked;
     (void)group;
-    struct keyboard_client *client = data;
+    auto *client = static_cast<keyboard_client *>(data);
     client->depressed = depressed;
 }
 
-static void client_repeat(void *data, struct wl_keyboard *keyboard, int32_t rate, int32_t delay) {
+static void client_repeat(void *data, struct wl_keyboard *keyboard, int32_t rate,
+                          int32_t delay) noexcept {
     (void)keyboard;
-    struct keyboard_client *client = data;
+    auto *client = static_cast<keyboard_client *>(data);
     check(rate > 0 && delay > 0, "missing keyboard repeat parameters");
     ++client->repeat_info;
 }
@@ -312,10 +323,10 @@ static const struct wl_keyboard_listener keyboard_listener = {
 };
 
 static void pointer_enter(void *data, struct wl_pointer *pointer, uint32_t serial,
-                          struct wl_surface *surface, wl_fixed_t sx, wl_fixed_t sy) {
+                          struct wl_surface *surface, wl_fixed_t sx, wl_fixed_t sy) noexcept {
     (void)pointer;
     (void)surface;
-    struct keyboard_client *client = data;
+    auto *client = static_cast<keyboard_client *>(data);
     client->pointer_serial = serial;
     ++client->pointer_enters;
     client->pointer_x = wl_fixed_to_double(sx);
@@ -323,29 +334,29 @@ static void pointer_enter(void *data, struct wl_pointer *pointer, uint32_t seria
 }
 
 static void pointer_leave(void *data, struct wl_pointer *pointer, uint32_t serial,
-                          struct wl_surface *surface) {
+                          struct wl_surface *surface) noexcept {
     (void)pointer;
     (void)serial;
     (void)surface;
-    ++((struct keyboard_client *)data)->pointer_leaves;
+    ++static_cast<keyboard_client *>(data)->pointer_leaves;
 }
 
 static void pointer_motion(void *data, struct wl_pointer *pointer, uint32_t time, wl_fixed_t sx,
-                           wl_fixed_t sy) {
+                           wl_fixed_t sy) noexcept {
     (void)pointer;
     (void)time;
-    struct keyboard_client *client = data;
+    auto *client = static_cast<keyboard_client *>(data);
     ++client->pointer_motions;
     client->pointer_x = wl_fixed_to_double(sx);
     client->pointer_y = wl_fixed_to_double(sy);
 }
 
 static void pointer_button(void *data, struct wl_pointer *pointer, uint32_t serial, uint32_t time,
-                           uint32_t button, uint32_t state) {
+                           uint32_t button, uint32_t state) noexcept {
     (void)pointer;
     (void)time;
     (void)button;
-    struct keyboard_client *client = data;
+    auto *client = static_cast<keyboard_client *>(data);
     if (state == WL_POINTER_BUTTON_STATE_PRESSED) {
         client->button_serial = serial;
     }
@@ -353,27 +364,27 @@ static void pointer_button(void *data, struct wl_pointer *pointer, uint32_t seri
 }
 
 static void pointer_axis(void *data, struct wl_pointer *pointer, uint32_t time, uint32_t axis,
-                         wl_fixed_t value) {
+                         wl_fixed_t value) noexcept {
     (void)pointer;
     (void)time;
-    struct keyboard_client *client = data;
+    auto *client = static_cast<keyboard_client *>(data);
     ++client->pointer_axes;
     client->axis_orientation = axis;
     client->axis_delta = wl_fixed_to_double(value);
 }
 
-static void pointer_frame(void *data, struct wl_pointer *pointer) {
+static void pointer_frame(void *data, struct wl_pointer *pointer) noexcept {
     (void)pointer;
-    ++((struct keyboard_client *)data)->pointer_frames;
+    ++static_cast<keyboard_client *>(data)->pointer_frames;
 }
 
-static void pointer_axis_source(void *data, struct wl_pointer *pointer, uint32_t source) {
+static void pointer_axis_source(void *data, struct wl_pointer *pointer, uint32_t source) noexcept {
     (void)pointer;
-    ((struct keyboard_client *)data)->axis_source = source;
+    static_cast<keyboard_client *>(data)->axis_source = source;
 }
 
 static void pointer_axis_stop(void *data, struct wl_pointer *pointer, uint32_t time,
-                              uint32_t axis) {
+                              uint32_t axis) noexcept {
     (void)data;
     (void)pointer;
     (void)time;
@@ -382,26 +393,28 @@ static void pointer_axis_stop(void *data, struct wl_pointer *pointer, uint32_t t
 }
 
 static void pointer_axis_discrete(void *data, struct wl_pointer *pointer, uint32_t axis,
-                                  int32_t discrete) {
+                                  int32_t discrete) noexcept {
     (void)pointer;
     (void)axis;
-    ((struct keyboard_client *)data)->axis_discrete = discrete;
+    static_cast<keyboard_client *>(data)->axis_discrete = discrete;
 }
 
-static const struct wl_pointer_listener pointer_listener = {
-    .enter = pointer_enter,
-    .leave = pointer_leave,
-    .motion = pointer_motion,
-    .button = pointer_button,
-    .axis = pointer_axis,
-    .frame = pointer_frame,
-    .axis_source = pointer_axis_source,
-    .axis_stop = pointer_axis_stop,
-    .axis_discrete = pointer_axis_discrete,
-};
+static constexpr auto pointer_listener = [] {
+    wl_pointer_listener result{};
+    result.enter = pointer_enter;
+    result.leave = pointer_leave;
+    result.motion = pointer_motion;
+    result.button = pointer_button;
+    result.axis = pointer_axis;
+    result.frame = pointer_frame;
+    result.axis_source = pointer_axis_source;
+    result.axis_stop = pointer_axis_stop;
+    result.axis_discrete = pointer_axis_discrete;
+    return result;
+}();
 
-static void seat_capabilities(void *data, struct wl_seat *seat, uint32_t capabilities) {
-    struct keyboard_client *client = data;
+static void seat_capabilities(void *data, struct wl_seat *seat, uint32_t capabilities) noexcept {
+    auto *client = static_cast<keyboard_client *>(data);
     client->capabilities = capabilities;
     if (capabilities & WL_SEAT_CAPABILITY_KEYBOARD && !client->keyboard) {
         client->keyboard = wl_seat_get_keyboard(seat);
@@ -413,7 +426,7 @@ static void seat_capabilities(void *data, struct wl_seat *seat, uint32_t capabil
     }
 }
 
-static void seat_name(void *data, struct wl_seat *seat, const char *name) {
+static void seat_name(void *data, struct wl_seat *seat, const char *name) noexcept {
     (void)data;
     (void)seat;
     check(strcmp(name, "seat0") == 0, "unexpected seat name");
@@ -424,7 +437,7 @@ static const struct wl_seat_listener seat_listener = {
     .name = seat_name,
 };
 
-static void shm_format(void *data, struct wl_shm *shm, uint32_t format) {
+static void shm_format(void *data, struct wl_shm *shm, uint32_t format) noexcept {
     (void)data;
     (void)shm;
     (void)format;
@@ -433,12 +446,14 @@ static void shm_format(void *data, struct wl_shm *shm, uint32_t format) {
 static const struct wl_shm_listener shm_listener = {.format = shm_format};
 
 static void registry_global(void *data, struct wl_registry *registry, uint32_t name,
-                            const char *interface, uint32_t version) {
-    struct keyboard_client *client = data;
+                            const char *interface, uint32_t version) noexcept {
+    auto *client = static_cast<keyboard_client *>(data);
     if (strcmp(interface, wl_compositor_interface.name) == 0) {
-        client->compositor = wl_registry_bind(registry, name, &wl_compositor_interface, 1);
+        client->compositor = static_cast<wl_compositor *>(
+            wl_registry_bind(registry, name, &wl_compositor_interface, 1));
     } else if (strcmp(interface, wl_seat_interface.name) == 0) {
-        client->seat = wl_registry_bind(registry, name, &wl_seat_interface, 5);
+        client->seat =
+            static_cast<wl_seat *>(wl_registry_bind(registry, name, &wl_seat_interface, 5));
         wl_seat_add_listener(client->seat, &seat_listener, client);
     } else if (strcmp(interface, wl_data_device_manager_interface.name) == 0) {
         client->data_device_manager = version >= 3;
@@ -450,21 +465,21 @@ static void registry_global(void *data, struct wl_registry *registry, uint32_t n
     } else if (strcmp(interface, "zwlr_data_control_manager_v1") == 0) {
         client->wlr_data_control = version >= 2;
     } else if (strcmp(interface, wl_shm_interface.name) == 0) {
-        client->shm = wl_registry_bind(registry, name, &wl_shm_interface, 1);
+        client->shm = static_cast<wl_shm *>(wl_registry_bind(registry, name, &wl_shm_interface, 1));
         wl_shm_add_listener(client->shm, &shm_listener, client);
     } else if (strcmp(interface, wp_cursor_shape_manager_v1_interface.name) == 0) {
-        client->cursor_shapes =
-            wl_registry_bind(registry, name, &wp_cursor_shape_manager_v1_interface, 1);
+        client->cursor_shapes = static_cast<wp_cursor_shape_manager_v1 *>(
+            wl_registry_bind(registry, name, &wp_cursor_shape_manager_v1_interface, 1));
     } else if (strcmp(interface, zwp_pointer_constraints_v1_interface.name) == 0) {
-        client->constraints =
-            wl_registry_bind(registry, name, &zwp_pointer_constraints_v1_interface, 1);
+        client->constraints = static_cast<zwp_pointer_constraints_v1 *>(
+            wl_registry_bind(registry, name, &zwp_pointer_constraints_v1_interface, 1));
     } else if (strcmp(interface, zwp_relative_pointer_manager_v1_interface.name) == 0) {
-        client->relative_pointer_manager =
-            wl_registry_bind(registry, name, &zwp_relative_pointer_manager_v1_interface, 1);
+        client->relative_pointer_manager = static_cast<zwp_relative_pointer_manager_v1 *>(
+            wl_registry_bind(registry, name, &zwp_relative_pointer_manager_v1_interface, 1));
     }
 }
 
-static void registry_remove(void *data, struct wl_registry *registry, uint32_t name) {
+static void registry_remove(void *data, struct wl_registry *registry, uint32_t name) noexcept {
     (void)data;
     (void)registry;
     (void)name;
@@ -475,13 +490,13 @@ static const struct wl_registry_listener registry_listener = {
     .global_remove = registry_remove,
 };
 
-static void mark_done(void *data, struct wl_callback *callback, uint32_t serial) {
+static void mark_done(void *data, struct wl_callback *callback, uint32_t serial) noexcept {
     (void)serial;
     *(bool *)data = true;
     wl_callback_destroy(callback);
 }
 
-static void round_trip(struct wl_display *server, struct wl_display *client) {
+static void round_trip(struct wl_display *server, struct wl_display *client) noexcept {
     static const struct wl_callback_listener listener = {.done = mark_done};
     bool done = false;
     struct wl_callback *sync = wl_display_sync(client);
@@ -496,9 +511,10 @@ static void round_trip(struct wl_display *server, struct wl_display *client) {
 
 static void key(struct wlr_keyboard *keyboard, uint32_t keycode, enum wl_keyboard_key_state state) {
     struct wlr_keyboard_key_event event = {
+        .time_msec = 0,
         .keycode = keycode,
-        .state = state,
         .update_state = true,
+        .state = state,
     };
     wlr_keyboard_notify_key(keyboard, &event);
 }
@@ -511,20 +527,19 @@ static void exercise_wayland_keyboard(void) {
               setenv("XKB_DEFAULT_OPTIONS", "", 1) == 0,
           "could not isolate test keymap from the user's XKB choices");
     struct wl_display *server = wl_display_create();
-    check(server && wlr_compositor_create(server, 6, NULL), "Wayland compositor setup failed");
-    struct wlr_backend backend = {0};
+    check(server && wlr_compositor_create(server, 6, nullptr), "Wayland compositor setup failed");
+    struct wlr_backend backend = {};
     wlr_backend_init(&backend, &backend_impl);
-    struct observation observation = {0};
-    const struct seaside_tty_input_callbacks terminal_callbacks = {
-        .launch_requested = record_launch,
-        .shortcut_pressed = record_shortcut,
-        .modifiers_changed = record_modifiers,
-        .activity = record_keyboard_activity,
-    };
+    struct observation observation = {};
+    seaside_tty_input_callbacks terminal_callbacks{};
+    terminal_callbacks.launch_requested = record_launch;
+    terminal_callbacks.shortcut_pressed = record_shortcut;
+    terminal_callbacks.modifiers_changed = record_modifiers;
+    terminal_callbacks.activity = record_keyboard_activity;
     struct seaside_tty_input *input =
         seaside_tty_input_create(&backend, &terminal_callbacks, &observation);
     check(input && seaside_tty_input_enable_keyboard(input, server), "keyboard seat setup failed");
-    struct wlr_keyboard first = {0}, second = {0};
+    struct wlr_keyboard first = {}, second = {};
     wlr_keyboard_init(&first, &keyboard_impl, "keyboard one");
     wlr_keyboard_init(&second, &keyboard_impl, "keyboard two");
     wl_signal_emit_mutable(&backend.events.new_input, &first.base);
@@ -536,7 +551,7 @@ static void exercise_wayland_keyboard(void) {
     struct wl_client *peer = wl_client_create(server, ends[0]);
     struct wl_display *client = wl_display_connect_to_fd(ends[1]);
     check(peer && client, "client connect failed");
-    struct keyboard_client keyboard_client = {0};
+    struct keyboard_client keyboard_client = {};
     struct wl_registry *registry = wl_display_get_registry(client);
     wl_registry_add_listener(registry, &registry_listener, &keyboard_client);
     round_trip(server, client);
@@ -552,7 +567,7 @@ static void exercise_wayland_keyboard(void) {
           "keyboard did not receive its keymap and repeat info before focus");
     struct wl_resource *resource =
         wl_client_get_object(peer, wl_proxy_get_id((struct wl_proxy *)surface));
-    check(resource != NULL, "missing Wayland surface resource");
+    check(resource != nullptr, "missing Wayland surface resource");
     struct wlr_surface *server_surface = wlr_surface_from_resource(resource);
 
     key(&first, KEY_LEFTMETA, WL_KEYBOARD_KEY_STATE_PRESSED);
@@ -698,23 +713,24 @@ struct pointer_scene {
     int32_t hotspot_x, hotspot_y;
 };
 
-static void scene_motion(void *data, enum seaside_pointer_motion kind, double x, double y) {
-    struct pointer_scene *scene = data;
+static void scene_motion(void *data, enum seaside_pointer_motion kind, double x,
+                         double y) noexcept {
+    auto *scene = static_cast<pointer_scene *>(data);
     ++scene->move_calls;
     scene->motion_kind = kind;
     scene->x = kind == SEASIDE_POINTER_ABSOLUTE ? 200 * x : scene->x + x;
     scene->y = kind == SEASIDE_POINTER_ABSOLUTE ? 100 * y : scene->y + y;
 }
 
-static bool scene_absolute_delta(void *data, double x, double y, double *dx, double *dy) {
-    const struct pointer_scene *scene = data;
+static bool scene_absolute_delta(void *data, double x, double y, double *dx, double *dy) noexcept {
+    auto *scene = static_cast<const pointer_scene *>(data);
     *dx = 200 * x - scene->x;
     *dy = 100 * y - scene->y;
     return true;
 }
 
-static bool scene_target(void *data, struct seaside_tty_pointer_target *target) {
-    const struct pointer_scene *scene = data;
+static bool scene_target(void *data, struct seaside_tty_pointer_target *target) noexcept {
+    auto *scene = static_cast<const pointer_scene *>(data);
     size_t slot;
     if (target->surface) {
         slot = target->surface == scene->surfaces[0] ? 0 : 1;
@@ -731,12 +747,12 @@ static bool scene_target(void *data, struct seaside_tty_pointer_target *target) 
     target->window_id = slot + 1;
     target->sx = scene->x - (slot == 0 ? 0.0 : 100.0);
     target->sy = scene->y;
-    return target->surface != NULL;
+    return target->surface != nullptr;
 }
 
 static bool scene_button(void *data, uint64_t window, uint32_t button, bool pressed,
-                         uint8_t modifiers) {
-    struct pointer_scene *scene = data;
+                         uint8_t modifiers) noexcept {
+    auto *scene = static_cast<pointer_scene *>(data);
     if (button == BTN_RIGHT && modifiers == 1) {
         if (!pressed) {
             ++scene->consumed_releases;
@@ -750,33 +766,34 @@ static bool scene_button(void *data, uint64_t window, uint32_t button, bool pres
     return false;
 }
 
-static void scene_locked(void *data, bool locked) {
-    ((struct pointer_scene *)data)->locked = locked;
+static void scene_locked(void *data, bool locked) noexcept {
+    static_cast<pointer_scene *>(data)->locked = locked;
 }
 
-static void scene_cursor_shape(void *data, const char *shape) {
-    struct pointer_scene *scene = data;
+static void scene_cursor_shape(void *data, const char *shape) noexcept {
+    auto *scene = static_cast<pointer_scene *>(data);
     scene->cursor_shape = shape;
-    scene->cursor_surface = NULL;
+    scene->cursor_surface = nullptr;
     ++scene->cursor_requests;
 }
 
-static void scene_cursor_surface(void *data, struct wlr_surface *surface, int32_t x, int32_t y) {
-    struct pointer_scene *scene = data;
-    scene->cursor_shape = NULL;
+static void scene_cursor_surface(void *data, struct wlr_surface *surface, int32_t x,
+                                 int32_t y) noexcept {
+    auto *scene = static_cast<pointer_scene *>(data);
+    scene->cursor_shape = nullptr;
     scene->cursor_surface = surface;
     scene->hotspot_x = x;
     scene->hotspot_y = y;
     ++scene->cursor_requests;
 }
 
-static void scene_cancelled(void *data) {
-    ++((struct pointer_scene *)data)->cancelled;
+static void scene_cancelled(void *data) noexcept {
+    ++static_cast<pointer_scene *>(data)->cancelled;
 }
 
-static void scene_drag_icon(void *data, struct wlr_drag_icon *icon) {
+static void scene_drag_icon(void *data, struct wlr_drag_icon *icon) noexcept {
     check(icon && icon->surface, "missing requested drag icon");
-    ++((struct pointer_scene *)data)->drag_icons;
+    ++static_cast<pointer_scene *>(data)->drag_icons;
 }
 
 struct pointer_client {
@@ -790,13 +807,13 @@ struct pointer_client {
 
 static void relative_motion(void *data, struct zwp_relative_pointer_v1 *relative, uint32_t hi,
                             uint32_t lo, wl_fixed_t dx, wl_fixed_t dy, wl_fixed_t unaccel_dx,
-                            wl_fixed_t unaccel_dy) {
+                            wl_fixed_t unaccel_dy) noexcept {
     (void)relative;
     (void)hi;
     (void)lo;
     (void)dy;
     (void)unaccel_dy;
-    struct keyboard_client *client = data;
+    auto *client = static_cast<keyboard_client *>(data);
     ++client->relative_motions;
     client->relative_dx = wl_fixed_to_double(dx);
     client->unaccelerated_dx = wl_fixed_to_double(unaccel_dx);
@@ -806,14 +823,14 @@ static const struct zwp_relative_pointer_v1_listener relative_listener = {
     .relative_motion = relative_motion,
 };
 
-static void pointer_locked(void *data, struct zwp_locked_pointer_v1 *lock) {
+static void pointer_locked(void *data, struct zwp_locked_pointer_v1 *lock) noexcept {
     (void)lock;
-    ++((struct keyboard_client *)data)->locks;
+    ++static_cast<keyboard_client *>(data)->locks;
 }
 
-static void pointer_unlocked(void *data, struct zwp_locked_pointer_v1 *lock) {
+static void pointer_unlocked(void *data, struct zwp_locked_pointer_v1 *lock) noexcept {
     (void)lock;
-    ++((struct keyboard_client *)data)->unlocks;
+    ++static_cast<keyboard_client *>(data)->unlocks;
 }
 
 static const struct zwp_locked_pointer_v1_listener lock_listener = {
@@ -821,14 +838,14 @@ static const struct zwp_locked_pointer_v1_listener lock_listener = {
     .unlocked = pointer_unlocked,
 };
 
-static void pointer_confined(void *data, struct zwp_confined_pointer_v1 *confine) {
+static void pointer_confined(void *data, struct zwp_confined_pointer_v1 *confine) noexcept {
     (void)confine;
-    ++((struct keyboard_client *)data)->confines;
+    ++static_cast<keyboard_client *>(data)->confines;
 }
 
-static void pointer_unconfined(void *data, struct zwp_confined_pointer_v1 *confine) {
+static void pointer_unconfined(void *data, struct zwp_confined_pointer_v1 *confine) noexcept {
     (void)confine;
-    ++((struct keyboard_client *)data)->unconfines;
+    ++static_cast<keyboard_client *>(data)->unconfines;
 }
 
 static const struct zwp_confined_pointer_v1_listener confine_listener = {
@@ -837,7 +854,7 @@ static const struct zwp_confined_pointer_v1_listener confine_listener = {
 };
 
 static struct wlr_surface *connect_pointer_client(struct wl_display *server,
-                                                  struct pointer_client *client) {
+                                                  struct pointer_client *client) noexcept {
     int ends[2];
     check(socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, ends) == 0, "socketpair failed");
     struct wl_client *peer = wl_client_create(server, ends[0]);
@@ -869,7 +886,7 @@ static struct wlr_surface *connect_pointer_client(struct wl_display *server,
     round_trip(server, client->display);
     struct wl_resource *resource =
         wl_client_get_object(peer, wl_proxy_get_id((struct wl_proxy *)client->surface));
-    check(resource != NULL, "missing pointer test surface resource");
+    check(resource != nullptr, "missing pointer test surface resource");
     return wlr_surface_from_resource(resource);
 }
 
@@ -893,8 +910,12 @@ static void disconnect_pointer_client(struct wl_display *server, struct pointer_
 }
 
 static void relative(struct wlr_pointer *pointer, double dx, double raw_dx) {
-    struct wlr_pointer_motion_event motion = {
-        .pointer = pointer, .time_msec = 11, .delta_x = dx, .unaccel_dx = raw_dx};
+    struct wlr_pointer_motion_event motion = {.pointer = pointer,
+                                              .time_msec = 11,
+                                              .delta_x = dx,
+                                              .delta_y = 0,
+                                              .unaccel_dx = raw_dx,
+                                              .unaccel_dy = 0};
     wl_signal_emit_mutable(&pointer->events.motion, &motion);
     wl_signal_emit_mutable(&pointer->events.frame, pointer);
 }
@@ -916,7 +937,9 @@ static void axis(struct wlr_pointer *pointer) {
         .time_msec = 13,
         .source = WL_POINTER_AXIS_SOURCE_FINGER,
         .orientation = WL_POINTER_AXIS_VERTICAL_SCROLL,
+        .relative_direction = WL_POINTER_AXIS_RELATIVE_DIRECTION_IDENTICAL,
         .delta = 3,
+        .delta_discrete = 0,
     };
     wl_signal_emit_mutable(&pointer->events.axis, &scroll);
     wl_signal_emit_mutable(&pointer->events.frame, pointer);
@@ -926,23 +949,22 @@ static void create_pointer_seat(struct wl_display *server, struct wlr_backend *b
                                 struct wlr_keyboard *keyboard, struct wlr_pointer *pointer,
                                 struct pointer_scene *scene) {
     const uint32_t formats[] = {DRM_FORMAT_XRGB8888, DRM_FORMAT_ARGB8888};
-    check(server && wlr_compositor_create(server, 6, NULL) &&
+    check(server && wlr_compositor_create(server, 6, nullptr) &&
               wlr_shm_create(server, 1, formats, sizeof(formats) / sizeof(formats[0])),
           "pointer test compositor setup failed");
     wlr_backend_init(backend, &backend_impl);
     wlr_keyboard_init(keyboard, &keyboard_impl, "pointer test keyboard");
     wlr_pointer_init(pointer, &pointer_impl, "pointer test pointer");
-    const struct seaside_tty_input_callbacks seat_callbacks = {
-        .motion = scene_motion,
-        .pointer_target = scene_target,
-        .pointer_button = scene_button,
-        .pointer_locked = scene_locked,
-        .pointer_absolute_delta = scene_absolute_delta,
-        .cursor_shape = scene_cursor_shape,
-        .cursor_surface = scene_cursor_surface,
-        .pointer_cancelled = scene_cancelled,
-        .drag_icon = scene_drag_icon,
-    };
+    seaside_tty_input_callbacks seat_callbacks{};
+    seat_callbacks.motion = scene_motion;
+    seat_callbacks.pointer_target = scene_target;
+    seat_callbacks.pointer_button = scene_button;
+    seat_callbacks.pointer_locked = scene_locked;
+    seat_callbacks.pointer_absolute_delta = scene_absolute_delta;
+    seat_callbacks.cursor_shape = scene_cursor_shape;
+    seat_callbacks.cursor_surface = scene_cursor_surface;
+    seat_callbacks.pointer_cancelled = scene_cancelled;
+    seat_callbacks.drag_icon = scene_drag_icon;
     scene->input = seaside_tty_input_create(backend, &seat_callbacks, scene);
     check(scene->input && seaside_tty_input_enable_keyboard(scene->input, server) &&
               seaside_tty_input_get_seat(scene->input),
@@ -953,13 +975,14 @@ static void create_pointer_seat(struct wl_display *server, struct wlr_backend *b
 
 static void exercise_wayland_cursor(void) {
     struct wl_display *server = wl_display_create();
-    struct wlr_backend backend = {0};
-    struct wlr_keyboard keyboard = {0};
-    struct wlr_pointer pointer = {0};
-    struct pointer_scene scene = {.x = 10, .y = 10};
+    struct wlr_backend backend = {};
+    struct wlr_keyboard keyboard = {};
+    struct wlr_pointer pointer = {};
+    pointer_scene scene{};
+    scene.x = scene.y = 10;
     create_pointer_seat(server, &backend, &keyboard, &pointer, &scene);
 
-    struct pointer_client left = {0}, right = {0};
+    struct pointer_client left = {}, right = {};
     scene.surfaces[0] = connect_pointer_client(server, &left);
     scene.surfaces[1] = connect_pointer_client(server, &right);
     check(left.events.cursor_shapes && right.events.cursor_shapes, "missing cursor shape protocol");
@@ -999,7 +1022,7 @@ static void exercise_wayland_cursor(void) {
           "cursor surface commit did not preserve its hotspot relative to the new image");
 
     const unsigned committed_cursor = scene.cursor_requests;
-    wl_pointer_set_cursor(right_seat->pointer, left_seat->pointer_serial, NULL, 0, 0);
+    wl_pointer_set_cursor(right_seat->pointer, left_seat->pointer_serial, nullptr, 0, 0);
     round_trip(server, right.display);
     check(scene.cursor_requests == committed_cursor && scene.cursor_surface,
           "unfocused client could change the pointer cursor");
@@ -1019,7 +1042,7 @@ static void exercise_wayland_cursor(void) {
     check(scene.cursor_requests == focus_change + 1 && scene.cursor_shape &&
               strcmp(scene.cursor_shape, "ew-resize") == 0,
           "new pointer focus did not set the resize cursor");
-    wl_pointer_set_cursor(right_seat->pointer, right_seat->pointer_serial, NULL, 4, 2);
+    wl_pointer_set_cursor(right_seat->pointer, right_seat->pointer_serial, nullptr, 4, 2);
     round_trip(server, right.display);
     check(!scene.cursor_shape && !scene.cursor_surface && scene.hotspot_x == 4 &&
               scene.hotspot_y == 2,
@@ -1049,13 +1072,14 @@ static void exercise_wayland_cursor(void) {
 
 static void exercise_wayland_pointer(void) {
     struct wl_display *server = wl_display_create();
-    struct wlr_backend backend = {0};
-    struct wlr_keyboard keyboard = {0};
-    struct wlr_pointer pointer = {0};
-    struct pointer_scene scene = {.x = 10, .y = 10};
+    struct wlr_backend backend = {};
+    struct wlr_keyboard keyboard = {};
+    struct wlr_pointer pointer = {};
+    pointer_scene scene{};
+    scene.x = scene.y = 10;
     create_pointer_seat(server, &backend, &keyboard, &pointer, &scene);
 
-    struct pointer_client left = {0}, right = {0};
+    struct pointer_client left = {}, right = {};
     scene.surfaces[0] = connect_pointer_client(server, &left);
     scene.surfaces[1] = connect_pointer_client(server, &right);
     seaside_tty_input_set_focus(scene.input, scene.surfaces[0]);
@@ -1075,7 +1099,7 @@ static void exercise_wayland_pointer(void) {
           "hover or background scrolling changed keyboard focus or reached the wrong surface");
 
     struct zwp_locked_pointer_v1 *lock = zwp_pointer_constraints_v1_lock_pointer(
-        right.events.constraints, right.surface, right.events.pointer, NULL,
+        right.events.constraints, right.surface, right.events.pointer, nullptr,
         ZWP_POINTER_CONSTRAINTS_V1_LIFETIME_ONESHOT);
     zwp_locked_pointer_v1_add_listener(lock, &lock_listener, &right.events);
     round_trip(server, right.display);
@@ -1104,6 +1128,7 @@ static void exercise_wayland_pointer(void) {
         .time_msec = 14,
         .source = WL_POINTER_AXIS_SOURCE_WHEEL,
         .orientation = WL_POINTER_AXIS_HORIZONTAL_SCROLL,
+        .relative_direction = WL_POINTER_AXIS_RELATIVE_DIRECTION_IDENTICAL,
         .delta = 9,
         .delta_discrete = WLR_POINTER_AXIS_DISCRETE_STEP,
     };
@@ -1126,7 +1151,7 @@ static void exercise_wayland_pointer(void) {
 
     seaside_tty_input_set_focus(scene.input, scene.surfaces[1]);
     lock = zwp_pointer_constraints_v1_lock_pointer(right.events.constraints, right.surface,
-                                                   right.events.pointer, NULL,
+                                                   right.events.pointer, nullptr,
                                                    ZWP_POINTER_CONSTRAINTS_V1_LIFETIME_ONESHOT);
     zwp_locked_pointer_v1_add_listener(lock, &lock_listener, &right.events);
     round_trip(server, right.display);
@@ -1194,7 +1219,7 @@ static void exercise_wayland_pointer(void) {
 
     // Losing the initiating pointer cancels a gesture even if a second
     // pointer is still connected and coincidentally holding the same button.
-    struct wlr_pointer second = {0};
+    struct wlr_pointer second = {};
     wlr_pointer_init(&second, &pointer_impl, "remaining pointer");
     wl_signal_emit_mutable(&backend.events.new_input, &second.base);
     key(&keyboard, KEY_LEFTMETA, WL_KEYBOARD_KEY_STATE_PRESSED);
@@ -1250,33 +1275,34 @@ static void write_payload(struct test_source *source, const char *type, int32_t 
     ++source->sends;
 }
 
-static void source_target(void *data, struct wl_data_source *source, const char *type) {
+static void source_target(void *data, struct wl_data_source *source, const char *type) noexcept {
     (void)data;
     (void)source;
     (void)type;
 }
 
-static void source_send(void *data, struct wl_data_source *source, const char *type, int32_t fd) {
+static void source_send(void *data, struct wl_data_source *source, const char *type,
+                        int32_t fd) noexcept {
     (void)source;
-    write_payload(data, type, fd);
+    write_payload(static_cast<test_source *>(data), type, fd);
 }
 
-static void source_cancelled(void *data, struct wl_data_source *source) {
+static void source_cancelled(void *data, struct wl_data_source *source) noexcept {
     (void)source;
-    ++((struct test_source *)data)->cancelled;
+    ++static_cast<test_source *>(data)->cancelled;
 }
 
-static void source_dropped(void *data, struct wl_data_source *source) {
+static void source_dropped(void *data, struct wl_data_source *source) noexcept {
     (void)source;
-    ++((struct test_source *)data)->dropped;
+    ++static_cast<test_source *>(data)->dropped;
 }
 
-static void source_finished(void *data, struct wl_data_source *source) {
+static void source_finished(void *data, struct wl_data_source *source) noexcept {
     (void)source;
-    ++((struct test_source *)data)->finished;
+    ++static_cast<test_source *>(data)->finished;
 }
 
-static void source_action(void *data, struct wl_data_source *source, uint32_t action) {
+static void source_action(void *data, struct wl_data_source *source, uint32_t action) noexcept {
     (void)data;
     (void)source;
     check(action == WL_DATA_DEVICE_MANAGER_DND_ACTION_NONE ||
@@ -1285,7 +1311,7 @@ static void source_action(void *data, struct wl_data_source *source, uint32_t ac
 }
 
 static struct wl_data_source *create_data_source(struct data_client *client,
-                                                 struct test_source *observation) {
+                                                 struct test_source *observation) noexcept {
     static const struct wl_data_source_listener listener = {
         .target = source_target,
         .send = source_send,
@@ -1301,18 +1327,19 @@ static struct wl_data_source *create_data_source(struct data_client *client,
 }
 
 static void primary_source_send(void *data, struct zwp_primary_selection_source_v1 *source,
-                                const char *type, int32_t fd) {
+                                const char *type, int32_t fd) noexcept {
     (void)source;
-    write_payload(data, type, fd);
+    write_payload(static_cast<test_source *>(data), type, fd);
 }
 
-static void primary_source_cancelled(void *data, struct zwp_primary_selection_source_v1 *source) {
+static void primary_source_cancelled(void *data,
+                                     struct zwp_primary_selection_source_v1 *source) noexcept {
     (void)source;
-    ++((struct test_source *)data)->cancelled;
+    ++static_cast<test_source *>(data)->cancelled;
 }
 
 static struct zwp_primary_selection_source_v1 *
-create_primary_source(struct data_client *client, struct test_source *observation) {
+create_primary_source(struct data_client *client, struct test_source *observation) noexcept {
     static const struct zwp_primary_selection_source_v1_listener listener = {
         .send = primary_source_send, .cancelled = primary_source_cancelled};
     struct zwp_primary_selection_source_v1 *source =
@@ -1322,19 +1349,19 @@ create_primary_source(struct data_client *client, struct test_source *observatio
     return source;
 }
 
-static void data_offer_type(void *data, struct wl_data_offer *offer, const char *type) {
+static void data_offer_type(void *data, struct wl_data_offer *offer, const char *type) noexcept {
     (void)offer;
     check(strcmp(type, mime) == 0, "unexpected data offer MIME type");
-    ++((struct data_client *)data)->clipboard_mimes;
+    ++static_cast<data_client *>(data)->clipboard_mimes;
 }
 
-static void data_offer_actions(void *data, struct wl_data_offer *offer, uint32_t actions) {
+static void data_offer_actions(void *data, struct wl_data_offer *offer, uint32_t actions) noexcept {
     (void)data;
     (void)offer;
     check(actions == WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY, "unexpected offered drag action");
 }
 
-static void data_offer_action(void *data, struct wl_data_offer *offer, uint32_t action) {
+static void data_offer_action(void *data, struct wl_data_offer *offer, uint32_t action) noexcept {
     (void)data;
     (void)offer;
     check(action == WL_DATA_DEVICE_MANAGER_DND_ACTION_NONE ||
@@ -1342,7 +1369,8 @@ static void data_offer_action(void *data, struct wl_data_offer *offer, uint32_t 
           "unexpected negotiated drag action");
 }
 
-static void data_offer(void *data, struct wl_data_device *device, struct wl_data_offer *offer) {
+static void data_offer(void *data, struct wl_data_device *device,
+                       struct wl_data_offer *offer) noexcept {
     (void)device;
     static const struct wl_data_offer_listener listener = {.offer = data_offer_type,
                                                            .source_actions = data_offer_actions,
@@ -1352,11 +1380,11 @@ static void data_offer(void *data, struct wl_data_device *device, struct wl_data
 
 static void data_enter(void *data, struct wl_data_device *device, uint32_t serial,
                        struct wl_surface *surface, wl_fixed_t x, wl_fixed_t y,
-                       struct wl_data_offer *offer) {
+                       struct wl_data_offer *offer) noexcept {
     (void)device;
     (void)x;
     (void)y;
-    struct data_client *client = data;
+    auto *client = static_cast<data_client *>(data);
     check(surface == client->pointer.surface && offer && !client->drag_offer,
           "drag entered an unexpected target");
     client->drag_offer = offer;
@@ -1364,33 +1392,34 @@ static void data_enter(void *data, struct wl_data_device *device, uint32_t seria
     ++client->enters;
 }
 
-static void data_leave(void *data, struct wl_data_device *device) {
+static void data_leave(void *data, struct wl_data_device *device) noexcept {
     (void)device;
-    struct data_client *client = data;
+    auto *client = static_cast<data_client *>(data);
     if (client->drag_offer && client->drops == 0) {
         wl_data_offer_destroy(client->drag_offer);
-        client->drag_offer = NULL;
+        client->drag_offer = nullptr;
     }
     ++client->leaves;
 }
 
 static void data_motion(void *data, struct wl_data_device *device, uint32_t time, wl_fixed_t x,
-                        wl_fixed_t y) {
+                        wl_fixed_t y) noexcept {
     (void)device;
     (void)time;
     (void)x;
     (void)y;
-    ++((struct data_client *)data)->motions;
+    ++static_cast<data_client *>(data)->motions;
 }
 
-static void data_drop(void *data, struct wl_data_device *device) {
+static void data_drop(void *data, struct wl_data_device *device) noexcept {
     (void)device;
-    ++((struct data_client *)data)->drops;
+    ++static_cast<data_client *>(data)->drops;
 }
 
-static void data_selection(void *data, struct wl_data_device *device, struct wl_data_offer *offer) {
+static void data_selection(void *data, struct wl_data_device *device,
+                           struct wl_data_offer *offer) noexcept {
     (void)device;
-    struct data_client *client = data;
+    auto *client = static_cast<data_client *>(data);
     if (client->selection) {
         wl_data_offer_destroy(client->selection);
     }
@@ -1398,14 +1427,14 @@ static void data_selection(void *data, struct wl_data_device *device, struct wl_
 }
 
 static void primary_offer_type(void *data, struct zwp_primary_selection_offer_v1 *offer,
-                               const char *type) {
+                               const char *type) noexcept {
     (void)offer;
     check(strcmp(type, mime) == 0, "unexpected primary offer MIME type");
-    ++((struct data_client *)data)->primary_mimes;
+    ++static_cast<data_client *>(data)->primary_mimes;
 }
 
 static void primary_offer(void *data, struct zwp_primary_selection_device_v1 *device,
-                          struct zwp_primary_selection_offer_v1 *offer) {
+                          struct zwp_primary_selection_offer_v1 *offer) noexcept {
     (void)device;
     static const struct zwp_primary_selection_offer_v1_listener listener = {.offer =
                                                                                 primary_offer_type};
@@ -1413,9 +1442,9 @@ static void primary_offer(void *data, struct zwp_primary_selection_device_v1 *de
 }
 
 static void primary_selection(void *data, struct zwp_primary_selection_device_v1 *device,
-                              struct zwp_primary_selection_offer_v1 *offer) {
+                              struct zwp_primary_selection_offer_v1 *offer) noexcept {
     (void)device;
-    struct data_client *client = data;
+    auto *client = static_cast<data_client *>(data);
     if (client->primary) {
         zwp_primary_selection_offer_v1_destroy(client->primary);
     }
@@ -1439,13 +1468,13 @@ static struct wlr_surface *connect_data_client(struct wl_display *server,
     check(events->data_device_manager && events->primary_manager_name && events->ext_data_control &&
               events->wlr_data_control,
           "unexpected clipboard protocol globals");
-    client->manager = wl_registry_bind(client->pointer.registry, events->data_manager_name,
-                                       &wl_data_device_manager_interface, 3);
+    client->manager = static_cast<wl_data_device_manager *>(wl_registry_bind(
+        client->pointer.registry, events->data_manager_name, &wl_data_device_manager_interface, 3));
     client->device = wl_data_device_manager_get_data_device(client->manager, events->seat);
     wl_data_device_add_listener(client->device, &device_listener, client);
-    client->primary_manager =
+    client->primary_manager = static_cast<zwp_primary_selection_device_manager_v1 *>(
         wl_registry_bind(client->pointer.registry, events->primary_manager_name,
-                         &zwp_primary_selection_device_manager_v1_interface, 1);
+                         &zwp_primary_selection_device_manager_v1_interface, 1));
     client->primary_device =
         zwp_primary_selection_device_manager_v1_get_device(client->primary_manager, events->seat);
     zwp_primary_selection_device_v1_add_listener(client->primary_device, &primary_listener, client);
@@ -1484,7 +1513,7 @@ static void expect_payload(struct wl_display *server, struct data_client *writer
                            struct zwp_primary_selection_offer_v1 *primary, const char *payload) {
     int pipe_ends[2];
     check(pipe2(pipe_ends, O_CLOEXEC | O_NONBLOCK) == 0, "could not allocate selection pipe");
-    check((offer != NULL) != (primary != NULL), "missing selection or drag offer");
+    check((offer != nullptr) != (primary != nullptr), "missing selection or drag offer");
     if (offer) {
         wl_data_offer_receive(offer, mime, pipe_ends[1]);
     } else {
@@ -1515,21 +1544,24 @@ static struct wl_data_source *start_data_drag(struct wl_display *server, struct 
 
 static void exercise_data_device(void) {
     struct wl_display *server = wl_display_create();
-    struct wlr_backend backend = {0};
-    struct wlr_keyboard keyboard = {0};
-    struct wlr_pointer pointer = {0};
-    struct pointer_scene scene = {.x = 10, .y = 10};
+    struct wlr_backend backend = {};
+    struct wlr_keyboard keyboard = {};
+    struct wlr_pointer pointer = {};
+    pointer_scene scene{};
+    scene.x = scene.y = 10;
     create_pointer_seat(server, &backend, &keyboard, &pointer, &scene);
     struct wlr_seat *seat = seaside_tty_input_get_seat(scene.input);
-    struct data_client left = {0}, right = {0};
+    struct data_client left = {}, right = {};
     scene.surfaces[0] = connect_data_client(server, &left);
     scene.surfaces[1] = connect_data_client(server, &right);
     struct wl_display *sender = left.pointer.display, *receiver = right.pointer.display;
 
     seaside_tty_input_set_focus(scene.input, scene.surfaces[0]);
     const uint32_t left_serial = data_key_serial(server, &left, &keyboard);
-    struct test_source clipboard = {.payload = "clipboard"};
-    struct test_source primary = {.payload = "primary"};
+    test_source clipboard{};
+    clipboard.payload = "clipboard";
+    test_source primary{};
+    primary.payload = "primary";
     struct wl_data_source *clipboard_source = create_data_source(&left, &clipboard);
     struct zwp_primary_selection_source_v1 *primary_source = create_primary_source(&left, &primary);
     wl_data_device_set_selection(left.device, clipboard_source, left_serial);
@@ -1544,33 +1576,35 @@ static void exercise_data_device(void) {
     data_key_serial(server, &right, &keyboard);
     check(right.clipboard_mimes == 1 && right.primary_mimes == 1,
           "focused client did not receive the selection MIME offers");
-    wl_data_device_set_selection(right.device, NULL, left_serial);
-    zwp_primary_selection_device_v1_set_selection(right.primary_device, NULL, left_serial);
+    wl_data_device_set_selection(right.device, nullptr, left_serial);
+    zwp_primary_selection_device_v1_set_selection(right.primary_device, nullptr, left_serial);
     round_trip(server, receiver);
     check(right.selection && right.primary, "foreign serial cleared a focused selection");
 
-    expect_payload(server, &left, &right, right.selection, NULL, clipboard.payload);
-    expect_payload(server, &left, &right, NULL, right.primary, primary.payload);
+    expect_payload(server, &left, &right, right.selection, nullptr, clipboard.payload);
+    expect_payload(server, &left, &right, nullptr, right.primary, primary.payload);
     check(clipboard.sends == 1 && primary.sends == 1, "selection sources were not each read once");
 
     // X11 MIME negotiation can finish after the user already changed focus.
-    struct test_source later_clipboard = {.payload = "delayed clipboard"};
-    struct test_source later_primary = {.payload = "delayed primary"};
+    test_source later_clipboard{};
+    later_clipboard.payload = "delayed clipboard";
+    test_source later_primary{};
+    later_primary.payload = "delayed primary";
     struct wl_data_source *delayed_clipboard = create_data_source(&left, &later_clipboard);
     struct zwp_primary_selection_source_v1 *delayed_primary =
         create_primary_source(&left, &later_primary);
     wl_data_device_set_selection(left.device, delayed_clipboard, delayed_serial);
     zwp_primary_selection_device_v1_set_selection(left.primary_device, delayed_primary,
                                                   delayed_serial);
-    wl_data_device_set_selection(left.device, NULL, left_serial);
-    zwp_primary_selection_device_v1_set_selection(left.primary_device, NULL, left_serial);
+    wl_data_device_set_selection(left.device, nullptr, left_serial);
+    zwp_primary_selection_device_v1_set_selection(left.primary_device, nullptr, left_serial);
     round_trip(server, sender);
     round_trip(server, receiver);
     check(seat->keyboard_state.focused_surface == scene.surfaces[1] && clipboard.cancelled == 1 &&
               primary.cancelled == 1,
           "delayed selection did not replace its predecessor with focus preserved");
-    expect_payload(server, &left, &right, right.selection, NULL, later_clipboard.payload);
-    expect_payload(server, &left, &right, NULL, right.primary, later_primary.payload);
+    expect_payload(server, &left, &right, right.selection, nullptr, later_clipboard.payload);
+    expect_payload(server, &left, &right, nullptr, right.primary, later_primary.payload);
 
     wl_data_source_destroy(clipboard_source);
     zwp_primary_selection_source_v1_destroy(primary_source);
@@ -1581,11 +1615,12 @@ static void exercise_data_device(void) {
     check(!right.selection && !right.primary, "source teardown left a cached selection");
 
     seaside_tty_input_refresh_pointer(scene.input);
-    struct test_source drag = {.payload = "dropped"};
+    test_source drag{};
+    drag.payload = "dropped";
     struct wl_data_source *drag_source = create_data_source(&left, &drag);
     const uint32_t copy = WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY;
     wl_data_source_set_actions(drag_source, copy);
-    wl_data_device_start_drag(left.device, drag_source, left.pointer.surface, NULL, left_serial);
+    wl_data_device_start_drag(left.device, drag_source, left.pointer.surface, nullptr, left_serial);
     round_trip(server, sender);
     check(drag.cancelled == 1 && !seat->drag, "non-button serial started a drag");
     wl_data_source_destroy(drag_source);
@@ -1601,7 +1636,7 @@ static void exercise_data_device(void) {
     wl_data_offer_accept(right.drag_offer, right.enter_serial, mime);
     wl_data_offer_set_actions(right.drag_offer, copy, copy);
     round_trip(server, receiver);
-    struct wlr_pointer other = {0};
+    struct wlr_pointer other = {};
     wlr_pointer_init(&other, &pointer_impl, "second drag test pointer");
     wl_signal_emit_mutable(&backend.events.new_input, &other.base);
     button(&other, BTN_LEFT, true);
@@ -1610,10 +1645,10 @@ static void exercise_data_device(void) {
     check(!seat->drag && right.drops == 1 && right.leaves == 1 && right.drag_offer,
           "drop did not finish the grab and retain a transfer offer");
     button(&other, BTN_LEFT, false);
-    expect_payload(server, &left, &right, right.drag_offer, NULL, drag.payload);
+    expect_payload(server, &left, &right, right.drag_offer, nullptr, drag.payload);
     wl_data_offer_finish(right.drag_offer);
     wl_data_offer_destroy(right.drag_offer);
-    right.drag_offer = NULL;
+    right.drag_offer = nullptr;
     right.drops = 0;
     round_trip(server, receiver);
     round_trip(server, sender);
@@ -1623,7 +1658,7 @@ static void exercise_data_device(void) {
     wl_data_source_destroy(drag_source);
 
     relative(&pointer, -110, -110);
-    drag_source = start_data_drag(server, &left, &drag, &pointer, NULL);
+    drag_source = start_data_drag(server, &left, &drag, &pointer, nullptr);
     relative(&pointer, 110, 110);
     round_trip(server, receiver);
     check(right.drag_offer && seat->drag, "second drag could not reach target");
@@ -1639,14 +1674,14 @@ static void exercise_data_device(void) {
     wl_data_source_destroy(drag_source);
 
     relative(&other, -110, -110);
-    drag_source = start_data_drag(server, &left, &drag, &other, NULL);
+    drag_source = start_data_drag(server, &left, &drag, &other, nullptr);
     relative(&other, 110, 110);
     round_trip(server, receiver);
     check(right.drag_offer && seat->drag && seat->drag->focus == scene.surfaces[1],
           "third drag did not focus the target about to be destroyed");
     wl_surface_destroy(right.pointer.surface);
-    right.pointer.surface = NULL;
-    scene.surfaces[1] = NULL;
+    right.pointer.surface = nullptr;
+    scene.surfaces[1] = nullptr;
     round_trip(server, receiver);
     check(!right.drag_offer && seat->drag && !seat->drag->focus,
           "destroyed target kept its drag offer or focus");
