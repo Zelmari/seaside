@@ -536,29 +536,27 @@ TEST_F(PipeWireProbeTest, CancelAfterReadinessSilentlyReleasesRuntimeConnection)
 
 TEST_F(PipeWireProbeTest, ConnectedButSilentPeerTimesOutWhileWaylandKeepsDispatching) {
     ASSERT_TRUE(stall_peer());
-    unsigned beats = 0;
-    struct Beat {
-        unsigned *count;
-        wl_event_source *source;
-    } beat{&beats, nullptr};
-    beat.source = wl_event_loop_add_timer(
-        loop,
-        [](void *data) {
-            auto *value = static_cast<Beat *>(data);
-            ++*value->count;
-            wl_event_source_timer_update(value->source, 1);
-            return 0;
-        },
-        &beat);
-    ASSERT_NE(beat.source, nullptr);
-    ASSERT_EQ(wl_event_source_timer_update(beat.source, 1), 0);
     ASSERT_TRUE(create(40ms));
-    EXPECT_EQ(probe->result().status, PipeWireStatus::pending);
-    EXPECT_TRUE(dispatch_until([&] { return completions != 0; }));
-    wl_event_source_remove(beat.source);
+    ASSERT_EQ(probe->result().status, PipeWireStatus::pending);
+    struct IdleDispatch {
+        const PipeWireProbe &probe;
+        bool ran_while_pending = false;
+    } idle{*probe};
+    // Wayland dispatches queued idle work before polling the deadline timer.
+    ASSERT_NE(wl_event_loop_add_idle(
+                  loop,
+                  [](void *data) noexcept {
+                      auto &dispatch = *static_cast<IdleDispatch *>(data);
+                      dispatch.ran_while_pending =
+                          dispatch.probe.result().status == PipeWireStatus::pending;
+                  },
+                  &idle),
+              nullptr);
+    ASSERT_GE(wl_event_loop_dispatch(loop, 0), 0);
+    EXPECT_TRUE(idle.ran_while_pending);
+    ASSERT_TRUE(dispatch_until([&] { return completions != 0; }));
     EXPECT_EQ(completed.status, PipeWireStatus::timed_out);
     EXPECT_EQ(completed.system_error, -ETIMEDOUT);
-    EXPECT_GE(beats, 5U);
     dispatch_quietly();
     EXPECT_EQ(completions, 1U);
 }
