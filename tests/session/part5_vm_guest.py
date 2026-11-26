@@ -132,19 +132,28 @@ def run_layout(repo, directory, result_dir, state, layout):
             third = observe("third", key="open")
             if len({first["pid"], second["pid"], third["pid"]}) != 3:
                 raise RuntimeError("The scrolling trial requires three independent terminals")
-            observe("right-edge", key="right", expected=third)
-            observe("left-from-third", key="left", expected=second)
+            third_before = observe("right-edge", key="right", expected=third)
+            neighbor_before = observe("left-from-third", key="left", expected=second)
             revealed = observe("left-from-second", key="left", expected=first)
             observe("left-edge", key="left", expected=first)
             if revealed["columns"] != first["columns"]:
                 raise RuntimeError("Scrolling changed the original column width during reveal")
             resized = observe("resize", mouse=drag(2, (left, middle), (left + width // 10, middle)),
                               expected=first)
-            if resized["columns"] <= revealed["columns"]:
+            widened_by = resized["columns"] - revealed["columns"]
+            if widened_by <= 0:
                 raise RuntimeError("Scrolling pointer resize did not widen the selected column")
             neighbor = observe("neighbor", key="right", expected=second)
-            if neighbor["columns"] != second["columns"]:
-                raise RuntimeError("Resizing a scrolling column changed its neighbor's width")
+            narrowed_by = neighbor_before["columns"] - neighbor["columns"]
+            # Each terminal rounds its pixel width down to a whole number of text columns.
+            if narrowed_by <= 0 or abs(widened_by - narrowed_by) > 1:
+                raise RuntimeError(f"The divider widened the selected column by {widened_by} and "
+                                   f"narrowed its neighbor by {narrowed_by} text columns")
+            third_after = observe("third-after-resize", key="right", expected=third)
+            if (third_after["columns"], third_after["rows"]) != (
+                    third_before["columns"], third_before["rows"]):
+                raise RuntimeError("Resizing the divider changed the third terminal's geometry")
+            observe("neighbor-before-switch", key="left", expected=second)
             event("part5-input", "show an empty workspace", key="workspace-two")
             back = observe("workspace-return", key="workspace-one", expected=second)
             if back["columns"] != neighbor["columns"]:
