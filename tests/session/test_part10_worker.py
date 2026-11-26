@@ -1,6 +1,8 @@
 """Verify the packaged-session worker can assemble its shared trial code."""
 
+from contextlib import contextmanager, nullcontext
 import hashlib
+from io import StringIO
 import json
 import os
 from pathlib import Path
@@ -121,6 +123,70 @@ class Part10WorkerTests(unittest.TestCase):
                         dict(warm, other_fds=84), dict(warm, VmRSS=30000 + 32 * 1024 + 1)):
             with self.subTest(sample=leaking):
                 self.assertFalse(check(cold, warm, leaking))
+
+    def test_satellite_restart_records_verified_private_executable(self):
+        worker, _ = self.load_worker()
+        state = {}
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            log = root / "session.log"
+            log.touch()
+            children = root / "children"
+            satellite = worker["SATELLITE"]
+            session = SimpleNamespace(results=root, log=log, process=SimpleNamespace(pid=10))
+            session.window = lambda _: {"id": int(children.read_text())} if children.read_text() else None
+            session.wait = lambda predicate, _: self.assertTrue(predicate())
+
+            def fixture_path(path):
+                if path.endswith("/children"):
+                    return children
+                self.assertRegex(path, r"/proc/(41|42)/exe$")
+                return SimpleNamespace(resolve=lambda: satellite)
+
+            @contextmanager
+            def fixture(_, path, executable, *, interactive):
+                self.assertEqual(executable, "seaside-part7-x11-client")
+                self.assertTrue(interactive)
+                pid = 42 if "restart" in path.name else 41
+                children.write_text(str(pid))
+                with log.open("a") as stream:
+                    stream.write(f"xwayland-satellite started pid={pid}\n")
+                yield SimpleNamespace(stdin=StringIO(), wait=lambda timeout: 0)
+
+            worker.update(Path=fixture_path, fixture=fixture, wait_for=lambda check, *_: check())
+            with (patch("os.pidfd_open", return_value=5),
+                  patch("signal.pidfd_send_signal", side_effect=lambda *_: children.write_text("")),
+                  patch("os.close")):
+                worker["satellite_restart"](session, state)
+            self.assertEqual(state["satellite_restart"],
+                             {"processes": ["41", "42"], "executable": str(satellite), "status": "pass"})
+
+    def test_trial_reports_unexpected_errors_without_a_success_message(self):
+        worker, _ = self.load_worker()
+        for error in (NameError("undefined worker variable"), SystemExit(1)):
+            with self.subTest(error=error), TemporaryDirectory() as temporary:
+                events = []
+                reports = []
+
+                def installed_trial(*_):
+                    raise error
+
+                worker.update(event=lambda *args, **details: events.append((args, details)),
+                              upload=lambda *_: None, installed_trial=installed_trial, part10_artifacts=())
+                worker["standard"].update(active=lambda: "tty1",
+                                          send=lambda _, payload: reports.append(json.loads(payload)))
+                outcome = nullcontext() if isinstance(error, Exception) else self.assertRaises(SystemExit)
+                with (patch("os.ttyname", return_value="/dev/tty1"),
+                      patch("os.tcgetpgrp", return_value=os.getpgrp()),
+                      patch("subprocess.run", return_value=SimpleNamespace(returncode=1)),
+                      patch.object(Path, "home", return_value=Path(temporary)),
+                      patch.dict(os.environ, {"XDG_RUNTIME_DIR": temporary}), outcome):
+                    worker["trial"]()
+                self.assertFalse(reports[-1]["ok"])
+                self.assertEqual(events[-1], (("done", reports[-1].get(
+                    "error", "Part 10 installed-package trial failed")), {"ok": False}))
+                if isinstance(error, Exception):
+                    self.assertEqual(reports[-1]["error"], str(error))
 
     def test_playback_requires_recorded_pcm_when_producer_stays_active(self):
         for send_pcm in (True, False):

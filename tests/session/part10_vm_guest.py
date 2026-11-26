@@ -479,7 +479,7 @@ def satellite_restart(session, state):
         client.stdin.write("quit\n")
         client.stdin.flush()
         require(client.wait(timeout=8) == 0, "The restarted X11 client did not exit")
-    state["satellite_restart"] = {"processes": pids, "executable": str(bridge), "status": "pass"}
+    state["satellite_restart"] = {"processes": pids, "executable": str(SATELLITE), "status": "pass"}
 
 
 def stability_resources(pid):
@@ -751,14 +751,15 @@ def trial():
               tempfile.TemporaryDirectory(prefix="seaside-vm-", dir=os.environ["XDG_RUNTIME_DIR"]) as runtime):
             installed_trial(Path(source), Path(runtime), directory, state)
         state["ok"] = True
-    except (OSError, RuntimeError, KeyError, ValueError, subprocess.SubprocessError, KeyboardInterrupt) as error:
+    except (Exception, KeyboardInterrupt) as error:
         state["error"] = str(error) or type(error).__name__
         event("diagnostic", state["error"])
     finally:
         for name in ("prepare.log", "failure.log", *part10_artifacts):
             upload(name, directory / name)
         standard["send"]("guest.json", json.dumps(state, indent=2).encode() + b"\n")
-        event("done", state.get("error", "Part 10 installed-package trial passed"), ok=state["ok"])
+        outcome = "passed" if state["ok"] else "failed"
+        event("done", state.get("error", f"Part 10 installed-package trial {outcome}"), ok=state["ok"])
 
 
 if __name__ == "__main__":
