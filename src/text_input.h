@@ -7,6 +7,10 @@ struct wlr_keyboard;
 struct wlr_keyboard_key_event;
 struct seaside_text_input;
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 struct seaside_text_input *
 seaside_text_input_create(struct wl_display *display, struct wlr_seat *seat,
                           struct wlr_keyboard *keyboard,
@@ -17,5 +21,9 @@ void seaside_text_input_restore_keyboard(struct seaside_text_input *relay);
 bool seaside_text_input_key(struct seaside_text_input *relay, struct wlr_keyboard *keyboard,
                             const struct wlr_keyboard_key_event *event);
 bool seaside_text_input_modifiers(struct seaside_text_input *relay, struct wlr_keyboard *keyboard);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

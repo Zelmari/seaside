@@ -36,7 +36,7 @@ if in_checkout
   )
 endif
 
-add_project_arguments('-DWLR_USE_UNSTABLE', language: 'c')
+add_project_arguments('-DWLR_USE_UNSTABLE', language: ['c', 'cpp'])
 
 wlroots = dependency('wlroots-0.20', version: ['>=0.20.2', '<0.21.0'], include_type: 'system')
 wayland_server = dependency('wayland-server')

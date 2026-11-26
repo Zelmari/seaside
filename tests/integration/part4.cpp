@@ -4,15 +4,11 @@
 #include "server.hpp"
 #include "test_directory.hpp"
 #include "tty_input.h"
+#include "wlr_layer_shell_client_compat.hpp"
 #include "wlroots_bridge.h"
 #include "xdg-activation-v1-client-protocol.h"
 #include "xdg-decoration-unstable-v1-client-protocol.h"
 #include "xdg-shell-client-protocol.h"
-
-// The generated C function names an argument namespace.
-#define namespace layer_namespace
-#include "wlr-layer-shell-unstable-v1-client-protocol.h"
-#undef namespace
 
 #include <algorithm>
 #include <array>
