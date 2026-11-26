@@ -1,9 +1,13 @@
-#include "part3_bridge.h"
+#include "part3_bridge.hpp"
+#include "wlr_compat.hpp"
 
 #include <drm_fourcc.h>
 #include <stdlib.h>
 #include <string.h>
+#include <type_traits>
 #include <wayland-server-core.h>
+
+extern "C" {
 #include <wlr/backend/headless.h>
 #include <wlr/interfaces/wlr_keyboard.h>
 #include <wlr/interfaces/wlr_pointer.h>
@@ -11,8 +15,9 @@
 #include <wlr/types/wlr_buffer.h>
 #include <wlr/types/wlr_output.h>
 #include <wlr/types/wlr_seat.h>
+}
 
-enum { OUTPUT_WIDTH = 160, OUTPUT_HEIGHT = 90, CLIENT_WIDTH = 16, CLIENT_HEIGHT = 8 };
+constexpr int OUTPUT_WIDTH = 160, OUTPUT_HEIGHT = 90, CLIENT_WIDTH = 16, CLIENT_HEIGHT = 8;
 static const uint32_t CLIENT_RGB = 0x335577;
 
 struct part3_output {
@@ -26,10 +31,11 @@ struct part3_output {
     bool listening;
     bool render_locked;
 };
+static_assert(std::is_standard_layout_v<part3_output>);
 
-static void output_commit(struct wl_listener *listener, void *data) {
+static void output_commit(struct wl_listener *listener, void *data) noexcept {
     struct part3_output *observer = wl_container_of(listener, observer, commit);
-    const struct wlr_output_event_commit *event = data;
+    const auto *event = static_cast<const wlr_output_event_commit *>(data);
     if (!(event->state->committed & WLR_OUTPUT_STATE_BUFFER)) {
         return;
     }
@@ -78,7 +84,7 @@ static void output_commit(struct wl_listener *listener, void *data) {
     }
 }
 
-static void output_destroyed(struct wl_listener *listener, void *data) {
+static void output_destroyed(struct wl_listener *listener, void *data) noexcept {
     (void)data;
     struct part3_output *observer = wl_container_of(listener, observer, destroy);
     if (observer->render_locked) {
@@ -88,7 +94,7 @@ static void output_destroyed(struct wl_listener *listener, void *data) {
     wl_list_remove(&observer->commit.link);
     wl_list_remove(&observer->destroy.link);
     observer->listening = false;
-    observer->output = NULL;
+    observer->output = nullptr;
 }
 
 struct wlr_backend *part3_headless_backend_create(struct wl_display *display) {
@@ -102,14 +108,14 @@ struct wlr_renderer *part3_pixman_renderer_create(void) {
 struct part3_output *part3_output_create(struct wl_display *display, struct wlr_backend *backend,
                                          struct wlr_allocator *allocator,
                                          struct wlr_renderer *renderer) {
-    struct part3_output *observer = calloc(1, sizeof(*observer));
+    auto *observer = static_cast<part3_output *>(calloc(1, sizeof(part3_output)));
     if (!observer) {
-        return NULL;
+        return nullptr;
     }
     observer->output = wlr_headless_add_output(backend, OUTPUT_WIDTH, OUTPUT_HEIGHT);
     if (!observer->output || !wlr_output_init_render(observer->output, allocator, renderer)) {
         part3_output_destroy(observer);
-        return NULL;
+        return nullptr;
     }
     struct wlr_output_state state;
     wlr_output_state_init(&state);
@@ -119,7 +125,7 @@ struct part3_output *part3_output_create(struct wl_display *display, struct wlr_
     wlr_output_state_finish(&state);
     if (!committed) {
         part3_output_destroy(observer);
-        return NULL;
+        return nullptr;
     }
     wlr_output_create_global(observer->output, display);
     observer->commit.notify = output_commit;
@@ -136,7 +142,7 @@ struct part3_output *part3_output_create(struct wl_display *display, struct wlr_
 }
 
 struct wlr_output *part3_output_handle(struct part3_output *output) {
-    return output ? output->output : NULL;
+    return output ? output->output : nullptr;
 }
 
 bool part3_output_set_scale(struct part3_output *output, float scale) {
@@ -162,13 +168,13 @@ struct part3_input {
     struct wlr_pointer pointer;
 };
 
-static const struct wlr_keyboard_impl keyboard_impl = {.name = "fixture"};
+static const struct wlr_keyboard_impl keyboard_impl = {.name = "fixture", .led_update = nullptr};
 static const struct wlr_pointer_impl pointer_impl = {.name = "fixture"};
 
 struct part3_input *part3_input_create(struct wlr_backend *backend) {
-    struct part3_input *input = calloc(1, sizeof(*input));
+    auto *input = static_cast<part3_input *>(calloc(1, sizeof(part3_input)));
     if (!input) {
-        return NULL;
+        return nullptr;
     }
     wlr_keyboard_init(&input->keyboard, &keyboard_impl, "fixture keyboard");
     wlr_pointer_init(&input->pointer, &pointer_impl, "fixture pointer");
@@ -207,11 +213,11 @@ void part3_input_button(struct part3_input *input, uint32_t code, bool pressed) 
 }
 
 struct part3_output_snapshot part3_output_get_snapshot(struct part3_output *output) {
-    return output ? output->snapshot : (struct part3_output_snapshot){0};
+    return output ? output->snapshot : part3_output_snapshot{};
 }
 
 bool part3_seat_has_drag(const struct wlr_seat *seat) {
-    return seat && seat->drag != NULL;
+    return seat && seat->drag != nullptr;
 }
 
 bool part3_output_sample_pixel(struct part3_output *output, unsigned x, unsigned y) {
@@ -220,14 +226,14 @@ bool part3_output_sample_pixel(struct part3_output *output, unsigned x, unsigned
     }
     output->sample_x = x;
     output->sample_y = y;
-    output->sample = (struct part3_output_pixel){0};
+    output->sample = part3_output_pixel{};
     output->sample_pixel = true;
     wlr_output_schedule_frame(output->output);
     return true;
 }
 
 struct part3_output_pixel part3_output_get_pixel(struct part3_output *output) {
-    return output ? output->sample : (struct part3_output_pixel){0};
+    return output ? output->sample : part3_output_pixel{};
 }
 
 void part3_output_destroy(struct part3_output *output) {

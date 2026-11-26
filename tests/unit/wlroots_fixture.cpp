@@ -1,8 +1,12 @@
-#include "wlroots_fixture.h"
+#include "wlroots_fixture.hpp"
+#include "wlr_compat.hpp"
 
 #include <wayland-server-core.h>
+
+extern "C" {
 #include <wlr/backend/headless.h>
 #include <wlr/render/pixman.h>
+}
 
 /* Explicit software/headless selection stays in tests, never the core owner. */
 struct wlr_backend *seaside_test_backend_create(struct wl_display *display) {

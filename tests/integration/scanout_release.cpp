@@ -1,16 +1,19 @@
 #include "scene_bridge.hpp"
+#include "wlr_scene_compat.hpp"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <wayland-server-core.h>
+#include <xf86drm.h>
+
+extern "C" {
 #include <wlr/backend/headless.h>
 #include <wlr/interfaces/wlr_output.h>
 #include <wlr/render/allocator.h>
 #include <wlr/render/drm_syncobj.h>
 #include <wlr/render/pixman.h>
 #include <wlr/render/swapchain.h>
-#include <wlr/types/wlr_scene.h>
-#include <xf86drm.h>
+}
 
 #define CHECK(condition)                                                                           \
     do {                                                                                           \
@@ -29,17 +32,18 @@ static bool discard, unplug_on_rejection, waiting_for_unplug;
 static struct wl_event_loop *loop;
 static struct wlr_drm_syncobj_timeline *timeline;
 
-int drmSyncobjCreate(int fd, uint32_t flags, uint32_t *handle) {
+extern "C" int drmSyncobjCreate(int fd, uint32_t flags, uint32_t *handle) {
     CHECK(fd == -1 && !flags);
     *handle = TEST_HANDLE;
     return 0;
 }
-int drmSyncobjDestroy(int fd, uint32_t handle) {
+extern "C" int drmSyncobjDestroy(int fd, uint32_t handle) {
     CHECK(fd == -1 && handle == TEST_HANDLE);
     destroyed++;
     return 0;
 }
-int drmSyncobjTimelineSignal(int fd, const uint32_t *handles, uint64_t *points, uint32_t count) {
+extern "C" int drmSyncobjTimelineSignal(int fd, const uint32_t *handles, uint64_t *points,
+                                        uint32_t count) {
     CHECK(fd == -1 && count == 1 && *handles == TEST_HANDLE && *points >= signalled);
     signalled = *points;
     signals++;
@@ -50,16 +54,18 @@ static bool (*headless_test)(struct wlr_output *, const struct wlr_output_state 
 static bool allow_timeline(struct wlr_output *output, const struct wlr_output_state *state) {
     struct wlr_output_state supported = *state;
     supported.committed &= ~WLR_OUTPUT_STATE_SIGNAL_TIMELINE;
-    supported.signal_timeline = NULL;
+    supported.signal_timeline = nullptr;
     return headless_test(output, &supported);
 }
 
-bool __real_wlr_scene_output_build_state(struct wlr_scene_output *viewport,
-                                         struct wlr_output_state *state,
-                                         const struct wlr_scene_output_state_options *options);
-bool __wrap_wlr_scene_output_build_state(struct wlr_scene_output *viewport,
-                                         struct wlr_output_state *state,
-                                         const struct wlr_scene_output_state_options *options) {
+extern "C" bool
+__real_wlr_scene_output_build_state(struct wlr_scene_output *viewport,
+                                    struct wlr_output_state *state,
+                                    const struct wlr_scene_output_state_options *options);
+extern "C" bool
+__wrap_wlr_scene_output_build_state(struct wlr_scene_output *viewport,
+                                    struct wlr_output_state *state,
+                                    const struct wlr_scene_output_state_options *options) {
     if (waiting_for_unplug)
         return false;
     if (!timeline) {
@@ -82,10 +88,10 @@ bool __wrap_wlr_scene_output_build_state(struct wlr_scene_output *viewport,
     return built;
 }
 
-bool __real_wlr_output_commit_state(struct wlr_output *output,
-                                    const struct wlr_output_state *state);
-bool __wrap_wlr_output_commit_state(struct wlr_output *output,
-                                    const struct wlr_output_state *state) {
+extern "C" bool __real_wlr_output_commit_state(struct wlr_output *output,
+                                               const struct wlr_output_state *state);
+extern "C" bool __wrap_wlr_output_commit_state(struct wlr_output *output,
+                                               const struct wlr_output_state *state) {
     if (state->signal_timeline) {
         CHECK(state->signal_timeline == timeline && state->signal_point > last_rejection);
         CHECK(state->buffer &&
@@ -98,9 +104,9 @@ bool __wrap_wlr_output_commit_state(struct wlr_output *output,
     return __real_wlr_output_commit_state(output, state);
 }
 
-static void present(struct wl_listener *listener, void *data) {
+static void present(struct wl_listener *listener, void *data) noexcept {
     (void)listener;
-    struct wlr_output_event_present *event = data;
+    auto *event = static_cast<wlr_output_event_present *>(data);
     if (discard)
         event->presented = false;
     presentations++;
@@ -114,7 +120,7 @@ static void wait_for(const unsigned *counter, unsigned count) {
 }
 
 static void paint(struct seaside_scene_bridge *scene) {
-    void *pixels = calloc(160 * 90, 4);
+    auto *pixels = static_cast<uint8_t *>(calloc(160 * 90, 4));
     CHECK(pixels);
     struct wlr_buffer *buffer = seaside_scene_create_image(160, 90, pixels, free, pixels);
     CHECK(buffer);
@@ -136,7 +142,7 @@ int main(void) {
     wlr_output_state_set_enabled(&state, true);
     CHECK(wlr_output_commit_state(output, &state));
     wlr_output_state_finish(&state);
-    struct wl_listener listener = {.notify = present};
+    wl_listener listener{.link = {}, .notify = present};
     wl_signal_add(&output->events.present, &listener);
     CHECK(seaside_scene_add_output(scene, output) &&
           seaside_scene_place_output(scene, output, 0, 0));

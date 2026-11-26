@@ -1,6 +1,6 @@
 #include "server.hpp"
 #include "wlroots_bridge.hpp"
-#include "wlroots_fixture.h"
+#include "wlroots_fixture.hpp"
 
 #include <array>
 #include <gtest/gtest.h>

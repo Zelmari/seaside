@@ -1,5 +1,5 @@
 #include "ipc_protocol.hpp"
-#include "part3_bridge.h"
+#include "part3_bridge.hpp"
 #include "server.hpp"
 #include "session_control.hpp"
 #include "test_directory.hpp"

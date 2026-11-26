@@ -1,6 +1,6 @@
 #include "desktop.hpp"
 #include "live_config.hpp"
-#include "part3_bridge.h"
+#include "part3_bridge.hpp"
 #include "server.hpp"
 #include "test_directory.hpp"
 #include "tty_input.hpp"

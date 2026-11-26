@@ -1,15 +1,19 @@
 #include "scene_bridge.hpp"
+#include "wlr_compat.hpp"
 
+#include <array>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <wayland-server-core.h>
+
+extern "C" {
 #include <wlr/backend/headless.h>
 #include <wlr/render/allocator.h>
-#include <wlr/render/color.h>
 #include <wlr/render/pixman.h>
 #include <wlr/render/swapchain.h>
 #include <wlr/types/wlr_output.h>
+}
 
 #define CHECK(condition)                                                                           \
     do {                                                                                           \
@@ -33,16 +37,16 @@ static struct monitor monitors[2];
 static struct seaside_scene_bridge *scene;
 static struct wl_event_loop *loop;
 
-size_t __wrap_wlr_output_get_gamma_size(struct wlr_output *output) {
+extern "C" size_t __wrap_wlr_output_get_gamma_size(struct wlr_output *output) {
     (void)output;
     return 256;
 }
 
-bool __real_wlr_output_commit_state(struct wlr_output *output,
-                                    const struct wlr_output_state *state);
+extern "C" bool __real_wlr_output_commit_state(struct wlr_output *output,
+                                               const struct wlr_output_state *state);
 
-bool __wrap_wlr_output_commit_state(struct wlr_output *output,
-                                    const struct wlr_output_state *state) {
+extern "C" bool __wrap_wlr_output_commit_state(struct wlr_output *output,
+                                               const struct wlr_output_state *state) {
     if (!(state->committed & WLR_OUTPUT_STATE_COLOR_TRANSFORM)) {
         return __real_wlr_output_commit_state(output, state);
     }
@@ -55,7 +59,7 @@ bool __wrap_wlr_output_commit_state(struct wlr_output *output,
     } else if (attempt == 1) {
         monitor->composed_retry = composed;
         monitor->blamed_before_retry =
-            seaside_scene_get_render_status(scene, output).night_light_reason != NULL;
+            seaside_scene_get_render_status(scene, output).night_light_reason != nullptr;
     }
     monitor->tearing |= state->tearing_page_flip;
     if (monitor->failure != ACCEPT) {
@@ -67,7 +71,7 @@ bool __wrap_wlr_output_commit_state(struct wlr_output *output,
     // Model a hardware LUT. Headless still commits the real pixel buffer.
     struct wlr_output_state accepted = *state;
     accepted.committed &= ~WLR_OUTPUT_STATE_COLOR_TRANSFORM;
-    accepted.color_transform = NULL;
+    accepted.color_transform = nullptr;
     if (!__real_wlr_output_commit_state(output, &accepted)) {
         return false;
     }
@@ -81,7 +85,7 @@ bool __wrap_wlr_output_commit_state(struct wlr_output *output,
 }
 
 static void observe(void *data, struct wlr_output *output,
-                    const struct seaside_scene_frame_observation *frame) {
+                    const struct seaside_scene_frame_observation *frame) noexcept {
     (void)data;
     if (strcmp(frame->event, "present") == 0 && frame->succeeded) {
         struct monitor *monitor = output == monitors[0].output ? &monitors[0] : &monitors[1];
@@ -101,7 +105,7 @@ static bool wait_for_presentations(unsigned left, unsigned right) {
 static bool present_wallpaper(void) {
     // A single opaque buffer covers each output, permitting real scene scanout.
     const int width = 160, height = 90;
-    void *pixels = calloc((size_t)width * height, 4);
+    auto *pixels = static_cast<uint8_t *>(calloc((size_t)width * height, 4));
     CHECK(pixels);
     struct wlr_buffer *buffer = seaside_scene_create_image(width, height, pixels, free, pixels);
     if (!buffer) {
@@ -167,10 +171,12 @@ int main(void) {
     if (!allocator || !wlr_backend_start(backend) || !(scene = seaside_scene_create(display))) {
         return EXIT_FAILURE;
     }
-    seaside_scene_set_frame_observer(scene, observe, NULL);
+    seaside_scene_set_frame_observer(scene, observe, nullptr);
     for (int i = 0; i < 2; i++) {
         struct wlr_output *output = wlr_headless_add_output(backend, 160, 90);
-        monitors[i] = (struct monitor){.output = output, .applied_blue = 1};
+        monitors[i] = {};
+        monitors[i].output = output;
+        monitors[i].applied_blue = 1;
         if (!output || !wlr_output_init_render(output, allocator, renderer)) {
             return EXIT_FAILURE;
         }
@@ -188,7 +194,7 @@ int main(void) {
     wlr_output_lock_attach_render(monitors[1].output, true);
     bool passed = true;
     for (unsigned target = 0; target < 2; ++target) {
-        for (enum failure failure = REJECT_ONCE; failure <= REJECT_ALWAYS; ++failure) {
+        for (const auto failure : std::array{REJECT_ONCE, REJECT_ALWAYS}) {
             passed &= test_change(false, 4000, true, 4000, failure, target);
             passed &= test_change(true, 4000, true, 5000, failure, target);
             passed &= test_change(true, 4000, false, 4000, failure, target);

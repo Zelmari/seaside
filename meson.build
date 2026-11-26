@@ -248,9 +248,9 @@ core = static_library(
 )
 
 blur_test = executable(
-  'seaside-scene-blur-test', 'tests/integration/scene_blur.c',
+  'seaside-scene-blur-test', 'tests/integration/scene_blur.cpp',
   include_directories: include_directories('src'),
-  dependencies: [wlroots, wayland_server, pixman, libdrm, glib, meson.get_compiler('c').find_library('m')],
+  dependencies: [wlroots, wayland_server, pixman, libdrm, glib, cpp.find_library('m')],
   link_with: core, install: false,
 )
 test('part11-backdrop-blur', blur_test, suite: ['integration', 'part11'], timeout: 10)
@@ -637,7 +637,7 @@ headless_fixture = executable(
 
 part3_fixture = executable(
   'seaside-part3-fixture',
-  ['tests/integration/part3.cpp', 'tests/integration/part3_bridge.c', 'tests/integration/part8_frame_fault.c',
+  ['tests/integration/part3.cpp', 'tests/integration/part3_bridge.cpp', 'tests/integration/part8_frame_fault.cpp',
    xdg_shell_client_header, xdg_shell_private_code,
    display_protocols['presentation-time'], display_protocols['fractional-scale-v1']],
   include_directories: include_directories('src', 'tests/integration'),
@@ -654,7 +654,7 @@ test('part8-display-protocols', part3_fixture, args: ['--display-protocols'],
 )
 
 part8_night_light = executable(
-  'seaside-part8-night-light', 'tests/integration/part8_night_light.c',
+  'seaside-part8-night-light', 'tests/integration/part8_night_light.cpp',
   include_directories: include_directories('src'),
   dependencies: [wlroots, wayland_server],
   link_args: ['-Wl,--wrap=wlr_output_commit_state', '-Wl,--wrap=wlr_output_get_gamma_size'],
@@ -665,7 +665,7 @@ test('part8-night-light', part8_night_light, suite: ['integration', 'part8'], ti
 )
 
 scanout_release = executable(
-  'seaside-scanout-release', 'tests/integration/scanout_release.c',
+  'seaside-scanout-release', 'tests/integration/scanout_release.cpp',
   include_directories: include_directories('src'),
   dependencies: [wlroots, wayland_server, libdrm],
   link_args: ['-Wl,--wrap=wlr_output_commit_state', '-Wl,--wrap=wlr_scene_output_build_state'],
@@ -678,7 +678,7 @@ test('part8-scanout-release', scanout_release, suite: ['integration', 'part8'], 
 appearance_tests = executable(
   'seaside-appearance-tests',
   ['tests/unit/render_assets_test.cpp', 'tests/integration/part6_appearance.cpp',
-   'tests/integration/part3_bridge.c'],
+   'tests/integration/part3_bridge.cpp'],
   include_directories: include_directories('src', 'tests/unit', 'tests/integration'),
   dependencies: [gtest, wlroots, wayland_server, pixman, libdrm, libpng, turbojpeg, libwebp],
   link_with: core, install: false,
@@ -689,7 +689,7 @@ test('part6-scene-appearance', appearance_tests, suite: ['integration', 'part6']
 
 part6_output_tests = executable(
   'seaside-part6-output-tests',
-  ['tests/integration/part6_outputs.cpp', 'tests/integration/part3_bridge.c',
+  ['tests/integration/part6_outputs.cpp', 'tests/integration/part3_bridge.cpp',
    'src/output_config.cpp', 'src/session_control.cpp'],
   include_directories: include_directories('src', 'tests/unit', 'tests/integration'),
   dependencies: [gtest, wlroots, wayland_server, pixman, libdrm, nlohmann_json],
@@ -702,7 +702,7 @@ test('part8-output-policy', part6_output_tests, suite: ['integration', 'part6', 
 
 part4_fixture = executable(
   'seaside-part4-fixture',
-  ['tests/integration/part4.cpp', 'tests/integration/part3_bridge.c',
+  ['tests/integration/part4.cpp', 'tests/integration/part3_bridge.cpp',
    xdg_shell_client_header, xdg_shell_private_code, activation_client_header, activation_private_code,
    layer_client, layer_client_code, display_protocols['xdg-decoration-unstable-v1']],
   include_directories: include_directories('src', 'tests/integration', 'tests/unit'),
@@ -739,7 +739,7 @@ test('part6-binding-reload-during-drag', part4_fixture, args: ['binding-reload']
 )
 
 portal_smoke = executable(
-  'seaside-portal-smoke', ['tests/integration/portal_smoke.cpp', 'tests/integration/part3_bridge.c'],
+  'seaside-portal-smoke', ['tests/integration/portal_smoke.cpp', 'tests/integration/part3_bridge.cpp'],
   include_directories: include_directories('src', 'tests/integration'),
   dependencies: [wlroots, wayland_server, pixman, libdrm, systemd, pipewire, threads],
   link_with: [core, capture_foundation, session_foundation], install: false,
@@ -825,7 +825,7 @@ foreach function : wrapped_functions
 endforeach
 server_tests = executable(
   'seaside-server-tests',
-  ['tests/unit/server_test.cpp', 'tests/unit/wlroots_fixture.c'],
+  ['tests/unit/server_test.cpp', 'tests/unit/wlroots_fixture.cpp'],
   include_directories: include_directories('src', 'tests/unit'),
   dependencies: [wlroots, wayland_server, pixman, threads, gtest],
   link_with: core,

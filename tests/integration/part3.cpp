@@ -1,5 +1,5 @@
 #include "fractional-scale-v1-client-protocol.h"
-#include "part3_bridge.h"
+#include "part3_bridge.hpp"
 #include "presentation-time-client-protocol.h"
 #include "scene.hpp"
 #include "server.hpp"

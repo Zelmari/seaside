@@ -1,5 +1,5 @@
 #include "output_capture.hpp"
-#include "part3_bridge.h"
+#include "part3_bridge.hpp"
 #include "scene.hpp"
 #include "server.hpp"
 #include "session_bus.hpp"

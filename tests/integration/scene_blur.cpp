@@ -1,15 +1,19 @@
 #include "scene_blur.hpp"
+#include "wlr_scene_compat.hpp"
 
 #include <drm_fourcc.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <type_traits>
 #include <wayland-server-core.h>
+
+extern "C" {
 #include <wlr/backend/headless.h>
 #include <wlr/interfaces/wlr_buffer.h>
 #include <wlr/render/allocator.h>
 #include <wlr/render/pixman.h>
 #include <wlr/types/wlr_output.h>
-#include <wlr/types/wlr_scene.h>
+}
 
 #define CHECK(condition)                                                                           \
     do {                                                                                           \
@@ -25,15 +29,16 @@ struct glass {
     struct wlr_buffer base;
     uint32_t pixels[GLASS_WIDTH * GLASS_HEIGHT];
 };
+static_assert(std::is_standard_layout_v<glass>);
 
-static void destroy_glass(struct wlr_buffer *buffer) {
+static void destroy_glass(struct wlr_buffer *buffer) noexcept {
     struct glass *glass = wl_container_of(buffer, glass, base);
     wlr_buffer_finish(buffer);
     free(glass);
 }
 
 static bool glass_data(struct wlr_buffer *buffer, uint32_t flags, void **data, uint32_t *format,
-                       size_t *stride) {
+                       size_t *stride) noexcept {
     if (flags != WLR_BUFFER_DATA_PTR_ACCESS_READ) {
         return false;
     }
@@ -44,18 +49,20 @@ static bool glass_data(struct wlr_buffer *buffer, uint32_t flags, void **data, u
     return true;
 }
 
-static void glass_data_end(struct wlr_buffer *buffer) {
+static void glass_data_end(struct wlr_buffer *buffer) noexcept {
     (void)buffer;
 }
 
 static const struct wlr_buffer_impl glass_impl = {
     .destroy = destroy_glass,
+    .get_dmabuf = nullptr,
+    .get_shm = nullptr,
     .begin_data_ptr_access = glass_data,
     .end_data_ptr_access = glass_data_end,
 };
 
 static struct glass *create_glass(void) {
-    struct glass *glass = calloc(1, sizeof(*glass));
+    struct glass *glass = static_cast<struct glass *>(calloc(1, sizeof(struct glass)));
     CHECK(glass);
     wlr_buffer_init(&glass->base, &glass_impl, GLASS_WIDTH, GLASS_HEIGHT);
     for (size_t i = 0; i < GLASS_WIDTH * GLASS_HEIGHT; ++i) {
@@ -67,14 +74,14 @@ static struct glass *create_glass(void) {
 static void read_output(struct wlr_scene_output *viewport, uint32_t pixels[WIDTH * HEIGHT]) {
     struct wlr_output_state state;
     wlr_output_state_init(&state);
-    CHECK(wlr_scene_output_build_state(viewport, &state, NULL));
+    CHECK(wlr_scene_output_build_state(viewport, &state, nullptr));
     CHECK(state.buffer && state.buffer->width == WIDTH && state.buffer->height == HEIGHT);
     struct wlr_texture *texture = wlr_texture_from_buffer(viewport->output->renderer, state.buffer);
-    CHECK(texture && wlr_texture_read_pixels(texture, &(struct wlr_texture_read_pixels_options){
-                                                          .data = pixels,
-                                                          .format = DRM_FORMAT_XRGB8888,
-                                                          .stride = WIDTH * sizeof(*pixels),
-                                                      }));
+    wlr_texture_read_pixels_options options{};
+    options.data = pixels;
+    options.format = DRM_FORMAT_XRGB8888;
+    options.stride = WIDTH * sizeof(*pixels);
+    CHECK(texture && wlr_texture_read_pixels(texture, &options));
     wlr_texture_destroy(texture);
     CHECK(wlr_output_commit_state(viewport->output, &state));
     wlr_output_state_finish(&state);
@@ -123,7 +130,7 @@ int main(void) {
     wlr_scene_buffer_set_opaque_region(surface, &opaque);
     pixman_region32_fini(&opaque);
 
-    struct seaside_scene_blur *blur = NULL;
+    struct seaside_scene_blur *blur = nullptr;
     const struct wlr_box geometry = {0, 0, WIDTH, HEIGHT};
     uint32_t pixels[WIDTH * HEIGHT];
     read_output(viewport, pixels);

@@ -1,4 +1,4 @@
-#include "part3_bridge.h"
+#include "part3_bridge.hpp"
 #include "scene.hpp"
 #include "server.hpp"
 #include "wlroots_bridge.hpp"
