@@ -87,6 +87,10 @@ class TtyDrmObserver {
 };
 
 struct TtyDrmRendering {
+    TtyDrmRendering() noexcept = default;
+    TtyDrmRendering(TtyDrmRendering &&) noexcept = default;
+    TtyDrmRendering &operator=(TtyDrmRendering &&) = delete;
+
     struct RendererDeleter {
         void operator()(wlr_renderer *renderer) const noexcept;
     };
