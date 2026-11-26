@@ -78,10 +78,10 @@ def main():
         if not sources:
             raise ValueError('Compilation database contains no applicable project translation units')
         sources = sorted(sources)
-        def run_check(command):
+        def run_check(command, timeout=60):
             print(f"Checking: {command[0]} {command[-1]}", flush=True)
             try:
-                return subprocess.run(command, cwd=ROOT, timeout=60, check=False).returncode
+                return subprocess.run(command, cwd=ROOT, timeout=timeout, check=False).returncode
             except (OSError, subprocess.TimeoutExpired) as error:
                 print(f'Code check failed: {error}', file=sys.stderr)
                 return 1
@@ -89,11 +89,12 @@ def main():
             return 1
         # Independent translation units can be analyzed concurrently. Limit the
         # process count to keep analyzer memory/CPU bounded on development guests.
+        # Template-heavy units can take more than a minute on those guests.
         failed = False
         workers = analyzer_workers()
         print(f'Analyzing {len(sources)} sources with {workers} worker(s)', flush=True)
         with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = [executor.submit(run_check, ['clang-tidy', '--quiet', '-p', str(build_dir), str(path)])
+            futures = [executor.submit(run_check, ['clang-tidy', '--quiet', '-p', str(build_dir), str(path)], 120)
                        for path in sources]
             for future in as_completed(futures):
                 if not future.cancelled() and future.result():
