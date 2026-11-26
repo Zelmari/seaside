@@ -11,7 +11,7 @@ struct Change {
     OutputConfig::Output *output;
     std::string_view connector;
     MonitorSettings settings;
-    seaside_drm_output_settings previous, next;
+    DrmOutputSettings previous, next;
     bool adaptive_sync_rejected;
     bool adaptive_sync_requested;
     int width, height;
@@ -58,7 +58,7 @@ void OutputConfig::observe(wlr_output *handle, std::string_view connector,
         return;
     }
     if (!output) {
-        const auto description = seaside_tty_drm_describe_output(handle);
+        const auto description = drm_.describe_output(*handle);
         const std::string_view make = description.make ? description.make : "";
         const std::string_view model = description.model ? description.model : "";
         const Resolution preferred{description.preferred_width, description.preferred_height};
@@ -129,7 +129,7 @@ const OutputConfig::Output *OutputConfig::enabled(wlr_output *handle, bool usabl
         output->enabled = usable;
         if (usable) {
             output->disabled_reason.clear();
-            seaside_tty_drm_output_status(drm_, handle, &output->status);
+            drm_.output_status(*handle, output->status);
         }
     }
     return output;
@@ -166,7 +166,7 @@ wlr_output *OutputConfig::admission_preference(const Config &config) const noexc
 void OutputConfig::refresh() {
     for (auto &[id, output] : outputs_) {
         if (output.enabled) {
-            seaside_tty_drm_output_status(drm_, output.handle, &output.status);
+            drm_.output_status(*output.handle, output.status);
         }
     }
 }
@@ -200,19 +200,19 @@ std::expected<void, Diagnostic> OutputConfig::apply(const Config &config, bool p
             return failure("monitors.refresh_rate", "Unsupported refresh rate for " + connector);
         }
         const auto size = settings.resolution.value_or(Resolution{});
-        seaside_drm_output_settings next{.mode = nullptr,
-                                         .width = size.width,
-                                         .height = size.height,
-                                         .refresh_millihz = static_cast<int>(std::lround(refresh)),
-                                         .x = 0,
-                                         .y = 0,
-                                         .rotation = settings.rotation,
-                                         .scale = static_cast<float>(settings.scale),
-                                         .adaptive_sync = false};
-        if (!seaside_tty_drm_select_mode(output.handle, &next)) {
+        DrmOutputSettings next{.mode = nullptr,
+                               .width = size.width,
+                               .height = size.height,
+                               .refresh_millihz = static_cast<int>(std::lround(refresh)),
+                               .x = 0,
+                               .y = 0,
+                               .rotation = settings.rotation,
+                               .scale = static_cast<float>(settings.scale),
+                               .adaptive_sync = false};
+        if (!drm_.select_mode(*output.handle, next)) {
             auto automatic = next;
             automatic.refresh_millihz = 0;
-            if (next.refresh_millihz && seaside_tty_drm_select_mode(output.handle, &automatic)) {
+            if (next.refresh_millihz && drm_.select_mode(*output.handle, automatic)) {
                 return failure("monitors.refresh_rate",
                                "Unsupported refresh rate for " + connector + " at " +
                                    std::to_string(automatic.width) + "x" +
@@ -221,7 +221,7 @@ std::expected<void, Diagnostic> OutputConfig::apply(const Config &config, bool p
             }
             return failure("monitors.resolution", "Unsupported resolution for " + connector);
         }
-        if (!seaside_tty_drm_check_settings(output.handle, &next)) {
+        if (!drm_.check_settings(*output.handle, next)) {
             return failure("monitors",
                            "Output test rejected mode, scale or rotation for " + connector);
         }
@@ -231,7 +231,7 @@ std::expected<void, Diagnostic> OutputConfig::apply(const Config &config, bool p
         bool sync_rejected = false;
         if (should_enable && output.adaptive_sync_supported.value_or(false)) {
             next.adaptive_sync = true;
-            if (!seaside_tty_drm_check_settings(output.handle, &next)) {
+            if (!drm_.check_settings(*output.handle, next)) {
                 next.adaptive_sync = false;
                 sync_rejected = true;
             }
@@ -301,32 +301,31 @@ std::expected<void, Diagnostic> OutputConfig::apply(const Config &config, bool p
 
     std::size_t applied = 0;
     for (auto &change : changes) {
-        bool committed = seaside_tty_drm_apply_settings(drm_, change.output->handle, &change.next);
+        bool committed = drm_.apply_settings(*change.output->handle, change.next);
         if (!committed && change.next.adaptive_sync) {
             // Adaptive sync is optional for a usable monitor. Retry the same
             // transaction with the fixed-refresh state already tested above.
             change.next.adaptive_sync = false;
             change.adaptive_sync_rejected = true;
-            committed = seaside_tty_drm_apply_settings(drm_, change.output->handle, &change.next);
+            committed = drm_.apply_settings(*change.output->handle, change.next);
         }
         if (!committed) {
-            const bool failed =
-                !seaside_tty_drm_apply_settings(drm_, change.output->handle, &change.previous);
+            const bool failed = !drm_.apply_settings(*change.output->handle, change.previous);
             if (failed) {
-                seaside_tty_drm_reject_unrestorable(drm_, change.output->handle);
+                drm_.reject_unrestorable(*change.output->handle);
             }
             while (applied) {
                 const auto &prior = changes[--applied];
-                if (!seaside_tty_drm_apply_settings(drm_, prior.output->handle, &prior.previous)) {
-                    seaside_tty_drm_reject_unrestorable(drm_, prior.output->handle);
+                if (!drm_.apply_settings(*prior.output->handle, prior.previous)) {
+                    drm_.reject_unrestorable(*prior.output->handle);
                 }
             }
-            seaside_tty_drm_reconcile_cursor(drm_);
+            drm_.reconcile_cursor();
             return failure("monitors", "Output commit failed for " + std::string(change.connector));
         }
         ++applied;
     }
-    seaside_tty_drm_reconcile_cursor(drm_);
+    drm_.reconcile_cursor();
     primary_ = changes.empty() ? nullptr : changes.front().output;
     configured_primary_ = config.monitors.primary.has_value();
     refresh();
@@ -335,7 +334,7 @@ std::expected<void, Diagnostic> OutputConfig::apply(const Config &config, bool p
         const auto &status = output.status;
         output.adaptive_sync_rejected = change.adaptive_sync_rejected;
         output.adaptive_sync_requested = change.adaptive_sync_requested;
-        seaside_tty_drm_set_direct_scanout(drm_, output.handle, config.render.direct_scanout);
+        drm_.set_direct_scanout(*output.handle, config.render.direct_scanout);
         const WindowRect bounds{status.settings.x, status.settings.y, status.logical_width,
                                 status.logical_height};
         if (project_geometry && bounds != desktop_.output_bounds(output.handle)) {
@@ -371,15 +370,15 @@ void OutputConfig::sync_fullscreen(const Config &config) {
         if (!output.adaptive_sync_supported.value_or(false)) {
             continue;
         }
-        if (!seaside_tty_drm_output_status(drm_, output.handle, &output.status) ||
+        if (!drm_.output_status(*output.handle, output.status) ||
             output.status.settings.adaptive_sync == desired) {
             continue;
         }
         auto settings = output.status.settings;
         settings.adaptive_sync = desired;
-        if (seaside_tty_drm_check_settings(output.handle, &settings) &&
-            seaside_tty_drm_apply_settings(drm_, output.handle, &settings)) {
-            seaside_tty_drm_output_status(drm_, output.handle, &output.status);
+        if (drm_.check_settings(*output.handle, settings) &&
+            drm_.apply_settings(*output.handle, settings)) {
+            drm_.output_status(*output.handle, output.status);
         } else {
             output.adaptive_sync_rejected = true;
         }

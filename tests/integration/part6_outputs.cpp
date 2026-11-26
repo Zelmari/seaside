@@ -22,79 +22,70 @@
 #include <vector>
 #include <wayland-server-core.h>
 
-// Supply deterministic results at the DRM boundary. OutputConfig, LiveConfig,
-// the scene, and the IPC state projection are the production implementations.
-struct seaside_tty_drm {
-    std::map<wlr_output *, seaside_drm_output_status> state;
+namespace seaside {
+namespace {
+
+// OutputConfig, the scene and IPC projection use production code. The test
+// controls DRM responses so it can exercise rollback and display admission.
+struct FixtureDrm final : DrmOutputControl {
+    std::map<wlr_output *, DrmOutputDescription> descriptions;
+    std::map<wlr_output *, DrmOutputStatus> state;
     std::vector<std::pair<wlr_output *, float>> commits;
     std::vector<wlr_output *> rejected;
     wlr_output *reject_change = nullptr;
     wlr_output *reject_restore = nullptr;
     wlr_output *reject_adaptive_sync = nullptr;
+
+    DrmOutputDescription describe_output(wlr_output &output) const override {
+        return descriptions.at(&output);
+    }
+
+    bool output_status(wlr_output &output, DrmOutputStatus &status) override {
+        status = state.at(&output);
+        return true;
+    }
+
+    bool select_mode(wlr_output &, DrmOutputSettings &settings) const override {
+        settings.width = 160;
+        settings.height = 90;
+        settings.refresh_millihz = 60000;
+        return true;
+    }
+
+    bool check_settings(wlr_output &, const DrmOutputSettings &) const override { return true; }
+
+    bool apply_settings(wlr_output &output, const DrmOutputSettings &settings) override {
+        auto &current = state.at(&output);
+        commits.emplace_back(&output, settings.scale);
+        if ((&output == reject_change && settings.scale == 2) ||
+            (&output == reject_restore && settings.scale == 1) ||
+            (&output == reject_adaptive_sync && settings.adaptive_sync)) {
+            return false;
+        }
+        current.settings = settings;
+        const bool rotated = settings.rotation == 90 || settings.rotation == 270;
+        current.logical_width = static_cast<int>(
+            static_cast<float>(rotated ? settings.height : settings.width) / settings.scale);
+        current.logical_height = static_cast<int>(
+            static_cast<float>(rotated ? settings.width : settings.height) / settings.scale);
+        current.adaptive_sync = settings.adaptive_sync;
+        return true;
+    }
+
+    void set_direct_scanout(wlr_output &, bool) override {}
+    void reconcile_cursor() override {}
+
+    void reject_unrestorable(wlr_output &output) override { rejected.push_back(&output); }
 };
 
-namespace {
-std::map<wlr_output *, seaside_drm_output_description> descriptions;
-constexpr seaside_drm_output_description standard_display{.make = "Seaside",
-                                                          .model = "Fixture",
-                                                          .preferred_width = 160,
-                                                          .preferred_height = 90,
-                                                          .max_refresh_millihz = 60000,
-                                                          .max_pixels = 160 * 90,
-                                                          .adaptive_sync_supported = false};
-} // namespace
+constexpr DrmOutputDescription standard_display{.make = "Seaside",
+                                                .model = "Fixture",
+                                                .preferred_width = 160,
+                                                .preferred_height = 90,
+                                                .max_refresh_millihz = 60000,
+                                                .max_pixels = 160 * 90,
+                                                .adaptive_sync_supported = false};
 
-extern "C" {
-seaside_drm_output_description seaside_tty_drm_describe_output(wlr_output *output) {
-    return descriptions.at(output);
-}
-
-bool seaside_tty_drm_output_status(seaside_tty_drm *drm, wlr_output *output,
-                                   seaside_drm_output_status *status) {
-    *status = drm->state.at(output);
-    return true;
-}
-
-bool seaside_tty_drm_select_mode(wlr_output *, seaside_drm_output_settings *settings) {
-    settings->width = 160;
-    settings->height = 90;
-    settings->refresh_millihz = 60000;
-    return true;
-}
-
-bool seaside_tty_drm_check_settings(wlr_output *, const seaside_drm_output_settings *) {
-    return true;
-}
-
-bool seaside_tty_drm_apply_settings(seaside_tty_drm *drm, wlr_output *output,
-                                    const seaside_drm_output_settings *settings) {
-    auto &current = drm->state.at(output);
-    drm->commits.emplace_back(output, settings->scale);
-    if ((output == drm->reject_change && settings->scale == 2) ||
-        (output == drm->reject_restore && settings->scale == 1) ||
-        (output == drm->reject_adaptive_sync && settings->adaptive_sync)) {
-        return false;
-    }
-    current.settings = *settings;
-    const bool rotated = settings->rotation == 90 || settings->rotation == 270;
-    current.logical_width = static_cast<int>(
-        static_cast<float>(rotated ? settings->height : settings->width) / settings->scale);
-    current.logical_height = static_cast<int>(
-        static_cast<float>(rotated ? settings->width : settings->height) / settings->scale);
-    current.adaptive_sync = settings->adaptive_sync;
-    return true;
-}
-
-void seaside_tty_drm_set_direct_scanout(seaside_tty_drm *, wlr_output *, bool) {}
-void seaside_tty_drm_reconcile_cursor(seaside_tty_drm *) {}
-
-void seaside_tty_drm_reject_unrestorable(seaside_tty_drm *drm, wlr_output *output) {
-    drm->rejected.push_back(output);
-}
-}
-
-namespace seaside {
-namespace {
 using namespace std::chrono_literals;
 using FixtureOutput = std::unique_ptr<part3_output, decltype(&part3_output_destroy)>;
 
@@ -121,7 +112,7 @@ class OutputTrial : public testing::Test {
         }
         ASSERT_TRUE(server->start(backend, renderer));
         desktop = std::make_unique<Desktop>(*scene, default_config());
-        outputs = std::make_unique<OutputConfig>(&drm, *desktop);
+        outputs = std::make_unique<OutputConfig>(drm, *desktop);
         auto live_config = LiveConfig::create(
             loop, store, paths, load_startup_config(store, paths), {},
             [this](const Config &, const Config &candidate, const LiveConfig::Prepared &) {
@@ -134,8 +125,6 @@ class OutputTrial : public testing::Test {
         ASSERT_TRUE(wait([this] { return live->transaction().recovery_persisted(); }));
     }
 
-    void TearDown() override { descriptions.clear(); }
-
     FixtureOutput make_output() {
         return {part3_output_create(server->display(), server->backend(), server->allocator(),
                                     server->renderer()),
@@ -143,16 +132,16 @@ class OutputTrial : public testing::Test {
     }
 
     void attach(part3_output *handle, std::string_view name, int x, std::string_view identity = {},
-                seaside_drm_output_description description = standard_display,
+                DrmOutputDescription description = standard_display,
                 const char *disabled_reason = nullptr) {
         auto *output = part3_output_handle(handle);
-        seaside_drm_output_status status{};
+        DrmOutputStatus status{};
         status.settings = {nullptr, 160, 90, 60000, x, 0, 0, 1.0F, false};
         status.logical_width = 160;
         status.logical_height = 90;
         status.cursor = true;
         drm.state.insert_or_assign(output, status);
-        descriptions.insert_or_assign(output, description);
+        drm.descriptions.insert_or_assign(output, description);
         outputs->observe(output, name, identity, true, disabled_reason);
         if (disabled_reason) {
             return;
@@ -167,7 +156,7 @@ class OutputTrial : public testing::Test {
         outputs->enabled(output, false);
         desktop->remove_output(output);
         outputs->observe(output, connector, {}, false, nullptr);
-        descriptions.erase(output);
+        drm.descriptions.erase(output);
         handle.reset();
     }
 
@@ -204,7 +193,7 @@ class OutputTrial : public testing::Test {
     std::unique_ptr<Server> server;
     std::unique_ptr<Scene> scene;
     std::unique_ptr<Desktop> desktop;
-    seaside_tty_drm drm;
+    FixtureDrm drm;
     std::unique_ptr<OutputConfig> outputs;
     std::unique_ptr<LiveConfig> live;
     std::unique_ptr<Trace> trace;

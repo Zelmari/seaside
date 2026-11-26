@@ -19,10 +19,10 @@ class OutputConfig {
         bool adaptive_sync_requested = false;
         bool adaptive_sync_rejected = false;
         std::optional<bool> adaptive_sync_supported;
-        seaside_drm_output_status status{};
+        DrmOutputStatus status{};
     };
 
-    OutputConfig(seaside_tty_drm *drm, Desktop &desktop) : drm_(drm), desktop_(desktop) {}
+    OutputConfig(DrmOutputControl &drm, Desktop &desktop) : drm_(drm), desktop_(desktop) {}
     void observe(wlr_output *handle, std::string_view connector, std::string_view identity,
                  bool connected, const char *disabled_reason);
     const Output *enabled(wlr_output *handle, bool usable);
@@ -37,7 +37,7 @@ class OutputConfig {
   private:
     Output *connected_output(wlr_output *handle) noexcept;
 
-    seaside_tty_drm *drm_;
+    DrmOutputControl &drm_;
     Desktop &desktop_;
     std::map<std::string, Output, std::less<>> outputs_;
     const Output *primary_ = nullptr;

@@ -3,7 +3,6 @@
 #include "tty_drm.hpp"
 #include "tty_input.hpp"
 #include "tty_terminal.hpp"
-#include "wlroots_bridge.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -37,13 +36,13 @@ bool card_path(std::string_view path) {
 }
 
 struct Fixture : seaside::TtyInputObserver {
-    Fixture(seaside::Server &server, seaside::Scene &scene, seaside_tty_drm *drm,
+    Fixture(seaside::Server &server, seaside::Scene &scene, seaside::TtyDrm &drm,
             std::string_view socket, bool terminal_mode) noexcept
         : server(server), scene(scene), drm(drm), socket(socket), terminal_mode(terminal_mode) {}
 
     seaside::Server &server;
     seaside::Scene &scene;
-    seaside_tty_drm *drm;
+    seaside::TtyDrm &drm;
     std::string_view socket;
     bool terminal_mode;
     seaside::test::TerminalChild terminal{};
@@ -60,7 +59,7 @@ struct Fixture : seaside::TtyInputObserver {
 
     void motion(seaside_pointer_motion kind, double x, double y) noexcept override {
         if (!stopping) {
-            seaside_tty_drm_move(drm, kind, x, y);
+            drm.move(kind, x, y);
         }
     }
 
@@ -128,7 +127,7 @@ struct Fixture : seaside::TtyInputObserver {
 };
 
 struct Result {
-    struct seaside_tty_drm_observation display;
+    seaside::TtyDrmObservation display;
     const char *stop_reason;
     bool passed;
     bool terminal_mapped;
@@ -138,8 +137,7 @@ struct Result {
 std::expected<Result, const char *> run_fixture(const char *device, bool terminal_mode) {
     // The DRM bridge's session is tied to the display loop. Keep its owner
     // alive across Server cleanup, which releases the backend before the loop.
-    std::unique_ptr<seaside_tty_drm, decltype(&seaside_tty_drm_destroy)> drm(
-        nullptr, seaside_tty_drm_destroy);
+    std::unique_ptr<seaside::TtyDrm> drm;
     auto created = seaside::Server::create();
     if (!created) {
         return std::unexpected("display");
@@ -158,23 +156,20 @@ std::expected<Result, const char *> run_fixture(const char *device, bool termina
         return std::unexpected("wayland-socket");
     }
     auto *loop = wl_display_get_event_loop(server.display());
-    wlr_backend *backend = nullptr;
-    wlr_renderer *renderer = nullptr;
-    drm.reset(seaside_tty_drm_create(server.display(), device, &backend, &renderer));
-    if (!drm) {
+    auto created_drm = seaside::TtyDrm::create(server.display(), device);
+    if (!created_drm) {
         return std::unexpected("seat-drm-renderer");
     }
-    // Input discovery may happen inside backend_start. Keep local ownership of
-    // the pair until its listeners are attached and Server takes both handles.
-    std::unique_ptr<wlr_renderer, decltype(&seaside_wlr_renderer_destroy)> pending_renderer(
-        renderer, seaside_wlr_renderer_destroy);
-    std::unique_ptr<wlr_backend, decltype(&seaside_wlr_backend_destroy)> pending_backend(
-        backend, seaside_wlr_backend_destroy);
+    drm = std::move(*created_drm);
+    // Input discovery may happen inside backend_start. Keep rendering
+    // resources until the listeners are attached and Server takes ownership.
+    auto rendering = drm->take_rendering();
     if (server.shutdown_requested()) {
         return std::unexpected("shutdown-during-seat-setup");
     }
-    Fixture fixture{server, **scene, drm.get(), *socket, terminal_mode};
-    auto input = seaside::TtyInput::create(backend, fixture, {.fixture_launch = terminal_mode});
+    Fixture fixture{server, **scene, *drm, *socket, terminal_mode};
+    auto input = seaside::TtyInput::create(rendering.backend.get(), fixture,
+                                           {.fixture_launch = terminal_mode});
     if (!input) {
         return std::unexpected("input-listeners");
     }
@@ -182,10 +177,10 @@ std::expected<Result, const char *> run_fixture(const char *device, bool termina
     if (terminal_mode && !(*input)->enable_keyboard(server.display())) {
         return std::unexpected("wayland-keyboard");
     }
-    if (!server.start(pending_backend.release(), pending_renderer.release())) {
+    if (!server.start(rendering.backend.release(), rendering.renderer.release())) {
         return std::unexpected("backend-start");
     }
-    auto *output = seaside_tty_drm_enable(drm.get(), server.allocator(), server.renderer());
+    auto *output = drm->enable(server.allocator(), server.renderer());
     if (!output || !(*scene)->add_output(output)) {
         return std::unexpected("output-or-cursor-setup");
     }
@@ -200,7 +195,7 @@ std::expected<Result, const char *> run_fixture(const char *device, bool termina
         return std::unexpected("dispatch");
     }
 
-    const auto display = seaside_tty_drm_observation(drm.get());
+    const auto display = drm->observation();
     const auto devices = (*input)->snapshot();
     const auto scene_state = (*scene)->snapshot();
     (*scene)->clear_client_watch();
@@ -223,7 +218,7 @@ int Fixture::observe(void *data) noexcept {
     if (fixture.stopping) {
         return 0;
     }
-    const auto display = seaside_tty_drm_observation(fixture.drm);
+    const auto display = fixture.drm.observation();
     const auto devices = fixture.input->snapshot();
     const auto scene = fixture.scene.snapshot();
     if (display.failed || devices.failed || scene.failed) {
@@ -264,7 +259,7 @@ int main(int argc, char **argv) {
         std::fputs("Usage: seaside-tty-fixture [--terminal] [/dev/dri/cardN]\n", stderr);
         return 2;
     }
-    if (!seaside_tty_active_console()) {
+    if (!seaside::TtyDrm::active_console()) {
         std::fputs("TTY fixture BLOCKED: run as a foreground job on the active Linux console\n",
                    stderr);
         return unavailable;
