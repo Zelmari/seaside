@@ -36,6 +36,7 @@ allow_edge_drag = false
 color_scheme = "dark"
 
 [audio]
+# Run `wpctl get-volume @DEFAULT_AUDIO_SINK@` to see the current playback volume.
 # Run `wpctl status --name` and copy the name from the Sinks or Sources list.
 # "auto" lets WirePlumber choose. These defaults apply to playback and capture.
 default_output = "auto"
