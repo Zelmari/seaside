@@ -257,7 +257,7 @@ test('part11-backdrop-blur', blur_test, suite: ['integration', 'part11'], timeou
 
 capture_test = executable(
   'seaside-output-capture-test',
-  ['tests/integration/output_capture.c', 'tests/integration/capture_fence_fixture.c', capture_source_client, capture_copy_client, capture_copy_code,
+  ['tests/integration/output_capture.cpp', 'tests/integration/capture_fence_fixture.cpp', capture_source_client, capture_copy_client, capture_copy_code,
    xdg_output_client, xdg_output_code, xdg_shell_client_header, xdg_shell_private_code,
    foreign_toplevel_client, legacy_capture_client, display_protocols['tearing-control-v1'], display_protocols['viewporter']],
   include_directories: include_directories('src'),

@@ -1,7 +1,5 @@
-#ifndef SEASIDE_CAPTURE_FENCE_FIXTURE_H
-#define SEASIDE_CAPTURE_FENCE_FIXTURE_H
-
-#include <stdbool.h>
+#ifndef SEASIDE_CAPTURE_FENCE_FIXTURE_HPP
+#define SEASIDE_CAPTURE_FENCE_FIXTURE_HPP
 
 struct wlr_renderer;
 

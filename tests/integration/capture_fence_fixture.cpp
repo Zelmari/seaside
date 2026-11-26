@@ -1,21 +1,29 @@
 // Let a Pixman capture pass complete at a point explicitly chosen by the test.
-#include "capture_fence_fixture.h"
+#include "capture_fence_fixture.hpp"
 
-#include <stdlib.h>
+#include "wlr_compat.hpp"
+
+#include <cstdlib>
+extern "C" {
 #include <wlr/render/drm_syncobj.h>
 #include <wlr/render/pass.h>
 #include <wlr/render/wlr_renderer.h>
 #include <wlr/types/wlr_linux_drm_syncobj_v1.h>
+}
 
 static struct wlr_drm_syncobj_timeline fence;
-static struct wlr_linux_drm_syncobj_surface_v1_state surface_state = {.acquire_timeline = &fence};
+static constinit wlr_linux_drm_syncobj_surface_v1_state surface_state = [] {
+    wlr_linux_drm_syncobj_surface_v1_state value{};
+    value.acquire_timeline = &fence;
+    return value;
+}();
 static struct wlr_drm_syncobj_timeline_waiter *pending;
 static wlr_drm_syncobj_timeline_ready_callback completed;
 static bool enabled, signalled;
 
-static void require(bool condition) {
+static void require(bool condition) noexcept {
     if (!condition) {
-        abort();
+        std::abort();
     }
 }
 
@@ -29,7 +37,7 @@ void capture_test_disable_fences(struct wlr_renderer *renderer) {
 }
 
 bool capture_test_fence_pending(void) {
-    return pending != NULL;
+    return pending != nullptr;
 }
 
 void capture_test_complete_fence(void) {
@@ -38,6 +46,7 @@ void capture_test_complete_fence(void) {
     completed(pending);
 }
 
+extern "C" {
 struct wlr_linux_drm_syncobj_surface_v1_state *
 __real_wlr_linux_drm_syncobj_v1_get_surface_state(struct wlr_surface *surface);
 struct wlr_linux_drm_syncobj_surface_v1_state *
@@ -77,7 +86,7 @@ bool __wrap_wlr_drm_syncobj_timeline_waiter_init(struct wlr_drm_syncobj_timeline
 
 void __wrap_wlr_drm_syncobj_timeline_waiter_finish(struct wlr_drm_syncobj_timeline_waiter *waiter) {
     require(waiter == pending);
-    pending = NULL;
+    pending = nullptr;
 }
 
 bool __wrap_wlr_drm_syncobj_timeline_check(struct wlr_drm_syncobj_timeline *timeline,
@@ -95,7 +104,7 @@ __wrap_wlr_renderer_begin_buffer_pass(struct wlr_renderer *renderer, struct wlr_
                                       const struct wlr_buffer_pass_options *options) {
     if (options && options->signal_timeline == &fence) {
         struct wlr_buffer_pass_options copy = *options;
-        copy.signal_timeline = NULL;
+        copy.signal_timeline = nullptr;
         return __real_wlr_renderer_begin_buffer_pass(renderer, buffer, &copy);
     }
     return __real_wlr_renderer_begin_buffer_pass(renderer, buffer, options);
@@ -107,9 +116,10 @@ void __wrap_wlr_render_pass_add_texture(struct wlr_render_pass *pass,
                                         const struct wlr_render_texture_options *options) {
     if (options->wait_timeline == &fence) {
         struct wlr_render_texture_options copy = *options;
-        copy.wait_timeline = NULL;
+        copy.wait_timeline = nullptr;
         __real_wlr_render_pass_add_texture(pass, &copy);
         return;
     }
     __real_wlr_render_pass_add_texture(pass, options);
+}
 }
