@@ -1,8 +1,9 @@
 """Verify the packaged-session worker can assemble its shared trial code."""
 
-from pathlib import Path
+import hashlib
 import json
 import os
+from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
@@ -39,6 +40,75 @@ class Part10WorkerTests(unittest.TestCase):
         self.assertTrue(callable(worker["helpers"]["run_portal"]))
         self.assertTrue(callable(worker["recovery"]["stop_owned_portal"]))
         self.assertEqual(worker["part10_package"], package)
+
+    def test_package_metadata_accepts_release_and_matching_development_versions(self):
+        worker, _ = self.load_worker()
+        package = worker["part10_package"]
+        revision = worker["REVISION"]
+        with TemporaryDirectory() as temporary:
+            results = Path(temporary)
+            archive = results / package["name"]
+            payload = b"candidate payload"
+            archive.write_bytes(payload)
+            package.update(size=len(payload), sha256=hashlib.sha256(payload).hexdigest())
+            for version, accepted in (("1.0.0-1", True),
+                                      (f"1.0.0dev.r17.g{revision}-1", True),
+                                      (f"1.0.0dev.r17.g{'b' * 40}-1", False),
+                                      ("", False)):
+                with self.subTest(version=version):
+                    def checked(args, *, env):
+                        arch_field = "arch" if args[-1] == ".PKGINFO" else "pkgarch"
+                        return f"pkgname = seaside\n{arch_field} = x86_64\npkgver = {version}\n".encode()
+
+                    worker["checked"] = checked
+                    metadata = worker["package_metadata"]
+                    if accepted:
+                        self.assertEqual(metadata(archive, results, {}), version)
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, "Candidate version"):
+                            metadata(archive, results, {})
+
+    def test_installed_version_requires_exact_candidate_identity_in_both_commands(self):
+        worker, package = self.load_worker()
+        revision = worker["REVISION"]
+        version = "1.0.0-1"
+        self.assertIn(Path("/usr/bin/seaside-screenshot"), worker["PACKAGE_FILES"])
+        with TemporaryDirectory() as temporary:
+            results = Path(temporary)
+            archive = results / package["name"]
+            binaries = [results / name for name in ("seaside", "seasidectl")]
+            worker.update(SEASIDE=binaries[0], CONTROL=binaries[1], PACKAGE_FILES=tuple(binaries))
+            payload = b"pacman-owned candidate file"
+            for binary in binaries:
+                binary.write_bytes(payload)
+            for stale in (None, *binaries):
+                with self.subTest(stale=stale):
+                    queried = []
+
+                    def checked(args, *, env):
+                        if args[:2] == ["/usr/bin/pacman", "-Q"]:
+                            return f"seaside {version}\n".encode()
+                        if args[:2] == ["/usr/bin/pacman", "-Ql"]:
+                            return b"candidate manifest"
+                        if args[:2] == ["/usr/bin/pacman", "-Qoq"]:
+                            return (b"wofi\n" if args[-1] == "/usr/bin/wofi" else b"seaside\n")
+                        if args[:2] == ["/usr/bin/bsdtar", "-xOf"]:
+                            return payload
+                        binary, flag = args
+                        self.assertEqual(flag, "--version")
+                        queried.append(binary)
+                        built_revision = "b" * 40 if binary == stale else revision
+                        return f"{binary.name} {version} (revision {built_revision})\n".encode()
+
+                    worker["checked"] = checked
+                    verify = worker["verify_installed"]
+                    if stale is None:
+                        verify(archive, version, results, {})
+                        self.assertEqual(queried, binaries)
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, "does not report candidate version"):
+                            verify(archive, version, results, {})
+                        self.assertEqual(queried[-1], stale)
 
     def test_restored_mode_checks_each_dma_pool_other_descriptors_and_rss(self):
         worker, _ = self.load_worker()

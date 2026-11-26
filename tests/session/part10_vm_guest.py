@@ -29,7 +29,8 @@ CONTROL = Path("/usr/bin/seasidectl")
 SATELLITE = Path("/usr/lib/seaside/seaside-xwayland-satellite")
 CONFIG_EXAMPLE = Path("/usr/share/doc/seaside/config.example.toml")
 PACKAGE_FILES = (
-    SEASIDE, CONTROL, SATELLITE, Path("/usr/share/seaside/wallpapers/black.png"),
+    SEASIDE, CONTROL, Path("/usr/bin/seaside-screenshot"), SATELLITE,
+    Path("/usr/share/seaside/wallpapers/black.png"),
     Path("/usr/share/xdg-desktop-portal/seaside-portals.conf"),
     Path("/etc/xdg/xdg-desktop-portal-wlr/Seaside"),
     CONFIG_EXAMPLE,
@@ -62,8 +63,9 @@ def package_metadata(archive, results, env):
         require(fields.get("pkgname") == "seaside" and fields.get("arch", fields.get("pkgarch")) == "x86_64",
                 f"The delivered package has unexpected {entry} identity")
         version = fields.get("pkgver", "")
-        require(version.endswith(f".g{REVISION}-1"),
-                f"Candidate version {version!r} does not identify source revision {REVISION}")
+        release = re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+-[0-9]+(?:\.[0-9]+)?", version)
+        require(release or version.endswith(f".g{REVISION}-1"),
+                f"Candidate version {version!r} is neither a release nor a development package for {REVISION}")
         contents[entry] = version
     require(contents[".PKGINFO"] == contents[".BUILDINFO"], "Candidate package version metadata disagrees")
     return contents[".PKGINFO"]
@@ -90,6 +92,10 @@ def verify_installed(archive, version, results, env):
         packaged = checked(["/usr/bin/bsdtar", "-xOf", archive, path.relative_to("/")], env=env)
         require(owner == "seaside" and path.read_bytes() == packaged,
                 f"{path} differs from the pacman-owned candidate file")
+    for binary in (SEASIDE, CONTROL):
+        reported = checked([binary, "--version"], env=env).decode().strip()
+        require(reported == f"{binary.name} {version} (revision {REVISION})",
+                f"{binary} does not report candidate version {version} at revision {REVISION}: {reported!r}")
     owner = checked(["/usr/bin/pacman", "-Qoq", "/usr/bin/wofi"], env=env).decode().strip()
     require(owner == "wofi", "The installed chooser does not belong to the Wofi package")
 
