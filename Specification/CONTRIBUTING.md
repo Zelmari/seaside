@@ -30,6 +30,13 @@ locally and uses `wrap_mode=nodownload`. The installed session workflow starts
 from the Arch package so it can use the package-owned wallpaper and portal
 configuration. [Install and run](USER_GUIDE.md#install-on-arch)
 
+Handwritten sources use C++23. Meson also compiles Wayland scanner output as C.
+The `wlr_*_compat.hpp` headers adapt wlroots and generated layer-shell headers
+for C++ consumers. Keep the compatibility macros scoped to those includes.
+For a separate Clang build, run
+`CC=clang CXX=clang++ meson setup build-clang --buildtype=debug`, then
+`tools/run-tests --build-dir build-clang`.
+
 Use the project runner for regression evidence. It configures and builds,
 collects the dependency baseline, discovers individual GoogleTest cases, runs
 Meson tests, and retains bounded results in `test-results/`. A full run
