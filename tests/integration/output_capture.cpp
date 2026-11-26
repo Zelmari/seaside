@@ -14,6 +14,8 @@
 #include "xdg-shell-client-protocol.h"
 
 #include <errno.h>
+#include <memory>
+#include <optional>
 #include <poll.h>
 #include <stdio.h>
 #include <string.h>
@@ -22,6 +24,7 @@
 #include <time.h>
 #include <type_traits>
 #include <unistd.h>
+#include <utility>
 #include <wayland-client.h>
 #include <wayland-server-core.h>
 extern "C" {
@@ -100,7 +103,7 @@ struct CaptureFixture {
     struct wlr_allocator *allocator;
     struct wlr_output *output;
     struct wlr_output_cursor *cursor;
-    struct seaside_output_capture *capture;
+    seaside::OutputCapture *capture;
     struct wl_listener output_frame;
     struct wl_registry *registry;
     struct wl_shm *shm;
@@ -741,7 +744,7 @@ static bool check_two_outputs(CaptureFixture *fixture) noexcept {
     }};
 
     CHECK(add_output(&second));
-    CHECK(seaside_output_capture_add_output(fixture->capture, second.output, WIDTH, -3));
+    CHECK(fixture->capture->add_output(second.output, WIDTH, -3));
     CHECK(sync_client(fixture) && sync_client(fixture) && fixture->other_output);
     CHECK(start_session(fixture, &first_frames, 0));
     first_source = fixture->source;
@@ -1018,7 +1021,7 @@ static bool check_legacy_capture(CaptureFixture *fixture) noexcept {
     zwlr_screencopy_frame_v1_copy_with_damage(frame, buffer.buffer);
     CHECK(pump_for(fixture, 50) && !buffer.ready && fixture->output->attach_render_locks == 1);
     CHECK(wlr_output_cursor_move(fixture->cursor, 29, 33));
-    seaside_output_capture_cursor_changed(fixture->capture);
+    fixture->capture->cursor_changed();
     CHECK(pump_until(fixture, &buffer.ready) && !buffer.failed && buffer.full_damage &&
           (buffer.pixels[9] & 0xffffff) == BACKGROUND_RGB &&
           (buffer.pixels[37] & 0xffffff) == CURSOR_RGB);
@@ -1179,9 +1182,8 @@ static bool check_selected_window(CaptureFixture *fixture) noexcept {
 
     CHECK(scene && wlr_compositor_create(fixture->server, 6, fixture->renderer));
     CHECK(wlr_subcompositor_create(fixture->server) && wlr_viewporter_create(fixture->server));
-    CHECK(
-        seaside_scene_enable_window_capture(scene, fixture->allocator, fixture->renderer,
-                                            seaside_output_capture_copy_manager(fixture->capture)));
+    CHECK(seaside_scene_enable_window_capture(scene, fixture->allocator, fixture->renderer,
+                                              fixture->capture->copy_manager()));
     wl_list_remove(&fixture->output_frame.link);
     wl_list_init(&fixture->output_frame.link);
     tearing_output = fixture->output;
@@ -1422,8 +1424,22 @@ static bool check_selected_window(CaptureFixture *fixture) noexcept {
     return true;
 }
 
+static bool check_display_destroy() noexcept {
+    std::unique_ptr<wl_display, decltype(&wl_display_destroy)> display(wl_display_create(),
+                                                                       wl_display_destroy);
+    auto created = seaside::OutputCapture::create(display.get());
+    if (!created) {
+        return false;
+    }
+    auto capture = std::move(*created);
+    display.reset();
+    return !capture.copy_manager() && !capture.client_ready(getpid(), getuid());
+}
+
 static bool run_capture(bool part7) noexcept {
+    CHECK(check_display_destroy());
     CaptureFixture fixture{};
+    std::optional<seaside::OutputCapture> capture;
     struct capture_client hidden{}, embedded{}, resumed{};
 
     const ScopeExit cleanup{[&] noexcept {
@@ -1492,7 +1508,7 @@ static bool run_capture(bool part7) noexcept {
         if (fixture.server) {
             wl_display_destroy_clients(fixture.server);
         }
-        seaside_output_capture_destroy(fixture.capture);
+        capture.reset();
         remove_output(&fixture);
         if (fixture.backend) {
             wlr_backend_destroy(fixture.backend);
@@ -1518,9 +1534,11 @@ static bool run_capture(bool part7) noexcept {
     CHECK(fixture.allocator);
     CHECK(wlr_renderer_init_wl_shm(fixture.renderer, fixture.server));
     CHECK(wlr_backend_start(fixture.backend));
-    fixture.capture = seaside_output_capture_create(fixture.server);
-    CHECK(fixture.capture);
-    CHECK(!seaside_output_capture_client_ready(fixture.capture, getpid(), getuid()));
+    auto created_capture = seaside::OutputCapture::create(fixture.server);
+    CHECK(created_capture);
+    capture.emplace(std::move(*created_capture));
+    fixture.capture = &*capture;
+    CHECK(!fixture.capture->client_ready(getpid(), getuid()));
 
     int socket_fds[2];
     CHECK(socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, socket_fds) == 0);
@@ -1538,16 +1556,16 @@ static bool run_capture(bool part7) noexcept {
     wl_registry_add_listener(fixture.registry, &registry_listener, &fixture);
     CHECK(sync_client(&fixture) && sync_client(&fixture));
     CHECK(fixture.shm && !fixture.client_output && fixture.copy_manager && fixture.output_manager);
-    CHECK(seaside_output_capture_client_ready(fixture.capture, getpid(), getuid()));
-    CHECK(!seaside_output_capture_client_ready(fixture.capture, getpid(), getuid() + 1));
+    CHECK(fixture.capture->client_ready(getpid(), getuid()));
+    CHECK(!fixture.capture->client_ready(getpid(), getuid() + 1));
     CHECK(add_output(&fixture));
-    CHECK(seaside_output_capture_add_output(fixture.capture, fixture.output, 0, 0));
-    CHECK(!seaside_output_capture_client_ready(fixture.capture, getpid(), getuid()));
+    CHECK(fixture.capture->add_output(fixture.output, 0, 0));
+    CHECK(!fixture.capture->client_ready(getpid(), getuid()));
     CHECK(sync_client(&fixture) && sync_client(&fixture));
     CHECK(fixture.shm && fixture.client_output && fixture.copy_manager && fixture.output_manager);
     CHECK(verify_layout(&fixture));
-    CHECK(seaside_output_capture_client_ready(fixture.capture, getpid(), getuid()));
-    CHECK(!seaside_output_capture_client_ready(fixture.capture, getpid(), getuid() + 1));
+    CHECK(fixture.capture->client_ready(getpid(), getuid()));
+    CHECK(!fixture.capture->client_ready(getpid(), getuid() + 1));
 
     fixture.source = ext_output_image_capture_source_manager_v1_create_source(
         fixture.output_manager, fixture.client_output);
@@ -1564,17 +1582,17 @@ static bool run_capture(bool part7) noexcept {
 
     remove_output(&fixture);
     CHECK(pump_until(&fixture, &hidden.stopped) && pump_until(&fixture, &embedded.stopped));
-    CHECK(seaside_output_capture_client_ready(fixture.capture, getpid(), getuid()));
+    CHECK(fixture.capture->client_ready(getpid(), getuid()));
     finish_session(&hidden);
     finish_session(&embedded);
     ext_image_capture_source_v1_destroy(fixture.source);
     fixture.source = nullptr;
 
     CHECK(add_output(&fixture)); // A recovered output uses the existing client manager bindings.
-    CHECK(seaside_output_capture_add_output(fixture.capture, fixture.output, 0, 0));
+    CHECK(fixture.capture->add_output(fixture.output, 0, 0));
     CHECK(sync_client(&fixture) && sync_client(&fixture));
     CHECK(verify_layout(&fixture));
-    CHECK(seaside_output_capture_client_ready(fixture.capture, getpid(), getuid()));
+    CHECK(fixture.capture->client_ready(getpid(), getuid()));
     fixture.source = ext_output_image_capture_source_manager_v1_create_source(
         fixture.output_manager, fixture.client_output);
     CHECK(fixture.source);

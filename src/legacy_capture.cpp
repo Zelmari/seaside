@@ -18,13 +18,13 @@ extern "C" {
 #include <wlr/util/transform.h>
 }
 
-struct seaside_legacy_capture {
+namespace seaside {
+
+struct LegacyCaptureState {
     struct wl_global *global;
     struct wl_list clients;
     struct wl_list frames;
-    seaside_legacy_output_fn supports;
-    seaside_legacy_active_fn active;
-    void *data;
+    LegacyCaptureObserver *observer;
 };
 
 struct cursor_stamp {
@@ -33,7 +33,7 @@ struct cursor_stamp {
 };
 
 struct legacy_client {
-    struct seaside_legacy_capture *capture;
+    LegacyCaptureState *capture;
     struct wl_resource *resource;
     struct wl_list link;
     struct wlr_output *previous_output;
@@ -66,8 +66,8 @@ static void client_unref(struct legacy_client *client) noexcept {
 
 static void frame_finish(struct legacy_frame *frame) noexcept {
     if (frame->target) {
-        struct seaside_legacy_capture *capture = frame->client->capture;
-        capture->active(capture->data, frame->output, false);
+        LegacyCaptureState *capture = frame->client->capture;
+        capture->observer->legacy_capture_active(frame->output, false);
         wlr_buffer_unlock(frame->target);
     }
     wl_list_remove(&frame->link);
@@ -114,8 +114,8 @@ static void copy_request(struct wl_resource *resource, struct wl_resource *targe
     }
     frame->target = buffer;
     frame->with_damage = with_damage;
-    struct seaside_legacy_capture *capture = frame->client->capture;
-    capture->active(capture->data, frame->output, true);
+    LegacyCaptureState *capture = frame->client->capture;
+    capture->observer->legacy_capture_active(frame->output, true);
 }
 
 static void request_copy(struct wl_client *client, struct wl_resource *resource,
@@ -175,7 +175,7 @@ static void create_frame(struct wl_client *client, struct wl_resource *manager, 
     wl_resource_set_implementation(resource, &frame_impl, nullptr, resource_destroy_frame);
     auto *state = static_cast<legacy_client *>(wl_resource_get_user_data(manager));
     struct wlr_output *output = wlr_output_from_resource(output_resource);
-    if (!state || !output || !state->capture->supports(state->capture->data, output)) {
+    if (!state || !output || !state->capture->observer->supports_legacy_capture(output)) {
         zwlr_screencopy_frame_v1_send_failed(resource);
         return;
     }
@@ -232,7 +232,7 @@ static void resource_destroy_manager(struct wl_resource *resource) noexcept {
 
 static void bind_manager(struct wl_client *client, void *data, uint32_t version,
                          uint32_t id) noexcept {
-    auto *capture = static_cast<seaside_legacy_capture *>(data);
+    auto *capture = static_cast<LegacyCaptureState *>(data);
     uid_t uid;
     wl_client_get_credentials(client, nullptr, &uid, nullptr);
     if (uid != geteuid()) {
@@ -257,17 +257,12 @@ static void bind_manager(struct wl_client *client, void *data, uint32_t version,
     wl_resource_set_implementation(state->resource, &manager_impl, state, resource_destroy_manager);
 }
 
-struct seaside_legacy_capture *seaside_legacy_capture_create(struct wl_display *display,
-                                                             seaside_legacy_output_fn supports,
-                                                             seaside_legacy_active_fn active,
-                                                             void *data) {
-    auto *capture = new (std::nothrow) seaside_legacy_capture{};
+LegacyCapture create_legacy_capture(wl_display *display, LegacyCaptureObserver &observer) noexcept {
+    auto *capture = new (std::nothrow) LegacyCaptureState{};
     if (!capture) {
-        return nullptr;
+        return {};
     }
-    capture->supports = supports;
-    capture->active = active;
-    capture->data = data;
+    capture->observer = &observer;
     wl_list_init(&capture->clients);
     wl_list_init(&capture->frames);
     capture->global =
@@ -276,10 +271,10 @@ struct seaside_legacy_capture *seaside_legacy_capture_create(struct wl_display *
         delete capture;
         return nullptr;
     }
-    return capture;
+    return LegacyCapture(capture);
 }
 
-void seaside_legacy_capture_destroy(struct seaside_legacy_capture *capture) {
+void LegacyCaptureDeleter::operator()(LegacyCaptureState *capture) const noexcept {
     if (!capture) {
         return;
     }
@@ -296,8 +291,7 @@ void seaside_legacy_capture_destroy(struct seaside_legacy_capture *capture) {
     delete capture;
 }
 
-void seaside_legacy_capture_output_lost(struct seaside_legacy_capture *capture,
-                                        struct wlr_output *output) {
+void legacy_capture_output_lost(LegacyCaptureState *capture, struct wlr_output *output) noexcept {
     struct legacy_frame *frame, *next;
     wl_list_for_each_safe(frame, next, &capture->frames, link) {
         if (frame->output == output) {
@@ -312,8 +306,8 @@ void seaside_legacy_capture_output_lost(struct seaside_legacy_capture *capture,
     }
 }
 
-bool seaside_legacy_capture_wants_cursor(const struct seaside_legacy_capture *capture,
-                                         struct wlr_output *output) {
+bool legacy_capture_wants_cursor(const LegacyCaptureState *capture,
+                                 struct wlr_output *output) noexcept {
     const struct legacy_frame *frame;
     wl_list_for_each(frame, &capture->frames, link) {
         if (frame->output == output && frame->target && frame->with_cursor) {
@@ -372,10 +366,9 @@ static bool read_pixels(const struct legacy_frame *frame, struct wlr_buffer *buf
     return copied;
 }
 
-void seaside_legacy_capture_present(struct seaside_legacy_capture *capture,
-                                    struct wlr_output *output, struct wlr_buffer *buffer,
-                                    struct wlr_buffer *cursor_buffer, const struct timespec *when,
-                                    uint64_t content_revision) {
+void legacy_capture_present(LegacyCaptureState *capture, struct wlr_output *output,
+                            struct wlr_buffer *buffer, struct wlr_buffer *cursor_buffer,
+                            const std::timespec &when, uint64_t content_revision) noexcept {
     struct legacy_frame *frame, *next;
     wl_list_for_each_safe(frame, next, &capture->frames, link) {
         if (frame->output != output || !frame->target) {
@@ -400,8 +393,10 @@ void seaside_legacy_capture_present(struct seaside_legacy_capture *capture,
             zwlr_screencopy_frame_v1_send_damage(frame->resource, 0, 0, frame->box.width,
                                                  frame->box.height);
         }
-        const uint64_t seconds = when->tv_sec;
-        zwlr_screencopy_frame_v1_send_ready(frame->resource, seconds >> 32, seconds, when->tv_nsec);
+        const uint64_t seconds = when.tv_sec;
+        zwlr_screencopy_frame_v1_send_ready(frame->resource, seconds >> 32, seconds, when.tv_nsec);
         frame_finish(frame);
     }
 }
+
+} // namespace seaside

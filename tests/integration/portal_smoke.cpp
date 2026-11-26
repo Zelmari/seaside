@@ -87,16 +87,13 @@ int main(int argc, char **argv) {
         !(*server)->listen("seaside-portal-smoke")) {
         return EXIT_FAILURE;
     }
-    const std::unique_ptr<seaside_output_capture, decltype(&seaside_output_capture_destroy)>
-        capture(seaside_output_capture_create(display), seaside_output_capture_destroy);
-    if (!capture ||
-        (!no_outputs && !seaside_output_capture_add_output(capture.get(), head, 0, 0))) {
+    auto capture = seaside::OutputCapture::create(display);
+    if (!capture || (!no_outputs && !capture->add_output(head, 0, 0))) {
         return EXIT_FAILURE;
     }
     const bool window_capture = stream || no_outputs;
-    if (window_capture &&
-        !(*scene)->enable_window_capture((*server)->allocator(), renderer,
-                                         seaside_output_capture_copy_manager(capture.get()))) {
+    if (window_capture && !(*scene)->enable_window_capture((*server)->allocator(), renderer,
+                                                           capture->copy_manager())) {
         return EXIT_FAILURE;
     }
     if (!wait_for_handshake(display, 20s)) {
@@ -112,7 +109,7 @@ int main(int argc, char **argv) {
     auto probe = seaside::PortalProbe::start(
         **bus, getuid(),
         [&](pid_t pid, uid_t uid) {
-            return seaside_output_capture_client_ready(capture.get(), pid, uid) &&
+            return capture->client_ready(pid, uid) &&
                    (!window_capture || (*scene)->window_capture_client_ready(pid, uid));
         },
         [&](seaside::StartupService service, seaside::ServiceReport result) {

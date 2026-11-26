@@ -1,37 +1,42 @@
 #ifndef SEASIDE_LEGACY_CAPTURE_HPP
 #define SEASIDE_LEGACY_CAPTURE_HPP
 
-#include <stdbool.h>
-#include <stdint.h>
-#include <time.h>
+#include <cstdint>
+#include <ctime>
+#include <memory>
 
-struct seaside_legacy_capture;
 struct wl_display;
 struct wlr_buffer;
 struct wlr_output;
 
-typedef bool (*seaside_legacy_output_fn)(void *data, struct wlr_output *output) noexcept;
-typedef void (*seaside_legacy_active_fn)(void *data, struct wlr_output *output,
-                                         bool active) noexcept;
+namespace seaside {
+struct LegacyCaptureState;
 
-/* The caller owns output rendering and cursor composition. This adapter only
- * holds resources for outstanding legacy screencopy requests. */
-struct seaside_legacy_capture *seaside_legacy_capture_create(struct wl_display *display,
-                                                             seaside_legacy_output_fn supports,
-                                                             seaside_legacy_active_fn active,
-                                                             void *data);
-void seaside_legacy_capture_destroy(struct seaside_legacy_capture *capture);
-void seaside_legacy_capture_output_lost(struct seaside_legacy_capture *capture,
-                                        struct wlr_output *output);
-bool seaside_legacy_capture_wants_cursor(const struct seaside_legacy_capture *capture,
-                                         struct wlr_output *output);
+// Output rendering and cursor composition belong to the observer.
+class LegacyCaptureObserver {
+  public:
+    virtual bool supports_legacy_capture(wlr_output *output) const noexcept = 0;
+    virtual void legacy_capture_active(wlr_output *output, bool active) noexcept = 0;
 
-/* Send a presented frame to waiting clients. cursor_buffer may reuse buffer
- * when the cursor is hidden, or be null if offscreen composition failed.
- * content_revision advances when the output's scene changes. */
-void seaside_legacy_capture_present(struct seaside_legacy_capture *capture,
-                                    struct wlr_output *output, struct wlr_buffer *buffer,
-                                    struct wlr_buffer *cursor_buffer, const struct timespec *when,
-                                    uint64_t content_revision);
+  protected:
+    ~LegacyCaptureObserver() = default;
+};
+
+struct LegacyCaptureDeleter {
+    void operator()(LegacyCaptureState *) const noexcept;
+};
+
+using LegacyCapture = std::unique_ptr<LegacyCaptureState, LegacyCaptureDeleter>;
+LegacyCapture create_legacy_capture(wl_display *display, LegacyCaptureObserver &observer) noexcept;
+void legacy_capture_output_lost(LegacyCaptureState *capture, wlr_output *output) noexcept;
+bool legacy_capture_wants_cursor(const LegacyCaptureState *capture, wlr_output *output) noexcept;
+
+// cursor_buffer may reuse buffer when the cursor is hidden, or be null if
+// offscreen composition failed. content_revision tracks scene changes.
+void legacy_capture_present(LegacyCaptureState *capture, wlr_output *output, wlr_buffer *buffer,
+                            wlr_buffer *cursor_buffer, const std::timespec &when,
+                            std::uint64_t content_revision) noexcept;
+
+} // namespace seaside
 
 #endif

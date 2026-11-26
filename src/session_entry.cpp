@@ -262,10 +262,13 @@ class Session : public seaside::TtyInputObserver {
         if (!idle_) {
             return false;
         }
-        capture_.reset(seaside_output_capture_create(server_.display()));
-        if (!capture_ ||
-            !scene_.enable_window_capture(server_.allocator(), server_.renderer(),
-                                          seaside_output_capture_copy_manager(capture_.get()))) {
+        auto capture = seaside::OutputCapture::create(server_.display());
+        if (!capture) {
+            return false;
+        }
+        capture_.emplace(std::move(*capture));
+        if (!scene_.enable_window_capture(server_.allocator(), server_.renderer(),
+                                          capture_->copy_manager())) {
             return false;
         }
         if (!seaside_tty_drm_enable_pending(drm_, server_.allocator(), server_.renderer(),
@@ -511,7 +514,9 @@ class Session : public seaside::TtyInputObserver {
     void motion(seaside_pointer_motion kind, double x, double y) noexcept override {
         if (!stopping_ && !ipc_exiting_) {
             seaside_tty_drm_move(drm_, kind, x, y);
-            seaside_output_capture_cursor_changed(capture_.get());
+            if (capture_) {
+                capture_->cursor_changed();
+            }
             if (seaside_tty_drm_cursor_position(drm_, &x, &y)) {
                 desktop_.motion(x, y);
                 scene_.capture_pointer(x, y);
@@ -551,7 +556,9 @@ class Session : public seaside::TtyInputObserver {
     }
 
     void cursor_changed() noexcept {
-        seaside_output_capture_cursor_changed(capture_.get());
+        if (capture_) {
+            capture_->cursor_changed();
+        }
         double x, y;
         if (seaside_tty_drm_cursor_position(drm_, &x, &y)) {
             scene_.capture_pointer(x, y);
@@ -879,8 +886,7 @@ class Session : public seaside::TtyInputObserver {
                 continue;
             }
             const auto bounds = desktop_.output_bounds(output.handle);
-            if (!seaside_output_capture_position(capture_.get(), output.handle, bounds.x,
-                                                 bounds.y)) {
+            if (!capture_ || !capture_->position(output.handle, bounds.x, bounds.y)) {
                 fail("output-capture-position");
             }
         }
@@ -1023,7 +1029,7 @@ class Session : public seaside::TtyInputObserver {
         auto portal = seaside::PortalProbe::start(
             *bus_, getuid(),
             [this](pid_t pid, uid_t uid) {
-                return seaside_output_capture_client_ready(capture_.get(), pid, uid) &&
+                return capture_ && capture_->client_ready(pid, uid) &&
                        scene_.window_capture_client_ready(pid, uid);
             },
             complete, probe_timeout,
@@ -1167,12 +1173,12 @@ class Session : public seaside::TtyInputObserver {
         if (!desktop_.add_output(output.handle, output.id, bounds)) {
             return false;
         }
-        if (!seaside_output_capture_add_output(capture_.get(), output.handle, bounds.x, bounds.y)) {
+        if (!capture_ || !capture_->add_output(output.handle, bounds.x, bounds.y)) {
             desktop_.remove_output(output.handle);
             return false;
         }
         if (!idle_->add(output.handle)) {
-            seaside_output_capture_remove_output(capture_.get(), output.handle);
+            capture_->remove_output(output.handle);
             desktop_.remove_output(output.handle);
             return false;
         }
@@ -1198,7 +1204,9 @@ class Session : public seaside::TtyInputObserver {
         session.output_config_pending_ = !session.attaching_startup_;
         session.idle_->remove(output);
         session.outputs_.enabled(output, false);
-        seaside_output_capture_remove_output(session.capture_.get(), output);
+        if (session.capture_) {
+            session.capture_->remove_output(output);
+        }
         session.desktop_.remove_output(output);
     }
 
@@ -1319,8 +1327,7 @@ class Session : public seaside::TtyInputObserver {
     seaside::TtyInput *input_ = nullptr;
     std::unique_ptr<wl_event_source, decltype(&wl_event_source_remove)> timer_{
         nullptr, wl_event_source_remove};
-    std::unique_ptr<seaside_output_capture, decltype(&seaside_output_capture_destroy)> capture_{
-        nullptr, seaside_output_capture_destroy};
+    std::optional<seaside::OutputCapture> capture_;
     std::unique_ptr<seaside::SessionBus> bus_;
     std::unique_ptr<seaside::SettingsPortal> settings_;
     seaside::PowerProfiles power_;
