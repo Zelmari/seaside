@@ -78,8 +78,12 @@ class Scene final {
 
   private:
     struct Appearance;
+    struct BridgeRelease {
+        void operator()(seaside_scene_bridge *bridge) const noexcept;
+    };
+
     Scene() noexcept;
-    seaside_scene_bridge *bridge_;
+    std::unique_ptr<seaside_scene_bridge, BridgeRelease> bridge_;
     std::unique_ptr<Appearance> appearance_;
 };
 

@@ -1,7 +1,6 @@
 #ifndef SEASIDE_SCENE_BRIDGE_H
 #define SEASIDE_SCENE_BRIDGE_H
 
-#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <sys/types.h>
@@ -23,8 +22,6 @@ struct wlr_surface;
 struct seaside_scene_bridge;
 
 typedef void (*seaside_scene_focus_fn)(void *data, struct wlr_surface *surface);
-typedef void (*seaside_scene_output_appearance_fn)(void *data, struct wlr_output *output, int width,
-                                                   float scale);
 typedef void (*seaside_scene_image_release_fn)(void *data);
 typedef struct wlr_output *(*seaside_layer_output_fn)(void *data);
 typedef void (*seaside_layer_changed_fn)(void *data);
@@ -139,10 +136,6 @@ struct seaside_scene_snapshot {
     bool failed;
 };
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 void seaside_scene_set_linux_dmabuf(struct seaside_scene_bridge *scene,
                                     struct wlr_linux_dmabuf_v1 *dmabuf);
 void seaside_scene_watch_surfaces(struct seaside_scene_bridge *scene,
@@ -190,10 +183,6 @@ void seaside_scene_drop_image(struct wlr_buffer *buffer);
 void seaside_scene_set_wallpaper(struct seaside_scene_bridge *scene, struct wlr_buffer *buffer);
 void seaside_scene_set_banner(struct seaside_scene_bridge *scene, struct wlr_output *output,
                               struct wlr_buffer *buffer, int logical_height);
-/* Width zero reports removal or a viewport no longer eligible to draw. */
-void seaside_scene_set_appearance_handler(struct seaside_scene_bridge *scene,
-                                          seaside_scene_output_appearance_fn handler, void *data);
-
 void seaside_scene_set_window_handler(struct seaside_scene_bridge *scene,
                                       seaside_scene_window_fn handler, void *data);
 void seaside_scene_set_layer_handler(struct seaside_scene_bridge *scene,
@@ -240,14 +229,27 @@ bool seaside_scene_window_at(struct seaside_scene_bridge *scene, double x, doubl
 /* Watch future maps from one owned client process. The focus callback gets a
  * borrowed mapped surface, then NULL when focus ends. Callbacks run on the
  * display owner thread and must return without reentering this API, destroying
- * the scene or throwing across C. Clear the watch before reaping the child or
+ * the scene or throwing. Clear the watch before reaping the child or
  * releasing the callback target. */
 bool seaside_scene_watch_client(struct seaside_scene_bridge *scene, pid_t pid,
                                 seaside_scene_focus_fn focus, void *data);
 void seaside_scene_clear_client_watch(struct seaside_scene_bridge *scene);
 
-#ifdef __cplusplus
-}
-#endif
+namespace seaside {
+
+class SceneAppearanceObserver {
+  public:
+    // Width zero reports removal or a viewport no longer eligible to draw.
+    virtual void viewport_changed(wlr_output *output, int width, float scale) noexcept = 0;
+
+  protected:
+    ~SceneAppearanceObserver() = default;
+};
+
+// The observer is borrowed through its last viewport notification.
+void set_scene_appearance_observer(seaside_scene_bridge *scene,
+                                   SceneAppearanceObserver *observer) noexcept;
+
+} // namespace seaside
 
 #endif

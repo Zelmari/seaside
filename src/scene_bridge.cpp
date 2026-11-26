@@ -90,8 +90,7 @@ struct seaside_scene_bridge {
     struct seaside_scene_snapshot snapshot;
     seaside_scene_window_fn window;
     void *window_data;
-    seaside_scene_output_appearance_fn appearance;
-    void *appearance_data;
+    seaside::SceneAppearanceObserver *appearance;
     struct scene_view *focused_view;
     pid_t watched_pid;
     seaside_scene_focus_fn focus;
@@ -1557,7 +1556,7 @@ static void update_output_appearance(struct scene_output *view) {
         wlr_scene_buffer_set_buffer(view->banner, nullptr);
         view->banner_logical_height = 0;
         if (view->owner->appearance) {
-            view->owner->appearance(view->owner->appearance_data, output, width, output->scale);
+            view->owner->appearance->viewport_changed(output, width, output->scale);
         }
     }
     fit_banner(view, false);
@@ -1896,7 +1895,7 @@ static void output_destroy(struct wl_listener *listener, void *data) noexcept {
     wlr_scene_node_destroy(&output->banner->node);
     wlr_drm_syncobj_timeline_unref(output->unsubmitted_scanout);
     if (scene->appearance) {
-        scene->appearance(scene->appearance_data, output->viewport->output, 0, 0);
+        scene->appearance->viewport_changed(output->viewport->output, 0, 0);
     }
     free(output);
 }
@@ -2290,11 +2289,10 @@ void seaside_scene_set_banner(struct seaside_scene_bridge *scene, struct wlr_out
     seaside_scene_drop_image(buffer);
 }
 
-void seaside_scene_set_appearance_handler(struct seaside_scene_bridge *scene,
-                                          seaside_scene_output_appearance_fn handler, void *data) {
+void seaside::set_scene_appearance_observer(seaside_scene_bridge *scene,
+                                            SceneAppearanceObserver *observer) noexcept {
     if (scene && scene->attached) {
-        scene->appearance = handler;
-        scene->appearance_data = data;
+        scene->appearance = observer;
     }
 }
 
