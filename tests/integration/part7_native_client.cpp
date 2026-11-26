@@ -1,7 +1,10 @@
 #include "xdg-shell-client-protocol.h"
 
+#include <algorithm>
+#include <chrono>
 #include <errno.h>
 #include <new>
+#include <optional>
 #include <poll.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -13,6 +16,8 @@
 #include <unistd.h>
 #include <wayland-client.h>
 
+using Clock = std::chrono::steady_clock;
+
 struct client {
     struct wl_display *display;
     struct wl_compositor *compositor;
@@ -23,8 +28,11 @@ struct client {
     struct wl_list buffers;
     int32_t width;
     int32_t height;
+    int32_t pending_width;
+    int32_t pending_height;
     uint32_t pixel;
     unsigned resize_delay_ms;
+    std::optional<Clock::time_point> resize_deadline;
     bool dirty;
     bool fixed_size;
     bool configured;
@@ -46,9 +54,7 @@ static void frame_done(void *data, struct wl_callback *callback, uint32_t time) 
     auto *client = static_cast<struct client *>(data);
     wl_callback_destroy(callback);
     client->frame = NULL;
-    if (client->dirty) {
-        draw(client);
-    }
+    draw(client);
     puts("frame-callback");
 }
 
@@ -63,6 +69,9 @@ static const struct wl_callback_listener frame_listener = {.done = frame_done};
 static const struct wl_buffer_listener buffer_listener = {.release = buffer_released};
 
 static void draw(struct client *client) noexcept {
+    if (!client->dirty || client->resize_deadline) {
+        return;
+    }
     const int32_t stride = client->width * 4;
     const int32_t length = stride * client->height;
     const int fd = memfd_create("seaside-part7-pixels", MFD_CLOEXEC);
@@ -127,18 +136,25 @@ static void draw(struct client *client) noexcept {
 static void surface_configured(void *data, struct xdg_surface *surface, uint32_t serial) noexcept {
     auto *client = static_cast<struct client *>(data);
     xdg_surface_ack_configure(surface, serial);
-    if (client->configured && client->dirty && client->resize_delay_ms) {
-        // Flush the acknowledgment before delaying the matching buffer commit.
+    const bool resized = client->pending_width > 0 && (client->pending_width != client->width ||
+                                                       client->pending_height != client->height);
+    if (resized) {
+        client->width = client->pending_width;
+        client->height = client->pending_height;
+        client->dirty = true;
+    }
+    client->pending_width = 0;
+    client->pending_height = 0;
+    if (client->configured && resized && client->resize_delay_ms) {
+        // Acknowledge each configure while waiting to commit the latest size.
         if (wl_display_flush(client->display) < 0 && errno != EAGAIN) {
             client->failed = true;
             return;
         }
-        usleep(client->resize_delay_ms * 1000);
+        client->resize_deadline = Clock::now() + std::chrono::milliseconds(client->resize_delay_ms);
     }
     client->configured = true;
-    if (client->dirty) {
-        draw(client);
-    }
+    draw(client);
 }
 
 static void toplevel_configured(void *data, struct xdg_toplevel *toplevel, int32_t width,
@@ -146,11 +162,9 @@ static void toplevel_configured(void *data, struct xdg_toplevel *toplevel, int32
     (void)toplevel;
     (void)states;
     auto *client = static_cast<struct client *>(data);
-    if (!client->fixed_size && width > 0 && height > 0 && width <= 4096 && height <= 4096 &&
-        (width != client->width || height != client->height)) {
-        client->width = width;
-        client->height = height;
-        client->dirty = true;
+    if (!client->fixed_size && width > 0 && height > 0 && width <= 4096 && height <= 4096) {
+        client->pending_width = width;
+        client->pending_height = height;
     }
 }
 
@@ -254,16 +268,32 @@ static void run(struct client *client) noexcept {
             break;
         }
         fds[0].events = flushed < 0 ? POLLIN | POLLOUT : POLLIN;
-        if (poll(fds, 2, -1) < 0) {
-            if (errno != EINTR) {
-                client->failed = true;
+        int timeout = -1;
+        if (client->resize_deadline) {
+            const auto remaining = std::chrono::ceil<std::chrono::milliseconds>(
+                *client->resize_deadline - Clock::now());
+            timeout =
+                static_cast<int>(std::max(remaining, std::chrono::milliseconds::zero()).count());
+        }
+        if (poll(fds, 2, timeout) < 0) {
+            if (errno == EINTR) {
+                continue;
             }
-        } else if (((fds[0].revents & (POLLIN | POLLHUP | POLLERR)) != 0 &&
-                    wl_display_dispatch(client->display) < 0) ||
-                   (fds[0].revents & POLLNVAL)) {
+            client->failed = true;
+            break;
+        }
+        // Dispatch a ready configure before committing a size whose deadline expired.
+        if (((fds[0].revents & (POLLIN | POLLHUP | POLLERR)) != 0 &&
+             wl_display_dispatch(client->display) < 0) ||
+            (fds[0].revents & POLLNVAL)) {
             client->failed = true;
         } else if (fds[1].revents) {
             read_command(client);
+        }
+        if (!client->stop && !client->failed && client->resize_deadline &&
+            Clock::now() >= *client->resize_deadline) {
+            client->resize_deadline.reset();
+            draw(client);
         }
     }
 }
