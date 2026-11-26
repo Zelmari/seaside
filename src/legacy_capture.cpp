@@ -1,17 +1,22 @@
-#include "legacy_capture.h"
+#include "legacy_capture.hpp"
+
+#include "wlr_compat.hpp"
 
 #include "wlr-screencopy-unstable-v1-server-protocol.h"
 
 #include <drm_fourcc.h>
 #include <limits.h>
-#include <stdlib.h>
+#include <new>
+#include <type_traits>
 #include <unistd.h>
 #include <wayland-server-core.h>
+extern "C" {
 #include <wlr/render/wlr_texture.h>
 #include <wlr/types/wlr_buffer.h>
 #include <wlr/types/wlr_output.h>
 #include <wlr/util/box.h>
 #include <wlr/util/transform.h>
+}
 
 struct seaside_legacy_capture {
     struct wl_global *global;
@@ -49,45 +54,48 @@ struct legacy_frame {
     bool with_damage;
 };
 
-static void client_unref(struct legacy_client *client) {
+static_assert(std::is_standard_layout_v<legacy_client>);
+static_assert(std::is_standard_layout_v<legacy_frame>);
+
+static void client_unref(struct legacy_client *client) noexcept {
     if (--client->references == 0) {
         wl_list_remove(&client->link);
-        free(client);
+        delete client;
     }
 }
 
-static void frame_finish(struct legacy_frame *frame) {
+static void frame_finish(struct legacy_frame *frame) noexcept {
     if (frame->target) {
         struct seaside_legacy_capture *capture = frame->client->capture;
         capture->active(capture->data, frame->output, false);
         wlr_buffer_unlock(frame->target);
     }
     wl_list_remove(&frame->link);
-    wl_resource_set_user_data(frame->resource, NULL);
+    wl_resource_set_user_data(frame->resource, nullptr);
     client_unref(frame->client);
-    free(frame);
+    delete frame;
 }
 
-static void frame_fail(struct legacy_frame *frame) {
+static void frame_fail(struct legacy_frame *frame) noexcept {
     zwlr_screencopy_frame_v1_send_failed(frame->resource);
     frame_finish(frame);
 }
 
-static void request_destroy(struct wl_client *client, struct wl_resource *resource) {
+static void request_destroy(struct wl_client *client, struct wl_resource *resource) noexcept {
     (void)client;
     wl_resource_destroy(resource);
 }
 
-static void resource_destroy_frame(struct wl_resource *resource) {
-    struct legacy_frame *frame = wl_resource_get_user_data(resource);
+static void resource_destroy_frame(struct wl_resource *resource) noexcept {
+    auto *frame = static_cast<legacy_frame *>(wl_resource_get_user_data(resource));
     if (frame) {
         frame_finish(frame);
     }
 }
 
 static void copy_request(struct wl_resource *resource, struct wl_resource *target,
-                         bool with_damage) {
-    struct legacy_frame *frame = wl_resource_get_user_data(resource);
+                         bool with_damage) noexcept {
+    auto *frame = static_cast<legacy_frame *>(wl_resource_get_user_data(resource));
     if (!frame || frame->target) {
         wl_resource_post_error(resource, ZWLR_SCREENCOPY_FRAME_V1_ERROR_ALREADY_USED,
                                "screencopy frame was already used");
@@ -111,13 +119,13 @@ static void copy_request(struct wl_resource *resource, struct wl_resource *targe
 }
 
 static void request_copy(struct wl_client *client, struct wl_resource *resource,
-                         struct wl_resource *target) {
+                         struct wl_resource *target) noexcept {
     (void)client;
     copy_request(resource, target, false);
 }
 
 static void request_copy_damage(struct wl_client *client, struct wl_resource *resource,
-                                struct wl_resource *target) {
+                                struct wl_resource *target) noexcept {
     (void)client;
     copy_request(resource, target, true);
 }
@@ -128,17 +136,18 @@ static const struct zwlr_screencopy_frame_v1_interface frame_impl = {
     .copy_with_damage = request_copy_damage,
 };
 
-static int scaled_coordinate(int64_t coordinate, float scale, int limit) {
+static int scaled_coordinate(int64_t coordinate, float scale, int limit) noexcept {
     const double scaled = (double)coordinate * scale + 0.5;
     return scaled <= 0.0 ? 0 : scaled >= limit ? limit : (int)scaled;
 }
 
-static struct wlr_box capture_box(struct wlr_output *output, const struct wlr_box *region) {
+static struct wlr_box capture_box(struct wlr_output *output,
+                                  const struct wlr_box *region) noexcept {
     if (!region) {
-        return (struct wlr_box){.width = output->width, .height = output->height};
+        return wlr_box{.x = 0, .y = 0, .width = output->width, .height = output->height};
     }
     if (region->width <= 0 || region->height <= 0) {
-        return (struct wlr_box){0};
+        return {};
     }
     int width, height;
     wlr_output_transformed_resolution(output, &width, &height);
@@ -156,15 +165,15 @@ static struct wlr_box capture_box(struct wlr_output *output, const struct wlr_bo
 
 static void create_frame(struct wl_client *client, struct wl_resource *manager, uint32_t id,
                          bool cursor, struct wl_resource *output_resource,
-                         const struct wlr_box *region) {
+                         const struct wlr_box *region) noexcept {
     struct wl_resource *resource = wl_resource_create(client, &zwlr_screencopy_frame_v1_interface,
                                                       wl_resource_get_version(manager), id);
     if (!resource) {
         wl_client_post_no_memory(client);
         return;
     }
-    wl_resource_set_implementation(resource, &frame_impl, NULL, resource_destroy_frame);
-    struct legacy_client *state = wl_resource_get_user_data(manager);
+    wl_resource_set_implementation(resource, &frame_impl, nullptr, resource_destroy_frame);
+    auto *state = static_cast<legacy_client *>(wl_resource_get_user_data(manager));
     struct wlr_output *output = wlr_output_from_resource(output_resource);
     if (!state || !output || !state->capture->supports(state->capture->data, output)) {
         zwlr_screencopy_frame_v1_send_failed(resource);
@@ -175,7 +184,7 @@ static void create_frame(struct wl_client *client, struct wl_resource *manager, 
         zwlr_screencopy_frame_v1_send_failed(resource);
         return;
     }
-    struct legacy_frame *frame = calloc(1, sizeof(*frame));
+    auto *frame = new (std::nothrow) legacy_frame{};
     if (!frame) {
         wl_client_post_no_memory(client);
         return;
@@ -196,13 +205,13 @@ static void create_frame(struct wl_client *client, struct wl_resource *manager, 
 }
 
 static void request_output(struct wl_client *client, struct wl_resource *manager, uint32_t id,
-                           int32_t cursor, struct wl_resource *output) {
-    create_frame(client, manager, id, cursor != 0, output, NULL);
+                           int32_t cursor, struct wl_resource *output) noexcept {
+    create_frame(client, manager, id, cursor != 0, output, nullptr);
 }
 
 static void request_region(struct wl_client *client, struct wl_resource *manager, uint32_t id,
                            int32_t cursor, struct wl_resource *output, int32_t x, int32_t y,
-                           int32_t width, int32_t height) {
+                           int32_t width, int32_t height) noexcept {
     const struct wlr_box region = {.x = x, .y = y, .width = width, .height = height};
     create_frame(client, manager, id, cursor != 0, output, &region);
 }
@@ -213,23 +222,24 @@ static const struct zwlr_screencopy_manager_v1_interface manager_impl = {
     .destroy = request_destroy,
 };
 
-static void resource_destroy_manager(struct wl_resource *resource) {
-    struct legacy_client *client = wl_resource_get_user_data(resource);
+static void resource_destroy_manager(struct wl_resource *resource) noexcept {
+    auto *client = static_cast<legacy_client *>(wl_resource_get_user_data(resource));
     if (client) {
-        client->resource = NULL;
+        client->resource = nullptr;
         client_unref(client);
     }
 }
 
-static void bind_manager(struct wl_client *client, void *data, uint32_t version, uint32_t id) {
-    struct seaside_legacy_capture *capture = data;
+static void bind_manager(struct wl_client *client, void *data, uint32_t version,
+                         uint32_t id) noexcept {
+    auto *capture = static_cast<seaside_legacy_capture *>(data);
     uid_t uid;
-    wl_client_get_credentials(client, NULL, &uid, NULL);
+    wl_client_get_credentials(client, nullptr, &uid, nullptr);
     if (uid != geteuid()) {
         wl_client_post_implementation_error(client, "screencopy requires same-user access");
         return;
     }
-    struct legacy_client *state = calloc(1, sizeof(*state));
+    auto *state = new (std::nothrow) legacy_client{};
     if (!state) {
         wl_client_post_no_memory(client);
         return;
@@ -237,7 +247,7 @@ static void bind_manager(struct wl_client *client, void *data, uint32_t version,
     state->resource =
         wl_resource_create(client, &zwlr_screencopy_manager_v1_interface, (int)version, id);
     if (!state->resource) {
-        free(state);
+        delete state;
         wl_client_post_no_memory(client);
         return;
     }
@@ -251,9 +261,9 @@ struct seaside_legacy_capture *seaside_legacy_capture_create(struct wl_display *
                                                              seaside_legacy_output_fn supports,
                                                              seaside_legacy_active_fn active,
                                                              void *data) {
-    struct seaside_legacy_capture *capture = calloc(1, sizeof(*capture));
+    auto *capture = new (std::nothrow) seaside_legacy_capture{};
     if (!capture) {
-        return NULL;
+        return nullptr;
     }
     capture->supports = supports;
     capture->active = active;
@@ -263,8 +273,8 @@ struct seaside_legacy_capture *seaside_legacy_capture_create(struct wl_display *
     capture->global =
         wl_global_create(display, &zwlr_screencopy_manager_v1_interface, 3, capture, bind_manager);
     if (!capture->global) {
-        free(capture);
-        return NULL;
+        delete capture;
+        return nullptr;
     }
     return capture;
 }
@@ -279,11 +289,11 @@ void seaside_legacy_capture_destroy(struct seaside_legacy_capture *capture) {
     }
     struct legacy_client *client, *remaining;
     wl_list_for_each_safe(client, remaining, &capture->clients, link) {
-        wl_resource_set_user_data(client->resource, NULL);
+        wl_resource_set_user_data(client->resource, nullptr);
         client_unref(client);
     }
     wl_global_destroy(capture->global);
-    free(capture);
+    delete capture;
 }
 
 void seaside_legacy_capture_output_lost(struct seaside_legacy_capture *capture,
@@ -297,7 +307,7 @@ void seaside_legacy_capture_output_lost(struct seaside_legacy_capture *capture,
     struct legacy_client *client;
     wl_list_for_each(client, &capture->clients, link) {
         if (client->previous_output == output) {
-            client->previous_output = NULL;
+            client->previous_output = nullptr;
         }
     }
 }
@@ -313,18 +323,18 @@ bool seaside_legacy_capture_wants_cursor(const struct seaside_legacy_capture *ca
     return false;
 }
 
-static struct cursor_stamp current_cursor(const struct legacy_frame *frame) {
+static struct cursor_stamp current_cursor(const struct legacy_frame *frame) noexcept {
     const struct wlr_output_cursor *cursor = frame->output->hardware_cursor;
     if (frame->with_cursor && cursor && cursor->enabled && cursor->visible && cursor->texture) {
-        return (struct cursor_stamp){.texture = cursor->texture,
-                                     .x = cursor->x - cursor->hotspot_x,
-                                     .y = cursor->y - cursor->hotspot_y};
+        return cursor_stamp{.texture = cursor->texture,
+                            .x = cursor->x - cursor->hotspot_x,
+                            .y = cursor->y - cursor->hotspot_y};
     }
-    return (struct cursor_stamp){0};
+    return {};
 }
 
 static bool changed(const struct legacy_frame *frame, uint64_t revision,
-                    struct cursor_stamp stamp) {
+                    struct cursor_stamp stamp) noexcept {
     const struct legacy_client *state = frame->client;
     const struct wlr_box *a = &state->previous_box;
     const struct wlr_box *b = &frame->box;
@@ -334,7 +344,7 @@ static bool changed(const struct legacy_frame *frame, uint64_t revision,
            state->cursor.y != stamp.y;
 }
 
-static bool read_pixels(const struct legacy_frame *frame, struct wlr_buffer *buffer) {
+static bool read_pixels(const struct legacy_frame *frame, struct wlr_buffer *buffer) noexcept {
     struct wlr_texture *texture = wlr_texture_from_buffer(frame->output->renderer, buffer);
     if (!texture) {
         return false;
@@ -349,7 +359,9 @@ static bool read_pixels(const struct legacy_frame *frame, struct wlr_buffer *buf
             const struct wlr_texture_read_pixels_options options = {
                 .data = pixels,
                 .format = format,
-                .stride = stride,
+                .stride = static_cast<uint32_t>(stride),
+                .dst_x = 0,
+                .dst_y = 0,
                 .src_box = frame->box,
             };
             copied = wlr_texture_read_pixels(texture, &options);

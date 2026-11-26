@@ -1,4 +1,4 @@
-#include "output_capture.h"
+#include "output_capture.hpp"
 #include "part3_bridge.h"
 #include "scene.hpp"
 #include "server.hpp"

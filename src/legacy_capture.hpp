@@ -1,5 +1,5 @@
-#ifndef SEASIDE_LEGACY_CAPTURE_H
-#define SEASIDE_LEGACY_CAPTURE_H
+#ifndef SEASIDE_LEGACY_CAPTURE_HPP
+#define SEASIDE_LEGACY_CAPTURE_HPP
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -10,8 +10,9 @@ struct wl_display;
 struct wlr_buffer;
 struct wlr_output;
 
-typedef bool (*seaside_legacy_output_fn)(void *data, struct wlr_output *output);
-typedef void (*seaside_legacy_active_fn)(void *data, struct wlr_output *output, bool active);
+typedef bool (*seaside_legacy_output_fn)(void *data, struct wlr_output *output) noexcept;
+typedef void (*seaside_legacy_active_fn)(void *data, struct wlr_output *output,
+                                         bool active) noexcept;
 
 /* The caller owns output rendering and cursor composition. This adapter only
  * holds resources for outstanding legacy screencopy requests. */

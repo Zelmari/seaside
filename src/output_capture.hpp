@@ -1,5 +1,5 @@
-#ifndef SEASIDE_OUTPUT_CAPTURE_H
-#define SEASIDE_OUTPUT_CAPTURE_H
+#ifndef SEASIDE_OUTPUT_CAPTURE_HPP
+#define SEASIDE_OUTPUT_CAPTURE_HPP
 
 #include <stdbool.h>
 #include <sys/types.h>

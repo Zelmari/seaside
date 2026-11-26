@@ -1,6 +1,6 @@
 #define _GNU_SOURCE
 
-#include "output_capture.h"
+#include "output_capture.hpp"
 #include "capture_fence_fixture.h"
 #include "scene_bridge.h"
 #include "tearing-control-v1-client-protocol.h"

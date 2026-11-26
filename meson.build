@@ -185,7 +185,7 @@ legacy_capture_code = custom_target(
 )
 capture_foundation = static_library(
   'seaside-capture-foundation',
-  ['src/output_capture.c', 'src/legacy_capture.c', capture_source_server, capture_source_code,
+  ['src/output_capture.cpp', 'src/legacy_capture.cpp', capture_source_server, capture_source_code,
    foreign_toplevel_code, legacy_capture_server, legacy_capture_code],
   include_directories: include_directories('src'),
   dependencies: [wlroots, wayland_server, pixman, libdrm], install: false,

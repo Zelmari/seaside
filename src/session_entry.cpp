@@ -1,7 +1,7 @@
 #include "build_info.hpp"
 #include "idle_power.hpp"
 #include "ipc_protocol.hpp"
-#include "output_capture.h"
+#include "output_capture.hpp"
 #include "satellite.hpp"
 #include "scene.hpp"
 #include "server.hpp"

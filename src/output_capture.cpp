@@ -1,12 +1,16 @@
-#include "output_capture.h"
-#include "legacy_capture.h"
+#include "output_capture.hpp"
+
+#include "legacy_capture.hpp"
+#include "wlr_compat.hpp"
 
 #include "ext-image-capture-source-v1-server-protocol.h"
 
-#include <stdlib.h>
+#include <new>
 #include <string.h>
+#include <type_traits>
 #include <unistd.h>
 #include <wayland-server-core.h>
+extern "C" {
 #include <wlr/interfaces/wlr_ext_image_capture_source_v1.h>
 #include <wlr/render/allocator.h>
 #include <wlr/render/pass.h>
@@ -19,6 +23,7 @@
 #include <wlr/types/wlr_xdg_output_v1.h>
 #include <wlr/util/box.h>
 #include <wlr/util/transform.h>
+}
 
 struct seaside_output_capture {
     struct wl_display *display;
@@ -51,7 +56,20 @@ struct capture_output {
     bool constraints_ready;
 };
 
-static const struct wlr_ext_image_capture_source_v1_interface capture_impl;
+static void start_capture(wlr_ext_image_capture_source_v1 *source, bool with_cursor) noexcept;
+static void stop_capture(wlr_ext_image_capture_source_v1 *source) noexcept;
+static void request_frame(wlr_ext_image_capture_source_v1 *source, bool needs_frame) noexcept;
+static void copy_frame(wlr_ext_image_capture_source_v1 *source,
+                       wlr_ext_image_copy_capture_frame_v1 *client_frame,
+                       wlr_ext_image_capture_source_v1_frame_event *event) noexcept;
+
+static const struct wlr_ext_image_capture_source_v1_interface capture_impl = {
+    .start = start_capture,
+    .stop = stop_capture,
+    .request_frame = request_frame,
+    .copy_frame = copy_frame,
+    .get_pointer_cursor = nullptr,
+};
 
 struct capture_session {
     struct wlr_ext_image_copy_capture_session_v1 *session;
@@ -67,21 +85,26 @@ struct capture_frame {
     bool cursor_composited;
 };
 
-static void release_pending(struct capture_output *capture) {
+static_assert(std::is_standard_layout_v<seaside_output_capture>);
+static_assert(std::is_standard_layout_v<capture_output>);
+static_assert(std::is_standard_layout_v<capture_session>);
+static_assert(std::is_standard_layout_v<capture_frame>);
+
+static void release_pending(struct capture_output *capture) noexcept {
     wlr_buffer_unlock(capture->pending_buffer);
-    capture->pending_buffer = NULL;
+    capture->pending_buffer = nullptr;
 }
 
-static void release_composite(struct capture_output *capture) {
+static void release_composite(struct capture_output *capture) noexcept {
     wlr_buffer_drop(capture->cursor_composite);
-    capture->cursor_composite = NULL;
+    capture->cursor_composite = nullptr;
 }
 
-static bool active(const struct capture_output *capture) {
+static bool active(const struct capture_output *capture) noexcept {
     return capture->active_sessions || capture->legacy_frames;
 }
 
-static void update_render_lock(struct capture_output *capture, bool was_active) {
+static void update_render_lock(struct capture_output *capture, bool was_active) noexcept {
     if (active(capture) != was_active) {
         wlr_output_lock_attach_render(capture->output, !was_active);
         if (was_active) {
@@ -91,7 +114,8 @@ static void update_render_lock(struct capture_output *capture, bool was_active) 
     }
 }
 
-static void start_capture(struct wlr_ext_image_capture_source_v1 *source, bool with_cursor) {
+static void start_capture(struct wlr_ext_image_capture_source_v1 *source,
+                          bool with_cursor) noexcept {
     struct capture_output *capture = wl_container_of(source, capture, source);
     /* wlroots emits new_session synchronously after start, so its listener
      * can record the cursor option on the new session rather than the output. */
@@ -101,35 +125,36 @@ static void start_capture(struct wlr_ext_image_capture_source_v1 *source, bool w
     update_render_lock(capture, was_active);
 }
 
-static void stop_capture(struct wlr_ext_image_capture_source_v1 *source) {
+static void stop_capture(struct wlr_ext_image_capture_source_v1 *source) noexcept {
     struct capture_output *capture = wl_container_of(source, capture, source);
     capture->active_sessions--;
     update_render_lock(capture, true);
 }
 
-static void request_frame(struct wlr_ext_image_capture_source_v1 *source, bool needs_frame) {
+static void request_frame(struct wlr_ext_image_capture_source_v1 *source,
+                          bool needs_frame) noexcept {
     struct capture_output *capture = wl_container_of(source, capture, source);
     if (needs_frame && capture->output->enabled) {
         wlr_output_schedule_frame(capture->output);
     }
 }
 
-static void on_session_destroy(struct wl_listener *listener, void *data) {
+static void on_session_destroy(struct wl_listener *listener, void *data) noexcept {
     (void)data;
     struct capture_session *session = wl_container_of(listener, session, destroy);
     wl_list_remove(&session->destroy.link);
     wl_list_remove(&session->link);
-    free(session);
+    delete session;
 }
 
-static void on_new_session(struct wl_listener *listener, void *data) {
+static void on_new_session(struct wl_listener *listener, void *data) noexcept {
     (void)listener;
-    struct wlr_ext_image_copy_capture_session_v1 *session = data;
+    auto *session = static_cast<wlr_ext_image_copy_capture_session_v1 *>(data);
     if (session->source->impl != &capture_impl) {
         return;
     }
     struct capture_output *capture = wl_container_of(session->source, capture, source);
-    struct capture_session *state = calloc(1, sizeof(*state));
+    auto *state = new (std::nothrow) capture_session{};
     if (!state) {
         wl_client_post_no_memory(wl_resource_get_client(session->resource));
         return;
@@ -142,7 +167,7 @@ static void on_new_session(struct wl_listener *listener, void *data) {
 }
 
 static bool composite_cursor(struct capture_output *capture, struct capture_frame *frame,
-                             const struct wlr_output_cursor *cursor) {
+                             const struct wlr_output_cursor *cursor) noexcept {
     if (frame->cursor_composited) {
         return true;
     }
@@ -161,16 +186,16 @@ static bool composite_cursor(struct capture_output *capture, struct capture_fram
         return false;
     }
     struct wlr_render_pass *pass =
-        wlr_renderer_begin_buffer_pass(renderer, capture->cursor_composite, NULL);
+        wlr_renderer_begin_buffer_pass(renderer, capture->cursor_composite, nullptr);
     if (!pass) {
         wlr_texture_destroy(background);
         return false;
     }
 
-    wlr_render_pass_add_texture(pass, &(struct wlr_render_texture_options){
-                                          .texture = background,
-                                          .blend_mode = WLR_RENDER_BLEND_MODE_NONE,
-                                      });
+    wlr_render_texture_options background_options{};
+    background_options.texture = background;
+    background_options.blend_mode = WLR_RENDER_BLEND_MODE_NONE;
+    wlr_render_pass_add_texture(pass, &background_options);
 
     int width, height;
     wlr_output_transformed_resolution(output, &width, &height);
@@ -183,12 +208,12 @@ static bool composite_cursor(struct capture_output *capture, struct capture_fram
     wlr_box_transform(&box, &box, wlr_output_transform_invert(output->transform), width, height);
     /* Render the hardware sprite into a separate capture buffer. The scanout
      * buffer and the display's hardware plane are untouched by the stream. */
-    wlr_render_pass_add_texture(pass, &(struct wlr_render_texture_options){
-                                          .texture = cursor->texture,
-                                          .src_box = cursor->src_box,
-                                          .dst_box = box,
-                                          .transform = output->transform,
-                                      });
+    wlr_render_texture_options cursor_options{};
+    cursor_options.texture = cursor->texture;
+    cursor_options.src_box = cursor->src_box;
+    cursor_options.dst_box = box;
+    cursor_options.transform = output->transform;
+    wlr_render_pass_add_texture(pass, &cursor_options);
     frame->cursor_composited = wlr_render_pass_submit(pass);
     wlr_texture_destroy(background);
     return frame->cursor_composited;
@@ -196,7 +221,7 @@ static bool composite_cursor(struct capture_output *capture, struct capture_fram
 
 static void copy_frame(struct wlr_ext_image_capture_source_v1 *source,
                        struct wlr_ext_image_copy_capture_frame_v1 *client_frame,
-                       struct wlr_ext_image_capture_source_v1_frame_event *event) {
+                       struct wlr_ext_image_capture_source_v1_frame_event *event) noexcept {
     struct capture_output *capture = wl_container_of(source, capture, source);
     struct capture_frame *frame = wl_container_of(event, frame, base);
     struct wlr_output *output = capture->output;
@@ -224,24 +249,17 @@ static void copy_frame(struct wlr_ext_image_capture_source_v1 *source,
         client_frame, EXT_IMAGE_COPY_CAPTURE_FRAME_V1_FAILURE_REASON_UNKNOWN);
 }
 
-static const struct wlr_ext_image_capture_source_v1_interface capture_impl = {
-    .start = start_capture,
-    .stop = stop_capture,
-    .request_frame = request_frame,
-    .copy_frame = copy_frame,
-};
-
-static bool update_constraints(struct capture_output *capture) {
+static bool update_constraints(struct capture_output *capture) noexcept {
     struct wlr_output *output = capture->output;
-    return wlr_output_configure_primary_swapchain(output, NULL, &output->swapchain) &&
+    return wlr_output_configure_primary_swapchain(output, nullptr, &output->swapchain) &&
            wlr_ext_image_capture_source_v1_set_constraints_from_swapchain(
                &capture->source, output->swapchain, output->renderer) &&
            (capture->source.shm_formats_len || capture->source.dmabuf_formats.len);
 }
 
-static void on_output_commit(struct wl_listener *listener, void *data) {
+static void on_output_commit(struct wl_listener *listener, void *data) noexcept {
     struct capture_output *capture = wl_container_of(listener, capture, output_commit);
-    const struct wlr_output_event_commit *event = data;
+    const auto *event = static_cast<const wlr_output_event_commit *>(data);
     const uint32_t flags = event->state->committed;
     if (!capture->output->enabled ||
         (flags & (WLR_OUTPUT_STATE_MODE | WLR_OUTPUT_STATE_RENDER_FORMAT | WLR_OUTPUT_STATE_SCALE |
@@ -279,14 +297,14 @@ static void on_output_commit(struct wl_listener *listener, void *data) {
     }
 }
 
-static void on_output_present(struct wl_listener *listener, void *data) {
+static void on_output_present(struct wl_listener *listener, void *data) noexcept {
     struct capture_output *capture = wl_container_of(listener, capture, output_present);
-    const struct wlr_output_event_present *event = data;
+    const auto *event = static_cast<const wlr_output_event_present *>(data);
     if (!capture->pending_buffer || capture->pending_sequence != event->commit_seq) {
         return;
     }
     struct wlr_buffer *buffer = capture->pending_buffer;
-    capture->pending_buffer = NULL;
+    capture->pending_buffer = nullptr;
     if (event->presented && capture->output->enabled) {
         /* Wait for presentation because the primary buffer can have an
          * explicit render fence at commit time. The capture clients share
@@ -297,8 +315,9 @@ static void on_output_present(struct wl_listener *listener, void *data) {
             .base = {.damage = &damage},
             .buffer = buffer,
             .presented = event->when,
+            .cursor_composited = false,
         };
-        wl_signal_emit_mutable(&capture->source.events.frame, &frame);
+        wl_signal_emit_mutable(&capture->source.events.frame, &frame.base);
         pixman_region32_fini(&damage);
         if (capture->legacy_frames) {
             struct wlr_buffer *with_cursor = buffer;
@@ -306,7 +325,7 @@ static void on_output_present(struct wl_listener *listener, void *data) {
             if (cursor && cursor->enabled && cursor->visible && cursor->texture &&
                 seaside_legacy_capture_wants_cursor(capture->owner->legacy, capture->output)) {
                 with_cursor =
-                    composite_cursor(capture, &frame, cursor) ? capture->cursor_composite : NULL;
+                    composite_cursor(capture, &frame, cursor) ? capture->cursor_composite : nullptr;
             }
             seaside_legacy_capture_present(capture->owner->legacy, capture->output, buffer,
                                            with_cursor, &event->when, capture->content_revision);
@@ -318,7 +337,7 @@ static void on_output_present(struct wl_listener *listener, void *data) {
 }
 
 static struct capture_output *find_output(const struct seaside_output_capture *capture,
-                                          const struct wlr_output *output) {
+                                          const struct wlr_output *output) noexcept {
     if (capture && output) {
         struct capture_output *candidate;
         wl_list_for_each(candidate, &capture->outputs, link) {
@@ -327,16 +346,18 @@ static struct capture_output *find_output(const struct seaside_output_capture *c
             }
         }
     }
-    return NULL;
+    return nullptr;
 }
 
-static bool legacy_supports(void *data, struct wlr_output *output) {
-    struct capture_output *target = find_output(data, output);
+static bool legacy_supports(void *data, struct wlr_output *output) noexcept {
+    struct capture_output *target =
+        find_output(static_cast<const seaside_output_capture *>(data), output);
     return target && output->enabled && target->constraints_ready;
 }
 
-static void legacy_active(void *data, struct wlr_output *output, bool start) {
-    struct capture_output *target = find_output(data, output);
+static void legacy_active(void *data, struct wlr_output *output, bool start) noexcept {
+    struct capture_output *target =
+        find_output(static_cast<const seaside_output_capture *>(data), output);
     if (!target) {
         return;
     }
@@ -368,7 +389,7 @@ void seaside_output_capture_cursor_changed(struct seaside_output_capture *captur
     }
 }
 
-static void detach_output(struct capture_output *capture) {
+static void detach_output(struct capture_output *capture) noexcept {
     /* Finishing the source invalidates descriptors and stops sessions while
      * the output and its render lock are still valid. */
     wlr_ext_image_capture_source_v1_finish(&capture->source);
@@ -380,10 +401,10 @@ static void detach_output(struct capture_output *capture) {
     wl_list_remove(&capture->output_present.link);
     wl_list_remove(&capture->link);
     wlr_output_layout_remove(capture->owner->layout, capture->output);
-    free(capture);
+    delete capture;
 }
 
-static void on_output_destroy(struct wl_listener *listener, void *data) {
+static void on_output_destroy(struct wl_listener *listener, void *data) noexcept {
     (void)data;
     struct capture_output *capture = wl_container_of(listener, capture, output_destroy);
     detach_output(capture);
@@ -406,7 +427,7 @@ bool seaside_output_capture_add_output(struct seaside_output_capture *capture,
     if (find_output(capture, output)) {
         return seaside_output_capture_position(capture, output, x, y);
     }
-    struct capture_output *target = calloc(1, sizeof(*target));
+    auto *target = new (std::nothrow) capture_output{};
     if (!target) {
         return false;
     }
@@ -436,17 +457,17 @@ bool seaside_output_capture_position(struct seaside_output_capture *capture,
 }
 
 static void handle_create_source(struct wl_client *client, struct wl_resource *resource,
-                                 uint32_t id, struct wl_resource *output_resource) {
-    struct seaside_output_capture *capture = wl_resource_get_user_data(resource);
+                                 uint32_t id, struct wl_resource *output_resource) noexcept {
+    auto *capture = static_cast<seaside_output_capture *>(wl_resource_get_user_data(resource));
     struct capture_output *target = find_output(capture, wlr_output_from_resource(output_resource));
-    struct wlr_ext_image_capture_source_v1 *source = NULL;
+    struct wlr_ext_image_capture_source_v1 *source = nullptr;
     if (target && target->constraints_ready && target->output->enabled) {
         source = &target->source;
     }
     (void)wlr_ext_image_capture_source_v1_create_resource(source, client, id);
 }
 
-static void handle_destroy(struct wl_client *client, struct wl_resource *resource) {
+static void handle_destroy(struct wl_client *client, struct wl_resource *resource) noexcept {
     (void)client;
     wl_resource_destroy(resource);
 }
@@ -456,13 +477,13 @@ static const struct ext_output_image_capture_source_manager_v1_interface output_
     .destroy = handle_destroy,
 };
 
-static void on_output_resource_destroy(struct wl_resource *resource) {
+static void on_output_resource_destroy(struct wl_resource *resource) noexcept {
     wl_list_remove(wl_resource_get_link(resource));
 }
 
 static void bind_output_manager(struct wl_client *client, void *data, uint32_t version,
-                                uint32_t id) {
-    struct seaside_output_capture *capture = data;
+                                uint32_t id) noexcept {
+    auto *capture = static_cast<seaside_output_capture *>(data);
     struct wl_resource *resource = wl_resource_create(
         client, &ext_output_image_capture_source_manager_v1_interface, (int)version, id);
     if (!resource) {
@@ -474,7 +495,7 @@ static void bind_output_manager(struct wl_client *client, void *data, uint32_t v
     wl_list_insert(&capture->output_resources, wl_resource_get_link(resource));
 }
 
-static void detach_display(struct seaside_output_capture *capture) {
+static void detach_display(struct seaside_output_capture *capture) noexcept {
     if (!capture->display) {
         return;
     }
@@ -483,33 +504,33 @@ static void detach_display(struct seaside_output_capture *capture) {
         detach_output(output);
     }
     seaside_legacy_capture_destroy(capture->legacy);
-    capture->legacy = NULL;
+    capture->legacy = nullptr;
     wl_list_remove(&capture->display_destroy.link);
     if (capture->copy_manager) {
         wl_list_remove(&capture->new_session.link);
-        capture->copy_manager = NULL;
+        capture->copy_manager = nullptr;
     }
     if (capture->output_global) {
         wl_global_destroy(capture->output_global);
-        capture->output_global = NULL;
+        capture->output_global = nullptr;
     }
     struct wl_resource *resource, *tmp;
     wl_resource_for_each_safe(resource, tmp, &capture->output_resources) {
-        wl_resource_set_user_data(resource, NULL);
+        wl_resource_set_user_data(resource, nullptr);
         wl_list_remove(wl_resource_get_link(resource));
         wl_list_init(wl_resource_get_link(resource));
     }
-    capture->display = NULL;
+    capture->display = nullptr;
 }
 
-static void on_display_destroy(struct wl_listener *listener, void *data) {
+static void on_display_destroy(struct wl_listener *listener, void *data) noexcept {
     (void)data;
     struct seaside_output_capture *capture = wl_container_of(listener, capture, display_destroy);
     detach_display(capture);
 }
 
 static bool session_global_visible(const struct wl_client *client, const struct wl_global *global,
-                                   void *data) {
+                                   void *data) noexcept {
     (void)data;
     const char *interface = wl_global_get_interface(global)->name;
     if (strcmp(interface, "ext_image_copy_capture_manager_v1") != 0 &&
@@ -524,21 +545,21 @@ static bool session_global_visible(const struct wl_client *client, const struct 
         return true;
     }
     uid_t uid;
-    wl_client_get_credentials(client, NULL, &uid, NULL);
+    wl_client_get_credentials(client, nullptr, &uid, nullptr);
     return uid == geteuid();
 }
 
 struct seaside_output_capture *seaside_output_capture_create(struct wl_display *display) {
     if (!display) {
-        return NULL;
+        return nullptr;
     }
-    struct seaside_output_capture *capture = calloc(1, sizeof(*capture));
+    auto *capture = new (std::nothrow) seaside_output_capture{};
     if (!capture) {
-        return NULL;
+        return nullptr;
     }
     capture->display = display;
     // Privileged session protocols share the local session's UID boundary.
-    wl_display_set_global_filter(display, session_global_visible, NULL);
+    wl_display_set_global_filter(display, session_global_visible, nullptr);
     capture->display_destroy.notify = on_display_destroy;
     capture->new_session.notify = on_new_session;
     wl_list_init(&capture->output_resources);
@@ -551,26 +572,26 @@ struct seaside_output_capture *seaside_output_capture_create(struct wl_display *
     if (!capture->layout || !wlr_xdg_output_manager_v1_create(display, capture->layout)) {
         wlr_output_layout_destroy(capture->layout);
         seaside_output_capture_destroy(capture);
-        return NULL;
+        return nullptr;
     }
     capture->output_global =
         wl_global_create(display, &ext_output_image_capture_source_manager_v1_interface, 1, capture,
                          bind_output_manager);
     if (!capture->output_global) {
         seaside_output_capture_destroy(capture);
-        return NULL;
+        return nullptr;
     }
     capture->copy_manager = wlr_ext_image_copy_capture_manager_v1_create(display, 1);
     if (!capture->copy_manager) {
         seaside_output_capture_destroy(capture);
-        return NULL;
+        return nullptr;
     }
     wl_signal_add(&capture->copy_manager->events.new_session, &capture->new_session);
     capture->legacy =
         seaside_legacy_capture_create(display, legacy_supports, legacy_active, capture);
     if (!capture->legacy) {
         seaside_output_capture_destroy(capture);
-        return NULL;
+        return nullptr;
     }
     return capture;
 }
@@ -578,13 +599,13 @@ struct seaside_output_capture *seaside_output_capture_create(struct wl_display *
 void seaside_output_capture_destroy(struct seaside_output_capture *capture) {
     if (capture) {
         detach_display(capture);
-        free(capture);
+        delete capture;
     }
 }
 
 struct wlr_ext_image_copy_capture_manager_v1 *
 seaside_output_capture_copy_manager(const struct seaside_output_capture *capture) {
-    return capture ? capture->copy_manager : NULL;
+    return capture ? capture->copy_manager : nullptr;
 }
 
 struct client_bindings {
@@ -595,8 +616,8 @@ struct client_bindings {
     bool copy_manager;
 };
 
-static enum wl_iterator_result check_resource(struct wl_resource *resource, void *data) {
-    struct client_bindings *bindings = data;
+static enum wl_iterator_result check_resource(struct wl_resource *resource, void *data) noexcept {
+    auto *bindings = static_cast<client_bindings *>(data);
     const char *name = wl_resource_get_class(resource);
     if (strcmp(name, wl_shm_interface.name) == 0) {
         bindings->shm = true;
@@ -637,10 +658,11 @@ bool seaside_output_capture_client_ready(const struct seaside_output_capture *ca
     wl_client_for_each(client, wl_display_get_client_list(capture->display)) {
         pid_t client_pid;
         uid_t client_uid;
-        wl_client_get_credentials(client, &client_pid, &client_uid, NULL);
+        wl_client_get_credentials(client, &client_pid, &client_uid, nullptr);
         if (client_pid == pid && client_uid == uid) {
-            struct client_bindings bindings = {.capture = capture,
-                                               .awaiting_output = output_enabled};
+            client_bindings bindings{};
+            bindings.capture = capture;
+            bindings.awaiting_output = output_enabled;
             wl_client_for_each_resource(client, check_resource, &bindings);
             if (bindings.shm && !bindings.awaiting_output && bindings.output_manager &&
                 bindings.copy_manager) {
