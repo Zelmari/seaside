@@ -264,7 +264,12 @@ class VideoReceiver {
             throw std::runtime_error("cannot create a PipeWire loop");
         }
         pw_loop_enter(loop_);
-        context_ = pw_context_new(loop_, nullptr, 0);
+        // Use ordinary scheduling for this receiver on the fixture's private bus.
+        auto *context_properties = pw_properties_new("module.rt", "false", nullptr);
+        if (!context_properties) {
+            throw std::runtime_error("cannot configure a PipeWire context");
+        }
+        context_ = pw_context_new(loop_, context_properties, 0);
         if (!context_) {
             throw std::runtime_error("cannot create a PipeWire context");
         }
