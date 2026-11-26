@@ -707,6 +707,7 @@ part4_fixture = executable(
    layer_client, layer_client_code, display_protocols['xdg-decoration-unstable-v1']],
   include_directories: include_directories('src', 'tests/integration', 'tests/unit'),
   dependencies: [wlroots, wayland_server, wayland_client, pixman, libdrm, xkbcommon, threads, gtest],
+  link_args: ['-Wl,--wrap=wl_event_loop_add_timer', '-Wl,--wrap=wl_event_source_timer_update'],
   link_with: [desktop_foundation, core, tty_foundation, config_foundation], install: false,
 )
 test('part4-headless-desktop', part4_fixture, suite: ['integration', 'part4'], timeout: 30,

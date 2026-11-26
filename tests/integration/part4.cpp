@@ -32,6 +32,11 @@
 #include <wayland-server-core.h>
 #include <xkbcommon/xkbcommon-keysyms.h>
 
+extern "C" wl_event_source *__real_wl_event_loop_add_timer(wl_event_loop *loop,
+                                                           wl_event_loop_timer_func_t callback,
+                                                           void *data);
+extern "C" int __real_wl_event_source_timer_update(wl_event_source *source, int delay);
+
 namespace {
 
 using seaside::Action;
@@ -57,6 +62,27 @@ constexpr std::uint32_t blue = 0x3030a0;
             return false;                                                                          \
         }                                                                                          \
     } while (false)
+
+// Hold the Desktop deadline while the test prepares and examines pending windows.
+// Timeout checks can then arm the same Wayland timer with its original delay.
+struct OpeningDeadline {
+    explicit OpeningDeadline(const seaside::Desktop &owner) noexcept : desktop(&owner) {
+        active = this;
+    }
+    ~OpeningDeadline() { active = nullptr; }
+    OpeningDeadline(const OpeningDeadline &) = delete;
+    OpeningDeadline &operator=(const OpeningDeadline &) = delete;
+
+    bool start() const noexcept {
+        return timer && delay > 0 && __real_wl_event_source_timer_update(timer, delay) == 0;
+    }
+
+    static inline OpeningDeadline *active = nullptr;
+    const seaside::Desktop *desktop;
+    wl_event_source *timer = nullptr;
+    int delay = 0;
+    unsigned arms = 0;
+};
 
 struct Configure {
     int width = 0;
@@ -1082,6 +1108,7 @@ bool check_idle_resize(const Fixture &fixture, Connection &connection, Client &c
 
 bool run_opening_transaction(const Fixture &fixture) {
     auto &desktop = fixture.desktop;
+    OpeningDeadline deadline(desktop);
     auto output = fixture.output();
     REQUIRE(output);
     REQUIRE(desktop.add_output(part3_output_handle(output.get()), "main", output_bounds));
@@ -1168,6 +1195,7 @@ bool run_opening_transaction(const Fixture &fixture) {
 
 bool run_workspace_during_opening(const Fixture &fixture) {
     auto &desktop = fixture.desktop;
+    OpeningDeadline deadline(desktop);
     auto output = fixture.output();
     REQUIRE(output && desktop.add_output(part3_output_handle(output.get()), "main", output_bounds));
     Connection connection(fixture.display);
@@ -1182,13 +1210,14 @@ bool run_workspace_during_opening(const Fixture &fixture) {
     REQUIRE(right && right != left && desktop.keyboard_window() == left);
     // Reselect throughout the stall. The original opening timer must still fire
     // while the neighbor withholds its resized buffer.
+    REQUIRE(deadline.arms == 1 && deadline.start());
     const auto limit = std::chrono::steady_clock::now() + std::chrono::seconds(1);
     while (desktop.keyboard_window() == left && std::chrono::steady_clock::now() < limit) {
         const auto unchanged = desktop.dispatch(action(ActionKind::workspace, *workspace));
         REQUIRE(unchanged && !*unchanged && desktop.keyboard_window() == left);
         REQUIRE(connection.pump(first));
     }
-    REQUIRE(desktop.keyboard_window() == right);
+    REQUIRE(deadline.arms == 1 && desktop.keyboard_window() == right);
     REQUIRE(wait_pixel(connection, second, output.get(), 110, 55, green));
     REQUIRE(connection.connect(third) && connection.open(third) &&
             connection.attach_configured(third, blue));
@@ -1696,6 +1725,7 @@ bool run_tile_popup(const Fixture &fixture) {
 
 bool run_pending_opening_focus(const Fixture &fixture) {
     auto &desktop = fixture.desktop;
+    OpeningDeadline deadline(desktop);
     auto left = fixture.output();
     auto right = fixture.output();
     REQUIRE(left && right);
@@ -1764,6 +1794,7 @@ bool run_pending_opening_focus(const Fixture &fixture) {
 
 bool run_fullscreen_idle_focus(const Fixture &fixture) {
     auto &desktop = fixture.desktop;
+    OpeningDeadline deadline(desktop);
     auto left = fixture.output();
     auto right = fixture.output();
     REQUIRE(left && right);
@@ -1815,6 +1846,7 @@ enum class OpeningFinish { right_first, left_first, close_right, close_focused, 
 
 template <OpeningFinish finish> bool run_overlapping_openings(const Fixture &fixture) {
     auto &desktop = fixture.desktop;
+    OpeningDeadline deadline(desktop);
     auto left = fixture.output();
     auto right = fixture.output();
     REQUIRE(left && right);
@@ -1840,7 +1872,9 @@ template <OpeningFinish finish> bool run_overlapping_openings(const Fixture &fix
         return fixture.scene.window_at(x, 45, shown) ? shown.id : 0;
     };
     REQUIRE(target(110) == left_old && target(270) == right_old);
+    REQUIRE(deadline.arms == 1);
     if constexpr (finish == OpeningFinish::timeout) {
+        REQUIRE(deadline.start());
         REQUIRE(connection.wait(c, [&] { return target(110) == *left_new; }));
     } else if constexpr (finish == OpeningFinish::close_right) {
         // Removing the second opening changes the right layout again. The
@@ -2617,6 +2651,27 @@ bool run_binding_reload(const Fixture &fixture) {
 }
 
 } // namespace
+
+extern "C" wl_event_source *__wrap_wl_event_loop_add_timer(wl_event_loop *loop,
+                                                           wl_event_loop_timer_func_t callback,
+                                                           void *data) {
+    auto *timer = __real_wl_event_loop_add_timer(loop, callback, data);
+    if (auto *deadline = OpeningDeadline::active; deadline && data == deadline->desktop) {
+        deadline->timer = timer;
+    }
+    return timer;
+}
+
+extern "C" int __wrap_wl_event_source_timer_update(wl_event_source *source, int delay) {
+    if (auto *deadline = OpeningDeadline::active; deadline && source == deadline->timer) {
+        deadline->delay = delay;
+        if (delay > 0) {
+            ++deadline->arms;
+            return 0;
+        }
+    }
+    return __real_wl_event_source_timer_update(source, delay);
+}
 
 int main(int argc, char **argv) {
     auto config = seaside::default_config();
