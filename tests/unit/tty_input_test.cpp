@@ -35,7 +35,7 @@ static void check(bool condition, const char *message) {
     }
 }
 
-struct observation {
+struct observation : seaside::TtyInputObserver {
     unsigned motions;
     unsigned exits;
     unsigned launches;
@@ -48,98 +48,85 @@ struct observation {
     unsigned exact_case_shortcuts;
     unsigned shadowed_case_shortcuts;
     unsigned modifier_changes;
-    unsigned keyboard_activity;
     uint8_t modifiers;
     enum seaside_pointer_motion kind;
     double x, y;
+
+    void motion(enum seaside_pointer_motion kind, double x, double y) noexcept override {
+        ++motions;
+        this->kind = kind;
+        this->x = x;
+        this->y = y;
+    }
+
+    void exit_requested() noexcept override { ++exits; }
+
+    void launch_requested() noexcept override { ++launches; }
+
+    bool shortcut_pressed(uint8_t modifiers, uint32_t keysym) noexcept override {
+        if (modifiers == 2 && keysym == XKB_KEY_Return) {
+            ++configured_shortcuts;
+            return true;
+        }
+        if (keysym == XKB_KEY_XF86Switch_VT_2) {
+            ++vt_switches;
+            return true;
+        }
+        if (modifiers == 1) {
+            switch (keysym) {
+            case XKB_KEY_D:
+                ++alternate_case_shortcuts;
+                return true;
+            case XKB_KEY_e:
+                ++exact_case_shortcuts;
+                return true;
+            case XKB_KEY_E:
+                ++shadowed_case_shortcuts;
+                return true;
+            }
+        }
+        if (modifiers == (1 | 8)) {
+            switch (keysym) {
+            case XKB_KEY_2:
+                ++digit_shortcuts;
+                return true;
+            case XKB_KEY_dollar:
+                ++explicit_symbol_shortcuts;
+                return true;
+            case XKB_KEY_4:
+                ++shadowed_digit_shortcuts;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void modifiers_changed(uint8_t modifiers) noexcept override {
+        ++modifier_changes;
+        this->modifiers = modifiers;
+    }
 };
 
-static void record_motion(void *data, enum seaside_pointer_motion kind, double x,
-                          double y) noexcept {
-    auto *observed = static_cast<observation *>(data);
-    ++observed->motions;
-    observed->kind = kind;
-    observed->x = x;
-    observed->y = y;
-}
+struct KeyboardObservation : observation {
+    unsigned keyboard_activity = 0;
 
-static void record_exit(void *data) noexcept {
-    auto *observed = static_cast<observation *>(data);
-    ++observed->exits;
-}
-
-static void record_launch(void *data) noexcept {
-    auto *observed = static_cast<observation *>(data);
-    ++observed->launches;
-}
-
-static bool record_shortcut(void *data, uint8_t modifiers, uint32_t keysym) noexcept {
-    auto *observed = static_cast<observation *>(data);
-    if (modifiers == 2 && keysym == XKB_KEY_Return) {
-        ++observed->configured_shortcuts;
-        return true;
+    void input_activity(bool pointer) noexcept override {
+        check(!pointer, "unexpected pointer activity in the keyboard fixture");
+        ++keyboard_activity;
     }
-    if (keysym == XKB_KEY_XF86Switch_VT_2) {
-        ++observed->vt_switches;
-        return true;
-    }
-    if (modifiers == 1) {
-        switch (keysym) {
-        case XKB_KEY_D:
-            ++observed->alternate_case_shortcuts;
-            return true;
-        case XKB_KEY_e:
-            ++observed->exact_case_shortcuts;
-            return true;
-        case XKB_KEY_E:
-            ++observed->shadowed_case_shortcuts;
-            return true;
-        }
-    }
-    if (modifiers == (1 | 8)) {
-        switch (keysym) {
-        case XKB_KEY_2:
-            ++observed->digit_shortcuts;
-            return true;
-        case XKB_KEY_dollar:
-            ++observed->explicit_symbol_shortcuts;
-            return true;
-        case XKB_KEY_4:
-            ++observed->shadowed_digit_shortcuts;
-            return true;
-        }
-    }
-    return false;
-}
-
-static void record_modifiers(void *data, uint8_t modifiers) noexcept {
-    auto *observed = static_cast<observation *>(data);
-    ++observed->modifier_changes;
-    observed->modifiers = modifiers;
-}
-
-static void record_keyboard_activity(void *data, bool pointer) noexcept {
-    check(!pointer, "unexpected pointer activity in the keyboard fixture");
-    auto *observed = static_cast<observation *>(data);
-    ++observed->keyboard_activity;
-}
+};
 
 static const struct wlr_backend_impl backend_impl = {};
 static constexpr wlr_keyboard_impl keyboard_impl{.name = "test", .led_update = nullptr};
 static const struct wlr_pointer_impl pointer_impl = {.name = "test"};
-static constexpr auto callbacks = [] {
-    seaside_tty_input_callbacks result{};
-    result.motion = record_motion;
-    result.exit_requested = record_exit;
-    return result;
-}();
 
 static void exercise(bool backend_first) noexcept {
     struct wlr_backend backend = {};
     wlr_backend_init(&backend, &backend_impl);
     struct observation observation = {};
-    struct seaside_tty_input *input = seaside_tty_input_create(&backend, &callbacks, &observation);
-    check(input != nullptr, "cannot create input bridge");
+    auto created = seaside::TtyInput::create(&backend, observation);
+    check(created.has_value(), "cannot create input bridge");
+    auto input = std::move(*created);
 
     struct wlr_keyboard keyboard = {};
     wlr_keyboard_init(&keyboard, &keyboard_impl, "test keyboard");
@@ -148,7 +135,7 @@ static void exercise(bool backend_first) noexcept {
     wlr_pointer_init(&pointer, &pointer_impl, "test pointer");
     wl_signal_emit_mutable(&backend.events.new_input, &pointer.base);
 
-    struct seaside_tty_input_snapshot snapshot = seaside_tty_input_get_snapshot(input);
+    seaside::TtyInputSnapshot snapshot = input->snapshot();
     check(snapshot.pointers == 1 && snapshot.keyboards == 1 && !snapshot.failed,
           "input discovery did not register both devices");
     struct wlr_pointer_motion_event relative = {
@@ -184,21 +171,21 @@ static void exercise(bool backend_first) noexcept {
     check(observation.exits == 1, "Escape press did not request shutdown");
 
     wlr_keyboard_finish(&keyboard);
-    snapshot = seaside_tty_input_get_snapshot(input);
+    snapshot = input->snapshot();
     check(snapshot.pointers == 1 && snapshot.keyboards == 0 && !snapshot.failed,
           "keyboard removal did not detach the input device");
 
     /* Leave the pointer alive to test both owner destruction orders. */
     if (backend_first) {
         wlr_backend_finish(&backend);
-        snapshot = seaside_tty_input_get_snapshot(input);
+        snapshot = input->snapshot();
         check(snapshot.pointers == 0 && snapshot.keyboards == 0 && !snapshot.failed,
               "backend destruction did not detach surviving input devices");
         wl_signal_emit_mutable(&pointer.events.motion, &relative);
         check(observation.motions == 2, "pointer still dispatched after backend destruction");
-        seaside_tty_input_destroy(input);
+        input.reset();
     } else {
-        seaside_tty_input_destroy(input);
+        input.reset();
         wl_signal_emit_mutable(&pointer.events.motion_absolute, &absolute);
         check(observation.motions == 2, "pointer still dispatched after bridge destruction");
         wlr_backend_finish(&backend);
@@ -530,21 +517,18 @@ static void exercise_wayland_keyboard(void) {
     check(server && wlr_compositor_create(server, 6, nullptr), "Wayland compositor setup failed");
     struct wlr_backend backend = {};
     wlr_backend_init(&backend, &backend_impl);
-    struct observation observation = {};
-    seaside_tty_input_callbacks terminal_callbacks{};
-    terminal_callbacks.launch_requested = record_launch;
-    terminal_callbacks.shortcut_pressed = record_shortcut;
-    terminal_callbacks.modifiers_changed = record_modifiers;
-    terminal_callbacks.activity = record_keyboard_activity;
-    struct seaside_tty_input *input =
-        seaside_tty_input_create(&backend, &terminal_callbacks, &observation);
-    check(input && seaside_tty_input_enable_keyboard(input, server), "keyboard seat setup failed");
+    KeyboardObservation observation{};
+    auto created = seaside::TtyInput::create(&backend, observation,
+                                             {.track_modifiers = true, .fixture_launch = true});
+    check(created.has_value(), "cannot create keyboard input bridge");
+    auto input = std::move(*created);
+    check(input->enable_keyboard(server), "keyboard seat setup failed");
     struct wlr_keyboard first = {}, second = {};
     wlr_keyboard_init(&first, &keyboard_impl, "keyboard one");
     wlr_keyboard_init(&second, &keyboard_impl, "keyboard two");
     wl_signal_emit_mutable(&backend.events.new_input, &first.base);
     wl_signal_emit_mutable(&backend.events.new_input, &second.base);
-    check(seaside_tty_input_get_snapshot(input).keyboards == 2, "keyboard group missing a device");
+    check(input->snapshot().keyboards == 2, "keyboard group missing a device");
 
     int ends[2];
     check(socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, ends) == 0, "socketpair failed");
@@ -574,7 +558,7 @@ static void exercise_wayland_keyboard(void) {
     key(&second, KEY_ENTER, WL_KEYBOARD_KEY_STATE_PRESSED);
     key(&first, KEY_ENTER, WL_KEYBOARD_KEY_STATE_PRESSED);
     check(observation.launches == 1, "grouped Super+Return did not launch exactly once");
-    seaside_tty_input_set_focus(input, server_surface);
+    input->set_focus(server_surface);
     round_trip(server, client);
     check(keyboard_client.enters == 1 && keyboard_client.depressed != 0 &&
               !keyboard_client.entered_with_return,
@@ -608,7 +592,7 @@ static void exercise_wayland_keyboard(void) {
     round_trip(server, client);
     check(observation.keyboard_activity == activity_before_removal + 2,
           "a physical key press or release did not count as idle activity");
-    const struct seaside_tty_input_snapshot received = seaside_tty_input_get_snapshot(input);
+    const seaside::TtyInputSnapshot received = input->snapshot();
     check(received.has_keyboard_focus && received.forwarded_key_events == 7 &&
               received.forwarded_key_presses == 3 && received.launch_requests == 1 &&
               observation.exits == 0 && keyboard_client.escaped,
@@ -649,7 +633,7 @@ static void exercise_wayland_keyboard(void) {
     const unsigned before_resume = keyboard_client.key_events;
     wlr_keyboard_finish(&second);
     round_trip(server, client);
-    const struct seaside_tty_input_snapshot suspended = seaside_tty_input_get_snapshot(input);
+    const seaside::TtyInputSnapshot suspended = input->snapshot();
     check(suspended.keyboards == 0 && suspended.has_keyboard_focus &&
               keyboard_client.keyboard == bound_keyboard &&
               keyboard_client.capabilities == WL_SEAT_CAPABILITY_KEYBOARD,
@@ -663,13 +647,13 @@ static void exercise_wayland_keyboard(void) {
           "the first key after physical keyboard resume did not reach the existing client");
 
     const unsigned previous_modifier_changes = observation.modifier_changes;
-    const uint64_t previous_forwarded = seaside_tty_input_get_snapshot(input).forwarded_key_events;
+    const uint64_t previous_forwarded = input->snapshot().forwarded_key_events;
 
     wl_surface_destroy(surface);
     round_trip(server, client);
     key(&second, KEY_A, WL_KEYBOARD_KEY_STATE_PRESSED);
     key(&second, KEY_A, WL_KEYBOARD_KEY_STATE_RELEASED);
-    const struct seaside_tty_input_snapshot unfocused = seaside_tty_input_get_snapshot(input);
+    const seaside::TtyInputSnapshot unfocused = input->snapshot();
     check(!unfocused.has_keyboard_focus && unfocused.forwarded_key_events == previous_forwarded,
           "surface destruction left stale keyboard focus");
 
@@ -695,106 +679,94 @@ static void exercise_wayland_keyboard(void) {
     wl_display_destroy_clients(server);
     wl_display_destroy(server);
     wlr_backend_finish(&backend);
-    seaside_tty_input_destroy(input);
+    input.reset();
     wlr_keyboard_finish(&second);
 }
 
-struct pointer_scene {
-    struct seaside_tty_input *input;
+struct pointer_scene : seaside::TtyInputObserver {
+    std::unique_ptr<seaside::TtyInput> input;
     struct wlr_surface *surfaces[2];
     double x, y;
     unsigned move_calls, clicks, consumed_releases, cancelled;
     enum seaside_pointer_motion motion_kind;
     unsigned drag_icons;
     bool locked;
-    const char *cursor_shape;
-    struct wlr_surface *cursor_surface;
+    const char *last_cursor_shape;
+    struct wlr_surface *last_cursor_surface;
     unsigned cursor_requests;
     int32_t hotspot_x, hotspot_y;
-};
 
-static void scene_motion(void *data, enum seaside_pointer_motion kind, double x,
-                         double y) noexcept {
-    auto *scene = static_cast<pointer_scene *>(data);
-    ++scene->move_calls;
-    scene->motion_kind = kind;
-    scene->x = kind == SEASIDE_POINTER_ABSOLUTE ? 200 * x : scene->x + x;
-    scene->y = kind == SEASIDE_POINTER_ABSOLUTE ? 100 * y : scene->y + y;
-}
-
-static bool scene_absolute_delta(void *data, double x, double y, double *dx, double *dy) noexcept {
-    auto *scene = static_cast<const pointer_scene *>(data);
-    *dx = 200 * x - scene->x;
-    *dy = 100 * y - scene->y;
-    return true;
-}
-
-static bool scene_target(void *data, struct seaside_tty_pointer_target *target) noexcept {
-    auto *scene = static_cast<const pointer_scene *>(data);
-    size_t slot;
-    if (target->surface) {
-        slot = target->surface == scene->surfaces[0] ? 0 : 1;
-        if (target->surface != scene->surfaces[slot]) {
-            return false;
-        }
-    } else {
-        if (scene->x < 0 || scene->x >= 200 || scene->y < 0 || scene->y >= 100) {
-            return false;
-        }
-        slot = scene->x < 100 ? 0 : 1;
+    void motion(enum seaside_pointer_motion kind, double x, double y) noexcept override {
+        ++move_calls;
+        motion_kind = kind;
+        this->x = kind == SEASIDE_POINTER_ABSOLUTE ? 200 * x : this->x + x;
+        this->y = kind == SEASIDE_POINTER_ABSOLUTE ? 100 * y : this->y + y;
     }
-    target->surface = scene->surfaces[slot];
-    target->window_id = slot + 1;
-    target->sx = scene->x - (slot == 0 ? 0.0 : 100.0);
-    target->sy = scene->y;
-    return target->surface != nullptr;
-}
 
-static bool scene_button(void *data, uint64_t window, uint32_t button, bool pressed,
-                         uint8_t modifiers) noexcept {
-    auto *scene = static_cast<pointer_scene *>(data);
-    if (button == BTN_RIGHT && modifiers == 1) {
-        if (!pressed) {
-            ++scene->consumed_releases;
-        }
+    bool pointer_absolute_delta(double x, double y, double &dx, double &dy) noexcept override {
+        dx = 200 * x - this->x;
+        dy = 100 * y - this->y;
         return true;
     }
-    if (pressed && window > 0 && window <= 2) {
-        ++scene->clicks;
-        seaside_tty_input_set_focus(scene->input, scene->surfaces[window - 1]);
+
+    bool pointer_target(seaside::TtyPointerTarget &target) noexcept override {
+        size_t slot;
+        if (target.surface) {
+            slot = target.surface == surfaces[0] ? 0 : 1;
+            if (target.surface != surfaces[slot]) {
+                return false;
+            }
+        } else {
+            if (x < 0 || x >= 200 || y < 0 || y >= 100) {
+                return false;
+            }
+            slot = x < 100 ? 0 : 1;
+        }
+        target.surface = surfaces[slot];
+        target.window_id = slot + 1;
+        target.sx = x - (slot == 0 ? 0.0 : 100.0);
+        target.sy = y;
+        return target.surface != nullptr;
     }
-    return false;
-}
 
-static void scene_locked(void *data, bool locked) noexcept {
-    static_cast<pointer_scene *>(data)->locked = locked;
-}
+    bool pointer_button(uint64_t window, uint32_t button, bool pressed,
+                        uint8_t modifiers) noexcept override {
+        if (button == BTN_RIGHT && modifiers == 1) {
+            if (!pressed) {
+                ++consumed_releases;
+            }
+            return true;
+        }
+        if (pressed && window > 0 && window <= 2) {
+            ++clicks;
+            input->set_focus(surfaces[window - 1]);
+        }
+        return false;
+    }
 
-static void scene_cursor_shape(void *data, const char *shape) noexcept {
-    auto *scene = static_cast<pointer_scene *>(data);
-    scene->cursor_shape = shape;
-    scene->cursor_surface = nullptr;
-    ++scene->cursor_requests;
-}
+    void pointer_locked(bool locked) noexcept override { this->locked = locked; }
 
-static void scene_cursor_surface(void *data, struct wlr_surface *surface, int32_t x,
-                                 int32_t y) noexcept {
-    auto *scene = static_cast<pointer_scene *>(data);
-    scene->cursor_shape = nullptr;
-    scene->cursor_surface = surface;
-    scene->hotspot_x = x;
-    scene->hotspot_y = y;
-    ++scene->cursor_requests;
-}
+    void cursor_shape(const char *shape) noexcept override {
+        last_cursor_shape = shape;
+        last_cursor_surface = nullptr;
+        ++cursor_requests;
+    }
 
-static void scene_cancelled(void *data) noexcept {
-    ++static_cast<pointer_scene *>(data)->cancelled;
-}
+    void cursor_surface(struct wlr_surface *surface, int32_t x, int32_t y) noexcept override {
+        last_cursor_shape = nullptr;
+        last_cursor_surface = surface;
+        hotspot_x = x;
+        hotspot_y = y;
+        ++cursor_requests;
+    }
 
-static void scene_drag_icon(void *data, struct wlr_drag_icon *icon) noexcept {
-    check(icon && icon->surface, "missing requested drag icon");
-    ++static_cast<pointer_scene *>(data)->drag_icons;
-}
+    void pointer_cancelled() noexcept override { ++cancelled; }
+
+    void drag_icon(struct wlr_drag_icon *icon) noexcept override {
+        check(icon && icon->surface, "missing requested drag icon");
+        ++drag_icons;
+    }
+};
 
 struct pointer_client {
     struct wl_display *display;
@@ -955,19 +927,11 @@ static void create_pointer_seat(struct wl_display *server, struct wlr_backend *b
     wlr_backend_init(backend, &backend_impl);
     wlr_keyboard_init(keyboard, &keyboard_impl, "pointer test keyboard");
     wlr_pointer_init(pointer, &pointer_impl, "pointer test pointer");
-    seaside_tty_input_callbacks seat_callbacks{};
-    seat_callbacks.motion = scene_motion;
-    seat_callbacks.pointer_target = scene_target;
-    seat_callbacks.pointer_button = scene_button;
-    seat_callbacks.pointer_locked = scene_locked;
-    seat_callbacks.pointer_absolute_delta = scene_absolute_delta;
-    seat_callbacks.cursor_shape = scene_cursor_shape;
-    seat_callbacks.cursor_surface = scene_cursor_surface;
-    seat_callbacks.pointer_cancelled = scene_cancelled;
-    seat_callbacks.drag_icon = scene_drag_icon;
-    scene->input = seaside_tty_input_create(backend, &seat_callbacks, scene);
-    check(scene->input && seaside_tty_input_enable_keyboard(scene->input, server) &&
-              seaside_tty_input_get_seat(scene->input),
+    auto created = seaside::TtyInput::create(backend, *scene,
+                                             {.pointer_targets = true, .client_cursor = true});
+    check(created.has_value(), "cannot create pointer input bridge");
+    scene->input = std::move(*created);
+    check(scene->input->enable_keyboard(server) && scene->input->seat(),
           "pointer test seat setup failed");
     wl_signal_emit_mutable(&backend->events.new_input, &keyboard->base);
     wl_signal_emit_mutable(&backend->events.new_input, &pointer->base);
@@ -993,7 +957,7 @@ static void exercise_wayland_cursor(void) {
     struct wp_cursor_shape_device_v1 *right_device =
         wp_cursor_shape_manager_v1_get_pointer(right_seat->cursor_shapes, right_seat->pointer);
 
-    seaside_tty_input_refresh_pointer(scene.input);
+    scene.input->refresh_pointer();
     round_trip(server, left.display);
     check(left_seat->pointer_serial != 0, "missing cursor focus serial");
     const unsigned defaults = scene.cursor_requests;
@@ -1004,32 +968,33 @@ static void exercise_wayland_cursor(void) {
     wp_cursor_shape_device_v1_set_shape(left_device, left_seat->pointer_serial,
                                         WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_TEXT);
     round_trip(server, left.display);
-    check(scene.cursor_requests > defaults && scene.cursor_shape &&
-              strcmp(scene.cursor_shape, "text") == 0,
+    check(scene.cursor_requests > defaults && scene.last_cursor_shape &&
+              strcmp(scene.last_cursor_shape, "text") == 0,
           "pointer focus did not set the named text cursor");
 
     struct wl_surface *cursor = wl_compositor_create_surface(left_seat->compositor);
     wl_pointer_set_cursor(left_seat->pointer, left_seat->pointer_serial, cursor, 5, 6);
     round_trip(server, left.display);
-    check(scene.cursor_surface && scene.hotspot_x == 5 && scene.hotspot_y == 6,
+    check(scene.last_cursor_surface && scene.hotspot_x == 5 && scene.hotspot_y == 6,
           "focused pointer did not accept a cursor surface");
     const unsigned first_cursor = scene.cursor_requests;
     wl_surface_attach(cursor, left.buffer, 2, 3);
     wl_surface_commit(cursor);
     round_trip(server, left.display);
-    check(scene.cursor_requests == first_cursor + 1 && scene.cursor_surface &&
+    check(scene.cursor_requests == first_cursor + 1 && scene.last_cursor_surface &&
               scene.hotspot_x == 3 && scene.hotspot_y == 3,
           "cursor surface commit did not preserve its hotspot relative to the new image");
 
     const unsigned committed_cursor = scene.cursor_requests;
     wl_pointer_set_cursor(right_seat->pointer, left_seat->pointer_serial, nullptr, 0, 0);
     round_trip(server, right.display);
-    check(scene.cursor_requests == committed_cursor && scene.cursor_surface,
+    check(scene.cursor_requests == committed_cursor && scene.last_cursor_surface,
           "unfocused client could change the pointer cursor");
 
     relative(&pointer, 100, 100);
     round_trip(server, right.display);
-    check(scene.cursor_requests > committed_cursor && !scene.cursor_shape && !scene.cursor_surface,
+    check(scene.cursor_requests > committed_cursor && !scene.last_cursor_shape &&
+              !scene.last_cursor_surface,
           "leaving a cursor surface's client did not restore the desktop arrow");
     const unsigned focus_change = scene.cursor_requests;
     wl_surface_commit(cursor);
@@ -1039,12 +1004,12 @@ static void exercise_wayland_cursor(void) {
     wp_cursor_shape_device_v1_set_shape(right_device, right_seat->pointer_serial,
                                         WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_EW_RESIZE);
     round_trip(server, right.display);
-    check(scene.cursor_requests == focus_change + 1 && scene.cursor_shape &&
-              strcmp(scene.cursor_shape, "ew-resize") == 0,
+    check(scene.cursor_requests == focus_change + 1 && scene.last_cursor_shape &&
+              strcmp(scene.last_cursor_shape, "ew-resize") == 0,
           "new pointer focus did not set the resize cursor");
     wl_pointer_set_cursor(right_seat->pointer, right_seat->pointer_serial, nullptr, 4, 2);
     round_trip(server, right.display);
-    check(!scene.cursor_shape && !scene.cursor_surface && scene.hotspot_x == 4 &&
+    check(!scene.last_cursor_shape && !scene.last_cursor_surface && scene.hotspot_x == 4 &&
               scene.hotspot_y == 2,
           "focused client could not hide its cursor");
 
@@ -1052,10 +1017,10 @@ static void exercise_wayland_cursor(void) {
     round_trip(server, left.display);
     wl_pointer_set_cursor(left_seat->pointer, left_seat->pointer_serial, cursor, 8, 7);
     round_trip(server, left.display);
-    check(scene.cursor_surface, "cursor surface could not be restored after refocus");
+    check(scene.last_cursor_surface, "cursor surface could not be restored after refocus");
     wl_surface_destroy(cursor);
     round_trip(server, left.display);
-    check(!scene.cursor_surface && !scene.cursor_shape,
+    check(!scene.last_cursor_surface && !scene.last_cursor_shape,
           "destroying the active cursor surface did not restore the desktop arrow");
 
     wp_cursor_shape_device_v1_destroy(left_device);
@@ -1063,7 +1028,7 @@ static void exercise_wayland_cursor(void) {
     disconnect_pointer_client(server, &left);
     disconnect_pointer_client(server, &right);
     wl_display_destroy_clients(server);
-    seaside_tty_input_destroy(scene.input);
+    scene.input.reset();
     wlr_pointer_finish(&pointer);
     wlr_keyboard_finish(&keyboard);
     wlr_backend_finish(&backend);
@@ -1082,8 +1047,8 @@ static void exercise_wayland_pointer(void) {
     struct pointer_client left = {}, right = {};
     scene.surfaces[0] = connect_pointer_client(server, &left);
     scene.surfaces[1] = connect_pointer_client(server, &right);
-    seaside_tty_input_set_focus(scene.input, scene.surfaces[0]);
-    seaside_tty_input_refresh_pointer(scene.input);
+    scene.input->set_focus(scene.surfaces[0]);
+    scene.input->refresh_pointer();
     relative(&pointer, 100, 90);
     axis(&pointer);
     round_trip(server, left.display);
@@ -1113,7 +1078,7 @@ static void exercise_wayland_pointer(void) {
     const unsigned old_regular = right.events.pointer_motions;
     const unsigned old_relative = right.events.relative_motions;
     relative(&pointer, -125, -111);
-    seaside_tty_input_set_inverse_scroll(scene.input, true);
+    scene.input->set_inverse_scroll(true);
     axis(&pointer);
     button(&pointer, BTN_LEFT, false);
     round_trip(server, right.display);
@@ -1139,17 +1104,17 @@ static void exercise_wayland_pointer(void) {
               right.events.axis_orientation == WL_POINTER_AXIS_HORIZONTAL_SCROLL &&
               right.events.axis_delta == -9 && right.events.axis_discrete == -1,
           "inverse wheel scrolling did not invert both axis values");
-    seaside_tty_input_set_inverse_scroll(scene.input, false);
+    scene.input->set_inverse_scroll(false);
     axis(&pointer);
     round_trip(server, right.display);
     check(right.events.axis_delta == 3, "normal scrolling did not restore the original direction");
-    seaside_tty_input_set_focus(scene.input, scene.surfaces[0]);
+    scene.input->set_focus(scene.surfaces[0]);
     round_trip(server, right.display);
     check(right.events.unlocks == 1 && !scene.locked,
           "pointer lock survived the focus change to another client");
     zwp_locked_pointer_v1_destroy(lock);
 
-    seaside_tty_input_set_focus(scene.input, scene.surfaces[1]);
+    scene.input->set_focus(scene.surfaces[1]);
     lock = zwp_pointer_constraints_v1_lock_pointer(right.events.constraints, right.surface,
                                                    right.events.pointer, nullptr,
                                                    ZWP_POINTER_CONSTRAINTS_V1_LIFETIME_ONESHOT);
@@ -1242,7 +1207,7 @@ static void exercise_wayland_pointer(void) {
     disconnect_pointer_client(server, &left);
     disconnect_pointer_client(server, &right);
     wl_display_destroy_clients(server);
-    seaside_tty_input_destroy(scene.input);
+    scene.input.reset();
     wlr_backend_finish(&backend);
     wlr_keyboard_finish(&keyboard);
     wl_display_destroy(server);
@@ -1550,13 +1515,13 @@ static void exercise_data_device(void) {
     pointer_scene scene{};
     scene.x = scene.y = 10;
     create_pointer_seat(server, &backend, &keyboard, &pointer, &scene);
-    struct wlr_seat *seat = seaside_tty_input_get_seat(scene.input);
+    struct wlr_seat *seat = scene.input->seat();
     struct data_client left = {}, right = {};
     scene.surfaces[0] = connect_data_client(server, &left);
     scene.surfaces[1] = connect_data_client(server, &right);
     struct wl_display *sender = left.pointer.display, *receiver = right.pointer.display;
 
-    seaside_tty_input_set_focus(scene.input, scene.surfaces[0]);
+    scene.input->set_focus(scene.surfaces[0]);
     const uint32_t left_serial = data_key_serial(server, &left, &keyboard);
     test_source clipboard{};
     clipboard.payload = "clipboard";
@@ -1572,7 +1537,7 @@ static void exercise_data_device(void) {
           "unfocused client received a clipboard or primary offer");
 
     const uint32_t delayed_serial = data_key_serial(server, &left, &keyboard);
-    seaside_tty_input_set_focus(scene.input, scene.surfaces[1]);
+    scene.input->set_focus(scene.surfaces[1]);
     data_key_serial(server, &right, &keyboard);
     check(right.clipboard_mimes == 1 && right.primary_mimes == 1,
           "focused client did not receive the selection MIME offers");
@@ -1614,7 +1579,7 @@ static void exercise_data_device(void) {
     round_trip(server, receiver);
     check(!right.selection && !right.primary, "source teardown left a cached selection");
 
-    seaside_tty_input_refresh_pointer(scene.input);
+    scene.input->refresh_pointer();
     test_source drag{};
     drag.payload = "dropped";
     struct wl_data_source *drag_source = create_data_source(&left, &drag);
@@ -1698,7 +1663,7 @@ static void exercise_data_device(void) {
     disconnect_data_client(server, &left);
     disconnect_data_client(server, &right);
     wl_display_destroy_clients(server);
-    seaside_tty_input_destroy(scene.input);
+    scene.input.reset();
     wlr_backend_finish(&backend);
     wlr_keyboard_finish(&keyboard);
     wl_display_destroy(server);

@@ -8,10 +8,11 @@
 #include <set>
 #include <utility>
 
-struct seaside_tty_input;
 struct wl_event_source;
 
 namespace seaside {
+
+class TtyInput;
 
 enum class DesktopActionError { no_target, not_found, invalid_state };
 
@@ -23,7 +24,7 @@ class Desktop final {
     Desktop(const Desktop &) = delete;
     Desktop &operator=(const Desktop &) = delete;
 
-    void set_input(seaside_tty_input *input) noexcept;
+    void set_input(TtyInput *input) noexcept;
     void enable_frame_paced_resize() noexcept;
     bool add_output(wlr_output *output, std::string_view id, WindowRect bounds) noexcept;
     void remove_output(wlr_output *output) noexcept;
@@ -109,7 +110,7 @@ class Desktop final {
     std::map<WindowId, OpeningWindow> opening_;
     std::set<WindowId> fitting_;
     wl_event_source *opening_deadline_ = nullptr;
-    seaside_tty_input *input_ = nullptr;
+    TtyInput *input_ = nullptr;
     std::optional<Drag> drag_;
     std::optional<PointerPosition> pointer_;
     std::uint8_t cycle_modifiers_ = 0;

@@ -1,110 +1,112 @@
-#ifndef SEASIDE_TTY_INPUT_H
-#define SEASIDE_TTY_INPUT_H
+#pragma once
 
 #include "cursor_layout.hpp"
 
-#include <stdbool.h>
-#include <stddef.h>
-#include <stdint.h>
+#include <cstddef>
+#include <cstdint>
+#include <expected>
+#include <memory>
 
-struct wl_display;
 struct timespec;
+struct wl_display;
 struct wlr_backend;
-struct wlr_drag_icon;
 struct wlr_box;
+struct wlr_drag_icon;
 struct wlr_input_popup_surface_v2;
 struct wlr_output;
 struct wlr_seat;
 struct wlr_seat_client;
 struct wlr_surface;
-struct seaside_tty_input;
 
-struct seaside_tty_pointer_target {
-    struct wlr_surface *surface;
+namespace seaside {
+
+struct TtyPointerTarget {
+    wlr_surface *surface;
     double sx, sy;
-    uint64_t window_id;
+    std::uint64_t window_id;
 };
 
-struct seaside_tty_input_callbacks {
-    /* Absolute coordinates are normalized. Relative and confined values are deltas. */
-    void (*motion)(void *data, enum seaside_pointer_motion kind, double x, double y);
-    /* Escape requests shutdown only in the TTY qualification fixture. */
-    void (*exit_requested)(void *data);
-    /* An optional exact Super+Return shortcut in the terminal fixture. */
-    void (*launch_requested)(void *data);
-    /* Modifier bits match the binding table (Super, Ctrl, Alt, Shift).
-     * Returning true consumes both the press and release. */
-    bool (*shortcut_pressed)(void *data, uint8_t modifiers, uint32_t keysym);
-    void (*modifiers_changed)(void *data, uint8_t modifiers);
-    /* Hit-test for a NULL surface. Otherwise locate that exact visible surface
-     * and report its local coordinates, even outside its input bounds. */
-    bool (*pointer_target)(void *data, struct seaside_tty_pointer_target *target);
-    /* A press may be consumed with its release. window_id is zero over empty
-     * space. Existing client grabs take priority over this callback. */
-    bool (*pointer_button)(void *data, uint64_t window_id, uint32_t button, bool pressed,
-                           uint8_t modifiers);
-    /* Convert normalized hardware coordinates for pointer confinement. */
-    bool (*pointer_absolute_delta)(void *data, double x, double y, double *dx, double *dy);
-    void (*pointer_locked)(void *data, bool locked);
-    /* NULL shape restores the desktop arrow. NULL surface hides the cursor. */
-    void (*cursor_shape)(void *data, const char *shape);
-    void (*cursor_surface)(void *data, struct wlr_surface *surface, int32_t x, int32_t y);
-    /* The initiating device disappeared before its consumed button release. */
-    void (*pointer_cancelled)(void *data);
-    /* The icon is borrowed. The scene removes its node on icon destruction. */
-    void (*drag_icon)(void *data, struct wlr_drag_icon *icon);
-    /* An inactive popup has no focus or cursor rectangle. */
-    void (*input_popup)(void *data, struct wlr_input_popup_surface_v2 *popup,
-                        struct wlr_surface *focus, const struct wlr_box *cursor);
-    /* Local input also counts when a binding or pointer constraint consumes it.
-     * Motion reports after routing so it can wake the destination output. */
-    void (*activity)(void *data, bool pointer);
-};
-
-struct seaside_tty_input_snapshot {
-    size_t pointers;
-    size_t keyboards;
+struct TtyInputSnapshot {
+    std::size_t pointers;
+    std::size_t keyboards;
     bool failed;
     bool has_keyboard_focus;
-    uint64_t forwarded_key_events;
-    uint64_t forwarded_key_presses;
-    uint64_t launch_requests;
+    std::uint64_t forwarded_key_events;
+    std::uint64_t forwarded_key_presses;
+    std::uint64_t launch_requests;
 };
 
-#ifdef __cplusplus
-extern "C" {
-#endif
+class TtyInputObserver {
+  public:
+    virtual ~TtyInputObserver() = default;
 
-/* Borrows the backend and copies callbacks. Attach on the Wayland thread before
- * starting the backend: device discovery can happen synchronously at start.
- * Callbacks may request loop termination. Destroy after dispatch has stopped. */
-struct seaside_tty_input *
-seaside_tty_input_create(struct wlr_backend *backend,
-                         const struct seaside_tty_input_callbacks *callbacks, void *data);
+    // Absolute coordinates are normalized. Relative and confined values are deltas.
+    virtual void motion(seaside_pointer_motion, double, double) noexcept {}
+    virtual void exit_requested() noexcept {}
+    virtual void launch_requested() noexcept {}
+    // Modifier bits match the binding table (Super, Ctrl, Alt, Shift).
+    // Returning true consumes both the press and release.
+    virtual bool shortcut_pressed(std::uint8_t, std::uint32_t) noexcept { return false; }
+    virtual void modifiers_changed(std::uint8_t) noexcept {}
+    // Hit-test for a null surface. Otherwise locate the exact surface even outside its bounds.
+    virtual bool pointer_target(TtyPointerTarget &) noexcept { return false; }
+    // A press may be consumed with its release. The window ID is zero over empty space.
+    virtual bool pointer_button(std::uint64_t, std::uint32_t, bool, std::uint8_t) noexcept {
+        return false;
+    }
+    virtual bool pointer_absolute_delta(double, double, double &, double &) noexcept {
+        return false;
+    }
+    virtual void pointer_locked(bool) noexcept {}
+    // A null shape restores the desktop arrow. A null cursor surface hides it.
+    virtual void cursor_shape(const char *) noexcept {}
+    virtual void cursor_surface(wlr_surface *, std::int32_t, std::int32_t) noexcept {}
+    virtual void pointer_cancelled() noexcept {}
+    virtual void drag_icon(wlr_drag_icon *) noexcept {}
+    virtual void input_popup(wlr_input_popup_surface_v2 *, wlr_surface *,
+                             const wlr_box *) noexcept {}
+    // Motion reports after routing so it can wake the destination output.
+    virtual void input_activity(bool) noexcept {}
+};
 
-/* Publish the seat and its protocol globals before backend start. Keyboard
- * focus borrows the mapped surface until it is cleared or destroyed. */
-bool seaside_tty_input_enable_keyboard(struct seaside_tty_input *input, struct wl_display *display);
-void seaside_tty_input_set_sensitivity(struct seaside_tty_input *input, double sensitivity);
-void seaside_tty_input_set_inverse_scroll(struct seaside_tty_input *input, bool inverse);
-void seaside_tty_input_set_focus(struct seaside_tty_input *input, struct wlr_surface *surface);
-struct wlr_seat *seaside_tty_input_get_seat(const struct seaside_tty_input *input);
-/* Reevaluate hover after a scene change, even when the cursor has not moved. */
-void seaside_tty_input_refresh_pointer(struct seaside_tty_input *input);
-void seaside_tty_input_cursor_presented(struct seaside_tty_input *input, struct wlr_output *output,
-                                        const struct timespec *when);
-/* Take over a live client grab and return its initiating button, or zero. */
-uint32_t seaside_tty_input_begin_client_gesture(struct seaside_tty_input *input,
-                                                struct wlr_seat_client *client,
-                                                struct wlr_surface *root, uint32_t serial);
-void seaside_tty_input_cancel_drag(struct seaside_tty_input *input);
-void seaside_tty_input_cancel_drag_from(struct seaside_tty_input *input, struct wlr_surface *root);
-void seaside_tty_input_destroy(struct seaside_tty_input *input);
-struct seaside_tty_input_snapshot
-seaside_tty_input_get_snapshot(const struct seaside_tty_input *input);
+struct TtyInputOptions {
+    bool track_modifiers = false;
+    bool pointer_targets = false;
+    bool client_cursor = false;
+    bool fixture_launch = false;
+};
 
-#ifdef __cplusplus
-}
-#endif
+enum class TtyInputError { invalid_backend, allocation };
 
-#endif
+struct TtyInputState;
+
+// The observer outlives the input. Attach on the Wayland thread before backend
+// startup, which can discover devices synchronously. Destroy after dispatch stops.
+class TtyInput final {
+  public:
+    static std::expected<std::unique_ptr<TtyInput>, TtyInputError>
+    create(wlr_backend *backend, TtyInputObserver &observer, TtyInputOptions options = {}) noexcept;
+    ~TtyInput() noexcept;
+    TtyInput(const TtyInput &) = delete;
+    TtyInput &operator=(const TtyInput &) = delete;
+
+    bool enable_keyboard(wl_display *display) noexcept;
+    void set_sensitivity(double sensitivity) noexcept;
+    void set_inverse_scroll(bool inverse) noexcept;
+    void set_focus(wlr_surface *surface) noexcept;
+    wlr_seat *seat() const noexcept;
+    void refresh_pointer() noexcept;
+    void cursor_presented(wlr_output *output, const timespec *when) noexcept;
+    // Take over a live client grab and return its initiating button, or zero.
+    std::uint32_t begin_client_gesture(wlr_seat_client *client, wlr_surface *root,
+                                       std::uint32_t serial) noexcept;
+    void cancel_drag() noexcept;
+    void cancel_drag_from(wlr_surface *root) noexcept;
+    TtyInputSnapshot snapshot() const noexcept;
+
+  private:
+    explicit TtyInput(std::unique_ptr<TtyInputState> state) noexcept;
+    std::unique_ptr<TtyInputState> state_;
+};
+
+} // namespace seaside

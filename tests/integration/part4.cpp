@@ -1436,64 +1436,46 @@ bool run_floating_borders(const Fixture &fixture) {
     return true;
 }
 
-struct LayerSeat {
+struct LayerSeat : seaside::TtyInputObserver {
     explicit LayerSeat(const Fixture &display) : fixture(display) {}
     ~LayerSeat() { fixture.desktop.set_input(nullptr); }
 
-    bool start() {
-        const seaside_tty_input_callbacks callbacks{
-            .motion = nullptr,
-            .exit_requested = nullptr,
-            .launch_requested = nullptr,
-            .shortcut_pressed =
-                [](void *data, std::uint8_t mods, std::uint32_t keysym) {
-                    auto &seat = *static_cast<LayerSeat *>(data);
-                    if (keysym != XKB_KEY_F8) {
-                        return false;
-                    }
-                    ++seat.shortcuts;
-                    return seat.fixture.desktop.action(action(ActionKind::toggle_window_fullscreen),
-                                                       mods);
-                },
-            .modifiers_changed = nullptr,
-            .pointer_target =
-                [](void *data, seaside_tty_pointer_target *target) {
-                    const auto &seat = *static_cast<LayerSeat *>(data);
-                    seaside_scene_target hit{.surface = target->surface, .id = 0, .sx = 0, .sy = 0};
-                    if (!seat.fixture.scene.window_at(seat.x, seat.y, hit)) {
-                        return false;
-                    }
-                    *target = {hit.surface, hit.sx, hit.sy, hit.id};
-                    return true;
-                },
-            .pointer_button =
-                [](void *data, std::uint64_t window, std::uint32_t button, bool pressed,
-                   std::uint8_t mods) {
-                    auto &seat = *static_cast<LayerSeat *>(data);
-                    return seat.fixture.desktop.button(window, button, pressed, mods, seat.x,
-                                                       seat.y);
-                },
-            .pointer_absolute_delta = nullptr,
-            .pointer_locked = nullptr,
-            .cursor_shape = nullptr,
-            .cursor_surface = nullptr,
-            .pointer_cancelled = nullptr,
-            .drag_icon = nullptr,
-            .input_popup =
-                [](void *data, wlr_input_popup_surface_v2 *popup, wlr_surface *surface,
-                   const wlr_box *cursor) {
-                    static_cast<LayerSeat *>(data)->fixture.scene.set_input_popup(popup, surface,
-                                                                                  cursor);
-                },
-            .activity = nullptr,
-        };
-        input.reset(seaside_tty_input_create(fixture.backend, &callbacks, this));
-        if (!input || !seaside_tty_input_enable_keyboard(input.get(), fixture.display)) {
+    bool shortcut_pressed(std::uint8_t mods, std::uint32_t keysym) noexcept override {
+        if (keysym != XKB_KEY_F8) {
             return false;
         }
+        ++shortcuts;
+        return fixture.desktop.action(action(ActionKind::toggle_window_fullscreen), mods);
+    }
+
+    bool pointer_target(seaside::TtyPointerTarget &target) noexcept override {
+        seaside_scene_target hit{.surface = target.surface, .id = 0, .sx = 0, .sy = 0};
+        if (!fixture.scene.window_at(x, y, hit)) {
+            return false;
+        }
+        target = {hit.surface, hit.sx, hit.sy, hit.id};
+        return true;
+    }
+
+    bool pointer_button(std::uint64_t window, std::uint32_t button, bool pressed,
+                        std::uint8_t mods) noexcept override {
+        return fixture.desktop.button(window, button, pressed, mods, x, y);
+    }
+
+    void input_popup(wlr_input_popup_surface_v2 *popup, wlr_surface *surface,
+                     const wlr_box *cursor) noexcept override {
+        fixture.scene.set_input_popup(popup, surface, cursor);
+    }
+
+    bool start() {
+        auto created = seaside::TtyInput::create(fixture.backend, *this, {.pointer_targets = true});
+        if (!created || !(*created)->enable_keyboard(fixture.display)) {
+            return false;
+        }
+        input = std::move(*created);
         devices.reset(part3_input_create(fixture.backend));
         fixture.desktop.set_input(input.get());
-        return devices && !seaside_tty_input_get_snapshot(input.get()).failed;
+        return devices && !input->snapshot().failed;
     }
 
     void key(std::uint32_t code) const {
@@ -1509,8 +1491,7 @@ struct LayerSeat {
     }
 
     const Fixture &fixture;
-    std::unique_ptr<seaside_tty_input, decltype(&seaside_tty_input_destroy)> input{
-        nullptr, seaside_tty_input_destroy};
+    std::unique_ptr<seaside::TtyInput> input;
     std::unique_ptr<part3_input, decltype(&part3_input_destroy)> devices{nullptr,
                                                                          part3_input_destroy};
     double x = 1, y = 1;
@@ -2140,7 +2121,7 @@ bool run_layer_shell(const Fixture &fixture) {
     REQUIRE(connection.wait(client, [&] { return client.button_serial != 0; }));
     wl_data_device_start_drag(data_device.get(), nullptr, panel.surface, nullptr,
                               client.button_serial);
-    const auto *server_seat = seaside_tty_input_get_seat(seat.input.get());
+    const auto *server_seat = seat.input->seat();
     REQUIRE(connection.wait(client, [&] { return part3_seat_has_drag(server_seat); }));
     const auto fullscreen_during_drag =
         desktop.dispatch(action(ActionKind::toggle_window_fullscreen), 0, id);

@@ -36,14 +36,18 @@ bool card_path(std::string_view path) {
            std::ranges::all_of(path, [](char value) { return value >= '0' && value <= '9'; });
 }
 
-struct Fixture {
+struct Fixture : seaside::TtyInputObserver {
+    Fixture(seaside::Server &server, seaside::Scene &scene, seaside_tty_drm *drm,
+            std::string_view socket, bool terminal_mode) noexcept
+        : server(server), scene(scene), drm(drm), socket(socket), terminal_mode(terminal_mode) {}
+
     seaside::Server &server;
     seaside::Scene &scene;
     seaside_tty_drm *drm;
     std::string_view socket;
     bool terminal_mode;
     seaside::test::TerminalChild terminal{};
-    seaside_tty_input *input = nullptr;
+    seaside::TtyInput *input = nullptr;
     wl_event_source *timer = nullptr;
     Clock::time_point deadline = Clock::now() + start_timeout;
     const char *stop_reason = "signal";
@@ -54,44 +58,41 @@ struct Fixture {
     bool terminal_mapped = false;
     bool terminal_exited = false;
 
-    static void move_pointer(void *data, seaside_pointer_motion kind, double x, double y) noexcept {
-        auto &fixture = *static_cast<Fixture *>(data);
-        if (!fixture.stopping) {
-            seaside_tty_drm_move(fixture.drm, kind, x, y);
+    void motion(seaside_pointer_motion kind, double x, double y) noexcept override {
+        if (!stopping) {
+            seaside_tty_drm_move(drm, kind, x, y);
         }
     }
 
-    static void exit_requested(void *data) noexcept {
-        auto &fixture = *static_cast<Fixture *>(data);
+    void exit_requested() noexcept override {
         // Escape is a test-fixture exit gesture and remains separate from the
         // compositor's approved, configurable actions.
-        if (fixture.ready && !fixture.stopping) {
-            fixture.stop("escape");
+        if (!terminal_mode && ready && !stopping) {
+            stop("escape");
         }
     }
 
     static void focus_terminal(void *data, wlr_surface *surface) noexcept {
         auto &fixture = *static_cast<Fixture *>(data);
-        seaside_tty_input_set_focus(fixture.input, surface);
+        fixture.input->set_focus(surface);
         fixture.terminal_mapped |= surface != nullptr;
     }
 
-    static void launch_terminal(void *data) noexcept {
-        auto &fixture = *static_cast<Fixture *>(data);
-        if (!fixture.ready || fixture.stopping || fixture.terminal_started) {
+    void launch_requested() noexcept override {
+        if (!ready || stopping || terminal_started) {
             return;
         }
-        auto child = fixture.terminal.launch(fixture.socket);
+        auto child = terminal.launch(socket);
         if (!child) {
             std::fprintf(stderr, "TTY terminal: launch failed: %s\n", std::strerror(child.error()));
-            fixture.stop("terminal-launch", true);
+            stop("terminal-launch", true);
             return;
         }
-        fixture.terminal_started = true;
+        terminal_started = true;
         // Register the PID before returning to Wayland dispatch. A client may
         // already have connected, but its XDG requests cannot yet be dispatched.
-        if (!fixture.scene.watch_client(*child, focus_terminal, &fixture)) {
-            fixture.stop("terminal-focus-watch", true);
+        if (!scene.watch_client(*child, focus_terminal, this)) {
+            stop("terminal-focus-watch", true);
         }
     }
 
@@ -173,30 +174,12 @@ std::expected<Result, const char *> run_fixture(const char *device, bool termina
         return std::unexpected("shutdown-during-seat-setup");
     }
     Fixture fixture{server, **scene, drm.get(), *socket, terminal_mode};
-    const seaside_tty_input_callbacks callbacks{
-        .motion = Fixture::move_pointer,
-        .exit_requested = terminal_mode ? nullptr : Fixture::exit_requested,
-        .launch_requested = terminal_mode ? Fixture::launch_terminal : nullptr,
-        .shortcut_pressed = nullptr,
-        .modifiers_changed = nullptr,
-        .pointer_target = nullptr,
-        .pointer_button = nullptr,
-        .pointer_absolute_delta = nullptr,
-        .pointer_locked = nullptr,
-        .cursor_shape = nullptr,
-        .cursor_surface = nullptr,
-        .pointer_cancelled = nullptr,
-        .drag_icon = nullptr,
-        .input_popup = nullptr,
-        .activity = nullptr,
-    };
-    std::unique_ptr<seaside_tty_input, decltype(&seaside_tty_input_destroy)> input(
-        seaside_tty_input_create(backend, &callbacks, &fixture), seaside_tty_input_destroy);
+    auto input = seaside::TtyInput::create(backend, fixture, {.fixture_launch = terminal_mode});
     if (!input) {
         return std::unexpected("input-listeners");
     }
-    fixture.input = input.get();
-    if (terminal_mode && !seaside_tty_input_enable_keyboard(input.get(), server.display())) {
+    fixture.input = input->get();
+    if (terminal_mode && !(*input)->enable_keyboard(server.display())) {
         return std::unexpected("wayland-keyboard");
     }
     if (!server.start(pending_backend.release(), pending_renderer.release())) {
@@ -218,7 +201,7 @@ std::expected<Result, const char *> run_fixture(const char *device, bool termina
     }
 
     const auto display = seaside_tty_drm_observation(drm.get());
-    const auto devices = seaside_tty_input_get_snapshot(input.get());
+    const auto devices = (*input)->snapshot();
     const auto scene_state = (*scene)->snapshot();
     (*scene)->clear_client_watch();
     // The watch invokes a callback into the input bridge. Clear it before
@@ -241,7 +224,7 @@ int Fixture::observe(void *data) noexcept {
         return 0;
     }
     const auto display = seaside_tty_drm_observation(fixture.drm);
-    const auto devices = seaside_tty_input_get_snapshot(fixture.input);
+    const auto devices = fixture.input->snapshot();
     const auto scene = fixture.scene.snapshot();
     if (display.failed || devices.failed || scene.failed) {
         fixture.stop("output-cursor-or-input-failed", true);

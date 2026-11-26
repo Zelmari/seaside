@@ -16,6 +16,8 @@ extern "C" {
 #include <wlr/types/wlr_virtual_keyboard_v1.h>
 }
 
+namespace seaside {
+
 struct seaside_text_input {
     struct wlr_seat *seat;
     struct wlr_keyboard *keyboard;
@@ -31,9 +33,7 @@ struct seaside_text_input {
     struct wl_listener new_virtual_keyboard, virtual_manager_destroy;
     uint64_t grab_generation;
     uint64_t grabbed_keys[KEY_CNT];
-    void (*popup)(void *, struct wlr_input_popup_surface_v2 *, struct wlr_surface *,
-                  const struct wlr_box *);
-    void *data;
+    TtyInputObserver *observer;
 };
 static_assert(std::is_standard_layout_v<seaside_text_input>);
 
@@ -66,9 +66,7 @@ static void update_popup(struct seaside_text_input *relay,
         input && (input->active_features & WLR_TEXT_INPUT_V3_FEATURE_CURSOR_RECTANGLE)
             ? &input->current.cursor_rectangle
             : nullptr;
-    if (relay->popup) {
-        relay->popup(relay->data, popup, input ? input->focused_surface : nullptr, cursor);
-    }
+    relay->observer->input_popup(popup, input ? input->focused_surface : nullptr, cursor);
 }
 
 static void update_popups(struct seaside_text_input *relay) {
@@ -514,10 +512,10 @@ static void virtual_manager_destroy(struct wl_listener *listener, void *data) no
     remove_listener(&relay->new_virtual_keyboard);
 }
 
-struct seaside_text_input *
-seaside_text_input_create(struct wl_display *display, struct wlr_seat *seat,
-                          struct wlr_keyboard *keyboard,
-                          const struct seaside_tty_input_callbacks *callbacks, void *data) {
+struct seaside_text_input *seaside_text_input_create(struct wl_display *display,
+                                                     struct wlr_seat *seat,
+                                                     struct wlr_keyboard *keyboard,
+                                                     TtyInputObserver &observer) {
     struct seaside_text_input *relay = new (std::nothrow) seaside_text_input{};
     if (!relay) {
         return nullptr;
@@ -533,8 +531,7 @@ seaside_text_input_create(struct wl_display *display, struct wlr_seat *seat,
     relay->seat = seat;
     relay->keyboard = keyboard;
     relay->focus = seat->keyboard_state.focused_surface;
-    relay->popup = callbacks->input_popup;
-    relay->data = data;
+    relay->observer = &observer;
     relay->grab_generation = 1;
     wl_list_init(&relay->inputs);
     wl_list_init(&relay->virtual_keyboards);
@@ -634,3 +631,5 @@ bool seaside_text_input_modifiers(struct seaside_text_input *relay, struct wlr_k
     }
     return grab != nullptr;
 }
+
+} // namespace seaside

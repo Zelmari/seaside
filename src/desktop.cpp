@@ -81,7 +81,9 @@ Desktop::Desktop(Scene &scene, const Config &config)
         [](void *self) { return static_cast<Desktop *>(self)->focused_output_handle(); },
         on_layer_changed,
         [](void *self, wlr_surface *root) {
-            seaside_tty_input_cancel_drag_from(static_cast<Desktop *>(self)->input_, root);
+            if (auto *input = static_cast<Desktop *>(self)->input_) {
+                input->cancel_drag_from(root);
+            }
         },
         this);
 }
@@ -97,7 +99,7 @@ Desktop::~Desktop() noexcept {
     scene_.set_layer_handler(nullptr, nullptr, nullptr, nullptr);
 }
 
-void Desktop::set_input(seaside_tty_input *input) noexcept {
+void Desktop::set_input(TtyInput *input) noexcept {
     if (input_ && input_ != input) {
         // Release the client-owned popup roles while their seat still exists.
         scene_.dismiss_unfocused_grabs(nullptr);
@@ -367,7 +369,7 @@ void Desktop::project(WindowId resize, bool geometry_only) {
     }
     update_keyboard_focus(layer_focus, focused);
     if (input_) {
-        seaside_tty_input_refresh_pointer(input_);
+        input_->refresh_pointer();
     }
     if (projected_) {
         projected_();
@@ -379,7 +381,7 @@ void Desktop::update_keyboard_focus(wlr_surface *layer_focus, WindowId focused) 
     keyboard_window_ = surface && !layer_focus ? std::optional{focused} : std::nullopt;
     if (input_) {
         scene_.dismiss_unfocused_grabs(surface);
-        seaside_tty_input_set_focus(input_, surface);
+        input_->set_focus(surface);
     }
 }
 
@@ -553,7 +555,7 @@ std::uint64_t Desktop::window_event(const seaside_scene_window_event &event) {
                                       presented_.contains(selected) ? selected : 0);
             }
             if (input_) {
-                seaside_tty_input_refresh_pointer(input_);
+                input_->refresh_pointer();
             }
             if (projected_) {
                 projected_();
@@ -587,7 +589,7 @@ std::uint64_t Desktop::window_event(const seaside_scene_window_event &event) {
             if (limits_changed) {
                 project();
             } else if (input_ && (current.fullscreen || fitting_.contains(event.id))) {
-                seaside_tty_input_refresh_pointer(input_);
+                input_->refresh_pointer();
             }
             return 0;
         }
@@ -630,7 +632,7 @@ std::uint64_t Desktop::window_event(const seaside_scene_window_event &event) {
 }
 
 bool Desktop::begin_client_drag(const seaside_scene_window_event &event) {
-    if (drag_ || !pointer_ || keyboard_window_ != event.id) {
+    if (!input_ || drag_ || !pointer_ || keyboard_window_ != event.id) {
         return false;
     }
     const auto view = windows_.view(event.id);
@@ -639,8 +641,8 @@ bool Desktop::begin_client_drag(const seaside_scene_window_event &event) {
         (resize && !event.resize_edges)) {
         return false;
     }
-    const auto button = seaside_tty_input_begin_client_gesture(
-        input_, event.seat_client, scene_.window_surface(event.id), event.serial);
+    const auto button = input_->begin_client_gesture(event.seat_client,
+                                                     scene_.window_surface(event.id), event.serial);
     if (!button) {
         return false;
     }

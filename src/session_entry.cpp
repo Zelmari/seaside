@@ -223,7 +223,7 @@ struct Outcome {
     bool cleanup_failed = false;
 };
 
-class Session {
+class Session : public seaside::TtyInputObserver {
   public:
     Session(seaside::Server &server, seaside::Scene &scene, seaside_tty_drm *drm,
             std::string_view socket, const seaside::ConfigPaths &paths)
@@ -300,9 +300,9 @@ class Session {
         }
         startup_commands_ = config.config.autostart.commands;
         desktop_.apply_config(config.config);
-        seaside_tty_input_set_sensitivity(input_, config.config.input.mouse.sensitivity);
-        seaside_tty_input_set_inverse_scroll(input_, config.config.input.mouse.scroll_direction ==
-                                                         seaside::ScrollDirection::inverse);
+        input_->set_sensitivity(config.config.input.mouse.sensitivity);
+        input_->set_inverse_scroll(config.config.input.mouse.scroll_direction ==
+                                   seaside::ScrollDirection::inverse);
         attaching_startup_ = false;
         const auto attach = [this](const seaside::OutputConfig::Output &output) {
             const auto &state = output.status;
@@ -419,7 +419,7 @@ class Session {
         return true;
     }
 
-    bool observe(seaside_tty_input *input) noexcept {
+    bool observe(seaside::TtyInput *input) noexcept {
         input_ = input;
         desktop_.set_input(input);
         const seaside_tty_drm_output_callbacks callbacks{
@@ -468,12 +468,11 @@ class Session {
         return outcome_;
     }
 
-    static void input_activity(void *data, bool) noexcept {
-        auto &session = *static_cast<Session *>(data);
-        if (!session.idle_ || session.stopping_ || session.ipc_exiting_) {
+    void input_activity(bool) noexcept override {
+        if (!idle_ || stopping_ || ipc_exiting_) {
             return;
         }
-        session.idle_->activity();
+        idle_->activity();
     }
 
     static void record_frame(void *data, wlr_output *output,
@@ -509,53 +508,46 @@ class Session {
         session.trace_->drop_sample();
     }
 
-    static void pointer_motion(void *data, seaside_pointer_motion kind, double x,
-                               double y) noexcept {
-        auto &session = *static_cast<Session *>(data);
-        if (!session.stopping_ && !session.ipc_exiting_) {
-            seaside_tty_drm_move(session.drm_, kind, x, y);
-            seaside_output_capture_cursor_changed(session.capture_.get());
-            if (seaside_tty_drm_cursor_position(session.drm_, &x, &y)) {
-                session.desktop_.motion(x, y);
-                session.scene_.capture_pointer(x, y);
+    void motion(seaside_pointer_motion kind, double x, double y) noexcept override {
+        if (!stopping_ && !ipc_exiting_) {
+            seaside_tty_drm_move(drm_, kind, x, y);
+            seaside_output_capture_cursor_changed(capture_.get());
+            if (seaside_tty_drm_cursor_position(drm_, &x, &y)) {
+                desktop_.motion(x, y);
+                scene_.capture_pointer(x, y);
             }
         }
     }
 
-    static bool pointer_target(void *data, seaside_tty_pointer_target *target) noexcept {
-        auto &session = *static_cast<Session *>(data);
+    bool pointer_target(seaside::TtyPointerTarget &target) noexcept override {
         double x, y;
-        seaside_scene_target hit{.surface = target->surface, .id = 0, .sx = 0, .sy = 0};
-        if (session.stopping_ || !seaside_tty_drm_cursor_position(session.drm_, &x, &y)) {
+        seaside_scene_target hit{.surface = target.surface, .id = 0, .sx = 0, .sy = 0};
+        if (stopping_ || !seaside_tty_drm_cursor_position(drm_, &x, &y)) {
             return false;
         }
-        session.scene_.move_drag_icon(static_cast<int>(x), static_cast<int>(y));
-        if (!session.scene_.window_at(x, y, hit)) {
+        scene_.move_drag_icon(static_cast<int>(x), static_cast<int>(y));
+        if (!scene_.window_at(x, y, hit)) {
             return false;
         }
-        *target = {hit.surface, hit.sx, hit.sy, hit.id};
+        target = {hit.surface, hit.sx, hit.sy, hit.id};
         return true;
     }
 
-    static bool pointer_button(void *data, std::uint64_t window, std::uint32_t button, bool pressed,
-                               std::uint8_t mods) noexcept {
-        auto &session = *static_cast<Session *>(data);
+    bool pointer_button(std::uint64_t window, std::uint32_t button, bool pressed,
+                        std::uint8_t mods) noexcept override {
         double x, y;
-        return session.ready_ && !session.stopping_ && !session.ipc_exiting_ &&
-               seaside_tty_drm_cursor_position(session.drm_, &x, &y) &&
-               session.desktop_.button(window, button, pressed, mods, x, y);
+        return ready_ && !stopping_ && !ipc_exiting_ &&
+               seaside_tty_drm_cursor_position(drm_, &x, &y) &&
+               desktop_.button(window, button, pressed, mods, x, y);
     }
 
-    static bool pointer_absolute_delta(void *data, double x, double y, double *dx,
-                                       double *dy) noexcept {
-        auto &session = *static_cast<Session *>(data);
-        return seaside_tty_drm_absolute_delta(session.drm_, x, y, dx, dy);
+    bool pointer_absolute_delta(double x, double y, double &dx, double &dy) noexcept override {
+        return seaside_tty_drm_absolute_delta(drm_, x, y, &dx, &dy);
     }
 
-    static void pointer_locked(void *data, bool locked) noexcept {
-        auto &session = *static_cast<Session *>(data);
-        seaside_tty_drm_set_cursor_visible(session.drm_, !locked);
-        session.cursor_changed();
+    void pointer_locked(bool locked) noexcept override {
+        seaside_tty_drm_set_cursor_visible(drm_, !locked);
+        cursor_changed();
     }
 
     void cursor_changed() noexcept {
@@ -566,70 +558,62 @@ class Session {
         }
     }
 
-    static void cursor_shape(void *data, const char *shape) noexcept {
-        auto &session = *static_cast<Session *>(data);
-        if (!session.stopping_ && seaside_tty_drm_set_cursor_shape(session.drm_, shape)) {
-            session.cursor_changed();
+    void cursor_shape(const char *shape) noexcept override {
+        if (!stopping_ && seaside_tty_drm_set_cursor_shape(drm_, shape)) {
+            cursor_changed();
         }
     }
 
-    static void cursor_surface(void *data, wlr_surface *surface, std::int32_t x,
-                               std::int32_t y) noexcept {
-        auto &session = *static_cast<Session *>(data);
-        if (!session.stopping_ && seaside_tty_drm_set_cursor_surface(session.drm_, surface, x, y)) {
-            session.cursor_changed();
+    void cursor_surface(wlr_surface *surface, std::int32_t x, std::int32_t y) noexcept override {
+        if (!stopping_ && seaside_tty_drm_set_cursor_surface(drm_, surface, x, y)) {
+            cursor_changed();
         }
     }
 
     static void cursor_presented(void *data, wlr_output *output, const timespec *when) noexcept {
         auto &session = *static_cast<Session *>(data);
-        if (!session.stopping_) {
-            seaside_tty_input_cursor_presented(session.input_, output, when);
+        if (!session.stopping_ && session.input_) {
+            session.input_->cursor_presented(output, when);
         }
     }
 
-    static void pointer_cancelled(void *data) noexcept {
-        auto &session = *static_cast<Session *>(data);
-        if (!session.stopping_) {
-            session.desktop_.cancel_drag();
+    void pointer_cancelled() noexcept override {
+        if (!stopping_) {
+            desktop_.cancel_drag();
         }
     }
 
-    static void drag_icon(void *data, wlr_drag_icon *icon) noexcept {
-        static_cast<Session *>(data)->scene_.set_drag_icon(icon);
+    void drag_icon(wlr_drag_icon *icon) noexcept override { scene_.set_drag_icon(icon); }
+
+    void input_popup(wlr_input_popup_surface_v2 *popup, wlr_surface *focus,
+                     const wlr_box *cursor) noexcept override {
+        scene_.set_input_popup(popup, focus, cursor);
     }
 
-    static void input_popup(void *data, wlr_input_popup_surface_v2 *popup, wlr_surface *focus,
-                            const wlr_box *cursor) noexcept {
-        static_cast<Session *>(data)->scene_.set_input_popup(popup, focus, cursor);
+    void modifiers_changed(std::uint8_t modifiers) noexcept override {
+        desktop_.modifiers_changed(modifiers);
     }
 
-    static void modifiers_changed(void *data, std::uint8_t modifiers) noexcept {
-        auto &session = *static_cast<Session *>(data);
-        session.desktop_.modifiers_changed(modifiers);
-    }
-
-    static bool shortcut_pressed(void *data, uint8_t mods, uint32_t keysym) noexcept {
-        auto &session = *static_cast<Session *>(data);
-        if (session.stopping_ || session.ipc_exiting_) {
+    bool shortcut_pressed(uint8_t mods, uint32_t keysym) noexcept override {
+        if (stopping_ || ipc_exiting_) {
             return false;
         }
         if (keysym >= XKB_KEY_XF86Switch_VT_1 && keysym <= XKB_KEY_XF86Switch_VT_12) {
-            session.desktop_.cancel_drag();
-            if (!seaside_tty_drm_change_vt(session.drm_, keysym - XKB_KEY_XF86Switch_VT_1 + 1)) {
+            desktop_.cancel_drag();
+            if (!seaside_tty_drm_change_vt(drm_, keysym - XKB_KEY_XF86Switch_VT_1 + 1)) {
                 std::fprintf(stderr, "seaside: VT switch rejected\n");
             }
             return true;
         }
-        if (!session.ready_) {
+        if (!ready_) {
             return false;
         }
-        const auto &bindings = session.config_->transaction().active().keybinds;
+        const auto &bindings = config_->transaction().active().keybinds;
         const auto action = bindings.find({mods, seaside::ChordKind::keyboard, keysym});
         if (action == bindings.end()) {
             return false;
         }
-        (void)session.act(action->second, mods);
+        (void)act(action->second, mods);
         return true;
     }
 
@@ -770,9 +754,9 @@ class Session {
         if (wallpaper) {
             scene_.set_wallpaper(std::move(*wallpaper));
         }
-        seaside_tty_input_set_sensitivity(input_, candidate.input.mouse.sensitivity);
-        seaside_tty_input_set_inverse_scroll(input_, candidate.input.mouse.scroll_direction ==
-                                                         seaside::ScrollDirection::inverse);
+        input_->set_sensitivity(candidate.input.mouse.sensitivity);
+        input_->set_inverse_scroll(candidate.input.mouse.scroll_direction ==
+                                   seaside::ScrollDirection::inverse);
         return {};
     }
 
@@ -1258,9 +1242,9 @@ class Session {
         auto display = seaside_tty_drm_observation(session.drm_);
         if (!display.active) {
             session.desktop_.cancel_drag();
-            seaside_tty_input_cancel_drag(session.input_);
+            session.input_->cancel_drag();
         }
-        const auto input = seaside_tty_input_get_snapshot(session.input_);
+        const auto input = session.input_->snapshot();
         if (display.failed || input.failed || session.scene_.snapshot().failed ||
             session.desktop_.failed()) {
             session.fail("output-cursor-or-input");
@@ -1275,7 +1259,7 @@ class Session {
         }
         if (display.active && (display.output_pending || session.output_config_pending_)) {
             session.apply_detected_outputs();
-            seaside_tty_input_refresh_pointer(session.input_);
+            session.input_->refresh_pointer();
             display = seaside_tty_drm_observation(session.drm_);
         }
         if (!display.active) {
@@ -1332,7 +1316,7 @@ class Session {
     std::unique_ptr<seaside::Trace> trace_;
     std::unique_ptr<seaside::IpcServer> ipc_;
     IpcJson last_error_ = nullptr;
-    seaside_tty_input *input_ = nullptr;
+    seaside::TtyInput *input_ = nullptr;
     std::unique_ptr<wl_event_source, decltype(&wl_event_source_remove)> timer_{
         nullptr, wl_event_source_remove};
     std::unique_ptr<seaside_output_capture, decltype(&seaside_output_capture_destroy)> capture_{
@@ -1392,29 +1376,13 @@ run_session(seaside::LoadedConfig config, seaside::Wallpaper wallpaper, seaside:
         return std::unexpected("shutdown-during-seat-setup");
     }
     Session session{**server, **scene, drm.get(), *socket, paths};
-    const seaside_tty_input_callbacks callbacks{
-        .motion = Session::pointer_motion,
-        .exit_requested = nullptr,
-        .launch_requested = nullptr,
-        .shortcut_pressed = Session::shortcut_pressed,
-        .modifiers_changed = Session::modifiers_changed,
-        .pointer_target = Session::pointer_target,
-        .pointer_button = Session::pointer_button,
-        .pointer_absolute_delta = Session::pointer_absolute_delta,
-        .pointer_locked = Session::pointer_locked,
-        .cursor_shape = Session::cursor_shape,
-        .cursor_surface = Session::cursor_surface,
-        .pointer_cancelled = Session::pointer_cancelled,
-        .drag_icon = Session::drag_icon,
-        .input_popup = Session::input_popup,
-        .activity = Session::input_activity,
-    };
-    std::unique_ptr<seaside_tty_input, decltype(&seaside_tty_input_destroy)> input(
-        seaside_tty_input_create(backend, &callbacks, &session), seaside_tty_input_destroy);
-    if (!input || !seaside_tty_input_enable_keyboard(input.get(), (*server)->display())) {
+    auto input = seaside::TtyInput::create(
+        backend, session,
+        {.track_modifiers = true, .pointer_targets = true, .client_cursor = true});
+    if (!input || !(*input)->enable_keyboard((*server)->display())) {
         return std::unexpected("input-or-wayland-keyboard");
     }
-    if (!session.observe(input.get())) {
+    if (!session.observe(input->get())) {
         return std::unexpected("observation-timer");
     }
     if (!(*server)->start(pending_backend.release(), pending_renderer.release())) {

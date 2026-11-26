@@ -35,10 +35,12 @@ extern "C" {
 }
 #include <xkbcommon/xkbcommon-keysyms.h>
 
-struct seaside_tty_input {
-    struct seaside_tty_input_callbacks callbacks;
-    struct seaside_tty_input_snapshot snapshot;
-    void *data;
+namespace seaside {
+
+struct TtyInputState {
+    TtyInputObserver *observer;
+    TtyInputOptions options;
+    TtyInputSnapshot snapshot;
     struct wl_list devices;
     struct wl_listener new_input;
     struct wl_listener backend_destroy;
@@ -93,10 +95,10 @@ struct seaside_tty_input {
     struct wlr_surface *drag_origin;
     struct tty_device *pointer_grab_device;
 };
-static_assert(std::is_standard_layout_v<seaside_tty_input>);
+static_assert(std::is_standard_layout_v<TtyInputState>);
 
 struct tty_device {
-    struct seaside_tty_input *input;
+    TtyInputState *input;
     struct wl_list link;
     struct wl_listener destroy;
     struct wl_listener event;
@@ -115,17 +117,19 @@ struct tty_device {
 };
 static_assert(std::is_standard_layout_v<tty_device>);
 
+static void refresh_pointer_focus(TtyInputState *input) noexcept;
+
 static uint32_t monotonic_msec(void) {
     struct timespec now = {};
     clock_gettime(CLOCK_MONOTONIC, &now);
     return (uint32_t)((uint64_t)now.tv_sec * 1000 + (uint64_t)now.tv_nsec / 1000000);
 }
 
-static bool pointer_locked(const struct seaside_tty_input *input) {
+static bool pointer_locked(const TtyInputState *input) {
     return input->constraint && input->constraint->type == WLR_POINTER_CONSTRAINT_V1_LOCKED;
 }
 
-static void leave_constraint(struct seaside_tty_input *input, bool notify_client) {
+static void leave_constraint(TtyInputState *input, bool notify_client) {
     if (!input->constraint) {
         return;
     }
@@ -137,14 +141,14 @@ static void leave_constraint(struct seaside_tty_input *input, bool notify_client
         // Deactivating a one-shot constraint destroys it synchronously.
         wlr_pointer_constraint_v1_send_deactivated(constraint);
     }
-    if (locked && input->callbacks.pointer_locked) {
-        input->callbacks.pointer_locked(input->data, false);
+    if (locked) {
+        input->observer->pointer_locked(false);
     }
 }
 
 static void handle_constraint_destroy(struct wl_listener *listener, void *data) noexcept {
     (void)data;
-    struct seaside_tty_input *input = wl_container_of(listener, input, constraint_destroy);
+    TtyInputState *input = wl_container_of(listener, input, constraint_destroy);
     leave_constraint(input, false);
 }
 
@@ -163,7 +167,7 @@ static bool constraint_contains(struct wlr_pointer_constraint_v1 *constraint, do
                                           nullptr);
 }
 
-static void refresh_constraint(struct seaside_tty_input *input) {
+static void refresh_constraint(TtyInputState *input) {
     if (!input->constraints || !input->seat) {
         return;
     }
@@ -186,10 +190,9 @@ static void refresh_constraint(struct seaside_tty_input *input) {
         return;
     }
     if (candidate) {
-        seaside_tty_pointer_target target{};
+        TtyPointerTarget target{};
         target.surface = pointer->button_count ? candidate->surface : nullptr;
-        if (!input->callbacks.pointer_target(input->data, &target) ||
-            target.surface != candidate->surface ||
+        if (!input->observer->pointer_target(target) || target.surface != candidate->surface ||
             !constraint_contains(candidate, target.sx, target.sy)) {
             candidate = nullptr;
         }
@@ -200,18 +203,18 @@ static void refresh_constraint(struct seaside_tty_input *input) {
         input->constraint_destroy.notify = handle_constraint_destroy;
         wl_signal_add(&candidate->events.destroy, &input->constraint_destroy);
         wlr_pointer_constraint_v1_send_activated(candidate);
-        if (pointer_locked(input) && input->callbacks.pointer_locked) {
-            input->callbacks.pointer_locked(input->data, true);
+        if (pointer_locked(input)) {
+            input->observer->pointer_locked(true);
         }
     }
 }
 
-static void clear_pointer_surface_watch(struct seaside_tty_input *input) {
+static void clear_pointer_surface_watch(TtyInputState *input) {
     wl_list_remove(&input->pointer_surface_commit.link);
     wl_list_init(&input->pointer_surface_commit.link);
 }
 
-static void watch_pointer_surface(struct seaside_tty_input *input, struct wlr_surface *surface) {
+static void watch_pointer_surface(TtyInputState *input, struct wlr_surface *surface) {
     clear_pointer_surface_watch(input);
     if (surface && input->constraints &&
         wlr_pointer_constraints_v1_constraint_for_surface(input->constraints, surface,
@@ -222,11 +225,11 @@ static void watch_pointer_surface(struct seaside_tty_input *input, struct wlr_su
 
 static void handle_pointer_surface_commit(struct wl_listener *listener, void *data) noexcept {
     (void)data;
-    struct seaside_tty_input *input = wl_container_of(listener, input, pointer_surface_commit);
+    TtyInputState *input = wl_container_of(listener, input, pointer_surface_commit);
     // A region change is applied during wlroots' synced-state iteration.
     // Deactivate on the later surface event because this can free a one-shot
     // constraint and unlink its synced state.
-    seaside_tty_input_refresh_pointer(input);
+    refresh_pointer_focus(input);
     struct wlr_surface *surface = input->seat->pointer_state.focused_surface;
     if (!surface || !wlr_pointer_constraints_v1_constraint_for_surface(input->constraints, surface,
                                                                        input->seat)) {
@@ -234,7 +237,7 @@ static void handle_pointer_surface_commit(struct wl_listener *listener, void *da
     }
 }
 
-static void forget_cursor_surface(struct seaside_tty_input *input) {
+static void forget_cursor_surface(TtyInputState *input) {
     if (input->cursor_surface) {
         wl_list_remove(&input->cursor_surface_commit.link);
         wl_list_remove(&input->cursor_surface_destroy.link);
@@ -242,7 +245,7 @@ static void forget_cursor_surface(struct seaside_tty_input *input) {
     }
 }
 
-static void leave_cursor_surface(struct seaside_tty_input *input) {
+static void leave_cursor_surface(TtyInputState *input) {
     if (input->cursor_surface) {
         struct wlr_surface_output *entry, *next;
         wl_list_for_each_safe(entry, next, &input->cursor_surface->current_outputs, link) {
@@ -254,9 +257,9 @@ static void leave_cursor_surface(struct seaside_tty_input *input) {
 
 static void handle_cursor_surface_destroy(struct wl_listener *listener, void *data) noexcept {
     (void)data;
-    struct seaside_tty_input *input = wl_container_of(listener, input, cursor_surface_destroy);
+    TtyInputState *input = wl_container_of(listener, input, cursor_surface_destroy);
     forget_cursor_surface(input);
-    input->callbacks.cursor_shape(input->data, nullptr);
+    input->observer->cursor_shape(nullptr);
 }
 
 static int32_t offset_hotspot(int32_t hotspot, int32_t offset) {
@@ -269,22 +272,21 @@ static int32_t offset_hotspot(int32_t hotspot, int32_t offset) {
 
 static void handle_cursor_surface_commit(struct wl_listener *listener, void *data) noexcept {
     (void)data;
-    struct seaside_tty_input *input = wl_container_of(listener, input, cursor_surface_commit);
+    TtyInputState *input = wl_container_of(listener, input, cursor_surface_commit);
     struct wlr_surface *surface = input->cursor_surface;
     input->cursor_hotspot_x = offset_hotspot(input->cursor_hotspot_x, surface->current.dx);
     input->cursor_hotspot_y = offset_hotspot(input->cursor_hotspot_y, surface->current.dy);
-    input->callbacks.cursor_surface(input->data, surface, input->cursor_hotspot_x,
-                                    input->cursor_hotspot_y);
+    input->observer->cursor_surface(surface, input->cursor_hotspot_x, input->cursor_hotspot_y);
 }
 
-static bool cursor_request_allowed(const struct seaside_tty_input *input,
-                                   struct wlr_seat_client *client, uint32_t serial) {
+static bool cursor_request_allowed(const TtyInputState *input, struct wlr_seat_client *client,
+                                   uint32_t serial) {
     return input->attached && input->seat && client == input->seat->pointer_state.focused_client &&
            wlr_seat_client_validate_event_serial(client, serial);
 }
 
 static void handle_cursor_surface_request(struct wl_listener *listener, void *data) noexcept {
-    struct seaside_tty_input *input = wl_container_of(listener, input, request_cursor_surface);
+    TtyInputState *input = wl_container_of(listener, input, request_cursor_surface);
     auto *event = static_cast<const wlr_seat_pointer_request_set_cursor_event *>(data);
     if (!cursor_request_allowed(input, event->seat_client, event->serial)) {
         return;
@@ -299,22 +301,21 @@ static void handle_cursor_surface_request(struct wl_listener *listener, void *da
     }
     input->cursor_hotspot_x = event->hotspot_x;
     input->cursor_hotspot_y = event->hotspot_y;
-    input->callbacks.cursor_surface(input->data, event->surface, event->hotspot_x,
-                                    event->hotspot_y);
+    input->observer->cursor_surface(event->surface, event->hotspot_x, event->hotspot_y);
 }
 
 static void handle_cursor_shape_request(struct wl_listener *listener, void *data) noexcept {
-    struct seaside_tty_input *input = wl_container_of(listener, input, request_cursor_shape);
+    TtyInputState *input = wl_container_of(listener, input, request_cursor_shape);
     auto *event = static_cast<const wlr_cursor_shape_manager_v1_request_set_shape_event *>(data);
     if (event->device_type != WLR_CURSOR_SHAPE_MANAGER_V1_DEVICE_TYPE_POINTER ||
         !cursor_request_allowed(input, event->seat_client, event->serial)) {
         return;
     }
     leave_cursor_surface(input);
-    input->callbacks.cursor_shape(input->data, wlr_cursor_shape_v1_name(event->shape));
+    input->observer->cursor_shape(wlr_cursor_shape_v1_name(event->shape));
 }
 
-static void forget_cursor_shapes(struct seaside_tty_input *input) {
+static void forget_cursor_shapes(TtyInputState *input) {
     wl_list_remove(&input->cursor_shapes_destroy.link);
     wl_list_remove(&input->request_cursor_shape.link);
     input->cursor_shapes = nullptr;
@@ -322,13 +323,13 @@ static void forget_cursor_shapes(struct seaside_tty_input *input) {
 
 static void handle_cursor_shapes_destroy(struct wl_listener *listener, void *data) noexcept {
     (void)data;
-    struct seaside_tty_input *input = wl_container_of(listener, input, cursor_shapes_destroy);
+    TtyInputState *input = wl_container_of(listener, input, cursor_shapes_destroy);
     forget_cursor_shapes(input);
 }
 
-void seaside_tty_input_cursor_presented(struct seaside_tty_input *input, struct wlr_output *output,
-                                        const struct timespec *when) {
-    struct wlr_surface *surface = input ? input->cursor_surface : nullptr;
+void TtyInput::cursor_presented(struct wlr_output *output, const struct timespec *when) noexcept {
+    auto *input = state_.get();
+    struct wlr_surface *surface = input->cursor_surface;
     if (!surface || !output || !when) {
         return;
     }
@@ -345,11 +346,11 @@ void seaside_tty_input_cursor_presented(struct seaside_tty_input *input, struct 
 }
 
 static void handle_pointer_focus_change(struct wl_listener *listener, void *data) noexcept {
-    struct seaside_tty_input *input = wl_container_of(listener, input, pointer_focus_change);
+    TtyInputState *input = wl_container_of(listener, input, pointer_focus_change);
     auto *event = static_cast<const wlr_seat_pointer_focus_change_event *>(data);
-    if (input->callbacks.cursor_shape) {
+    if (input->options.client_cursor) {
         leave_cursor_surface(input);
-        input->callbacks.cursor_shape(input->data, nullptr);
+        input->observer->cursor_shape(nullptr);
     }
     if (input->constraint && input->constraint->surface != event->new_surface) {
         leave_constraint(input, true);
@@ -358,7 +359,7 @@ static void handle_pointer_focus_change(struct wl_listener *listener, void *data
 }
 
 static void handle_new_constraint(struct wl_listener *listener, void *data) noexcept {
-    struct seaside_tty_input *input = wl_container_of(listener, input, new_constraint);
+    TtyInputState *input = wl_container_of(listener, input, new_constraint);
     auto *constraint = static_cast<wlr_pointer_constraint_v1 *>(data);
     if (constraint->seat == input->seat &&
         constraint->surface == input->seat->pointer_state.focused_surface) {
@@ -369,7 +370,7 @@ static void handle_new_constraint(struct wl_listener *listener, void *data) noex
 
 static void handle_constraints_destroy(struct wl_listener *listener, void *data) noexcept {
     (void)data;
-    struct seaside_tty_input *input = wl_container_of(listener, input, constraints_destroy);
+    TtyInputState *input = wl_container_of(listener, input, constraints_destroy);
     leave_constraint(input, false);
     clear_pointer_surface_watch(input);
     wl_list_remove(&input->constraints_destroy.link);
@@ -379,12 +380,12 @@ static void handle_constraints_destroy(struct wl_listener *listener, void *data)
 
 static void handle_relative_pointer_destroy(struct wl_listener *listener, void *data) noexcept {
     (void)data;
-    struct seaside_tty_input *input = wl_container_of(listener, input, relative_pointer_destroy);
+    TtyInputState *input = wl_container_of(listener, input, relative_pointer_destroy);
     wl_list_remove(&input->relative_pointer_destroy.link);
     input->relative_pointer = nullptr;
 }
 
-static void refresh_focus(struct seaside_tty_input *input) {
+static void refresh_focus(TtyInputState *input) {
     if (!input->seat) {
         return;
     }
@@ -399,8 +400,8 @@ static void refresh_focus(struct seaside_tty_input *input) {
     refresh_constraint(input);
 }
 
-void seaside_tty_input_set_focus(struct seaside_tty_input *input, struct wlr_surface *surface) {
-    if (!input || !input->seat || input->focus == surface) {
+static void set_keyboard_focus(TtyInputState *input, wlr_surface *surface) noexcept {
+    if (!input->seat || input->focus == surface) {
         return;
     }
     seaside_text_input_restore_keyboard(input->text_input);
@@ -413,17 +414,21 @@ void seaside_tty_input_set_focus(struct seaside_tty_input *input, struct wlr_sur
     refresh_focus(input);
 }
 
+void TtyInput::set_focus(wlr_surface *surface) noexcept {
+    set_keyboard_focus(state_.get(), surface);
+}
+
 static void handle_focus_destroy(struct wl_listener *listener, void *data) noexcept {
     (void)data;
-    struct seaside_tty_input *input = wl_container_of(listener, input, focus_destroy);
-    seaside_tty_input_set_focus(input, nullptr);
+    TtyInputState *input = wl_container_of(listener, input, focus_destroy);
+    set_keyboard_focus(input, nullptr);
 }
 
-struct wlr_seat *seaside_tty_input_get_seat(const struct seaside_tty_input *input) {
-    return input ? input->seat : nullptr;
+wlr_seat *TtyInput::seat() const noexcept {
+    return state_->seat;
 }
 
-static void refresh_capabilities(struct seaside_tty_input *input) {
+static void refresh_capabilities(TtyInputState *input) {
     if (!input->seat) {
         return;
     }
@@ -441,7 +446,7 @@ static void refresh_capabilities(struct seaside_tty_input *input) {
     refresh_focus(input);
 }
 
-static void cancel_drag(struct wlr_seat *seat) {
+static void cancel_seat_drag(struct wlr_seat *seat) {
     struct wlr_drag *drag = seat ? seat->drag : nullptr;
     if (!drag) {
         return;
@@ -453,18 +458,19 @@ static void cancel_drag(struct wlr_seat *seat) {
     }
 }
 
-void seaside_tty_input_cancel_drag(struct seaside_tty_input *input) {
-    cancel_drag(input ? input->seat : nullptr);
+void TtyInput::cancel_drag() noexcept {
+    cancel_seat_drag(state_->seat);
 }
 
-void seaside_tty_input_cancel_drag_from(struct seaside_tty_input *input, struct wlr_surface *root) {
-    if (input && input->drag_origin && wlr_surface_get_root_surface(input->drag_origin) == root) {
-        seaside_tty_input_cancel_drag(input);
+void TtyInput::cancel_drag_from(wlr_surface *root) noexcept {
+    auto *input = state_.get();
+    if (input->drag_origin && wlr_surface_get_root_surface(input->drag_origin) == root) {
+        cancel_seat_drag(input->seat);
     }
 }
 
 static void remove_device(struct tty_device *device) {
-    struct seaside_tty_input *input = device->input;
+    TtyInputState *input = device->input;
     wl_list_remove(&device->link);
     wl_list_remove(&device->destroy.link);
     if (!device->keyboard) {
@@ -477,7 +483,7 @@ static void remove_device(struct tty_device *device) {
             input->pointer_grab_device = nullptr;
             if (input->seat && input->seat->drag) {
                 const uint32_t button = input->seat->pointer_state.grab_button;
-                seaside_tty_input_cancel_drag(input);
+                cancel_seat_drag(input->seat);
                 // Clear the held seat button after cancelling, so an unplug
                 // cannot perform the drop or block hover on surviving devices.
                 wlr_seat_pointer_notify_button(input->seat, monotonic_msec(), button,
@@ -498,12 +504,10 @@ static void remove_device(struct tty_device *device) {
         if (input->gesture_device == device) {
             input->gesture_device = nullptr;
             input->gesture_released = false;
-            if (input->callbacks.pointer_cancelled) {
-                input->callbacks.pointer_cancelled(input->data);
-            }
+            input->observer->pointer_cancelled();
         }
         if (old_consumed > 0 && input->consumed_button_count == 0) {
-            seaside_tty_input_refresh_pointer(input);
+            refresh_pointer_focus(input);
         }
     } else {
         if (device->direct_key) {
@@ -524,30 +528,29 @@ static void handle_device_destroy(struct wl_listener *listener, void *data) noex
     remove_device(device);
 }
 
-static uint64_t update_pointer_target(struct seaside_tty_input *input, uint32_t time_msec) {
+static uint64_t update_pointer_target(TtyInputState *input, uint32_t time_msec) {
     struct wlr_seat *seat = input->seat;
     if (!input->attached || !seat || input->snapshot.pointers == 0 ||
-        !input->callbacks.pointer_target || input->consumed_button_count > 0) {
+        !input->options.pointer_targets || input->consumed_button_count > 0) {
         return 0;
     }
     // Wayland keeps implicit button grabs on the original pointer surface.
     // Popup and other explicit grabs instead choose which events to forward.
     const bool implicit_grab =
         seat->pointer_state.button_count > 0 && !wlr_seat_pointer_has_grab(seat);
-    struct seaside_tty_pointer_target target = {};
+    TtyPointerTarget target = {};
     if (input->constraint) {
         target.surface = input->constraint->surface;
-        if (!input->callbacks.pointer_target(input->data, &target) ||
+        if (!input->observer->pointer_target(target) ||
             !constraint_contains(input->constraint, target.sx, target.sy)) {
             leave_constraint(input, true);
-            target = seaside_tty_pointer_target{};
+            target = TtyPointerTarget{};
         }
     }
     if (!input->constraint) {
         target.surface = implicit_grab ? seat->pointer_state.focused_surface : nullptr;
-        if ((!implicit_grab || target.surface) &&
-            !input->callbacks.pointer_target(input->data, &target)) {
-            target = seaside_tty_pointer_target{};
+        if ((!implicit_grab || target.surface) && !input->observer->pointer_target(target)) {
+            target = TtyPointerTarget{};
         }
     }
     if (target.surface) {
@@ -562,35 +565,39 @@ static uint64_t update_pointer_target(struct seaside_tty_input *input, uint32_t 
     return target.window_id;
 }
 
-void seaside_tty_input_refresh_pointer(struct seaside_tty_input *input) {
-    if (input && input->attached && input->seat) {
+static void refresh_pointer_focus(TtyInputState *input) noexcept {
+    if (input->attached && input->seat) {
         update_pointer_target(input, monotonic_msec());
         wlr_seat_pointer_notify_frame(input->seat);
     }
 }
 
+void TtyInput::refresh_pointer() noexcept {
+    refresh_pointer_focus(state_.get());
+}
+
 static void handle_pointer_grab_begin(struct wl_listener *listener, void *data) noexcept {
     (void)data;
-    struct seaside_tty_input *input = wl_container_of(listener, input, pointer_grab_begin);
+    TtyInputState *input = wl_container_of(listener, input, pointer_grab_begin);
     refresh_constraint(input);
 }
 
 static void handle_pointer_grab_end(struct wl_listener *listener, void *data) noexcept {
     (void)data;
-    struct seaside_tty_input *input = wl_container_of(listener, input, pointer_grab_end);
+    TtyInputState *input = wl_container_of(listener, input, pointer_grab_end);
     if (!input->seat->drag) {
-        seaside_tty_input_refresh_pointer(input);
+        refresh_pointer_focus(input);
     }
 }
 
 static void handle_keyboard_grab_end(struct wl_listener *listener, void *data) noexcept {
     (void)data;
-    struct seaside_tty_input *input = wl_container_of(listener, input, keyboard_grab_end);
+    TtyInputState *input = wl_container_of(listener, input, keyboard_grab_end);
     refresh_focus(input);
 }
 
 static void handle_selection(struct wl_listener *listener, void *data) noexcept {
-    struct seaside_tty_input *input = wl_container_of(listener, input, request_selection);
+    TtyInputState *input = wl_container_of(listener, input, request_selection);
     auto *event = static_cast<const wlr_seat_request_set_selection_event *>(data);
     struct wlr_seat *seat = input->seat;
     /* wlroots has validated the serial against the requesting seat client.
@@ -601,29 +608,29 @@ static void handle_selection(struct wl_listener *listener, void *data) noexcept 
 }
 
 static void handle_primary_selection(struct wl_listener *listener, void *data) noexcept {
-    struct seaside_tty_input *input = wl_container_of(listener, input, request_primary_selection);
+    TtyInputState *input = wl_container_of(listener, input, request_primary_selection);
     auto *event = static_cast<const wlr_seat_request_set_primary_selection_event *>(data);
     wlr_seat_set_primary_selection(input->seat, event->source, event->serial);
 }
 
 static void handle_drag_destroy(struct wl_listener *listener, void *data) noexcept {
     (void)data;
-    struct seaside_tty_input *input = wl_container_of(listener, input, drag_destroy);
+    TtyInputState *input = wl_container_of(listener, input, drag_destroy);
     wl_list_remove(&input->drag_destroy.link);
     wl_list_remove(&input->drag_origin_destroy.link);
     input->drag_origin = nullptr;
     /* wlroots ends its pointer grab before sending the data-device leave. */
-    seaside_tty_input_refresh_pointer(input);
+    refresh_pointer_focus(input);
 }
 
 static void handle_drag_origin_destroy(struct wl_listener *listener, void *data) noexcept {
     (void)data;
-    struct seaside_tty_input *input = wl_container_of(listener, input, drag_origin_destroy);
-    seaside_tty_input_cancel_drag(input);
+    TtyInputState *input = wl_container_of(listener, input, drag_origin_destroy);
+    cancel_seat_drag(input->seat);
 }
 
 static void handle_drag_request(struct wl_listener *listener, void *data) noexcept {
-    struct seaside_tty_input *input = wl_container_of(listener, input, request_drag);
+    TtyInputState *input = wl_container_of(listener, input, request_drag);
     auto *event = static_cast<const wlr_seat_request_start_drag_event *>(data);
     struct wlr_drag *drag = event->drag;
     struct wlr_seat *seat = input->seat;
@@ -637,10 +644,10 @@ static void handle_drag_request(struct wl_listener *listener, void *data) noexce
         wl_signal_add(&drag->events.destroy, &input->drag_destroy);
         wl_signal_add(&event->origin->events.destroy, &input->drag_origin_destroy);
         input->drag_origin = event->origin;
-        if (drag->icon && input->callbacks.drag_icon) {
-            input->callbacks.drag_icon(input->data, drag->icon);
+        if (drag->icon) {
+            input->observer->drag_icon(drag->icon);
         }
-        seaside_tty_input_refresh_pointer(input);
+        refresh_pointer_focus(input);
     } else if (unused_source) {
         wlr_data_source_destroy(drag->source);
     } else {
@@ -650,24 +657,22 @@ static void handle_drag_request(struct wl_listener *listener, void *data) noexce
     }
 }
 
-static void move_pointer(struct seaside_tty_input *input, uint32_t time_msec, bool absolute,
-                         double x, double y) {
+static void move_pointer(TtyInputState *input, uint32_t time_msec, bool absolute, double x,
+                         double y) {
     if (!isfinite(x) || !isfinite(y) || pointer_locked(input)) {
         return;
     }
     enum seaside_pointer_motion kind =
         absolute ? SEASIDE_POINTER_ABSOLUTE : SEASIDE_POINTER_RELATIVE;
     if (input->constraint) {
-        seaside_tty_pointer_target origin{};
+        TtyPointerTarget origin{};
         origin.surface = input->constraint->surface;
-        if (!input->callbacks.pointer_target(input->data, &origin) ||
+        if (!input->observer->pointer_target(origin) ||
             !constraint_contains(input->constraint, origin.sx, origin.sy)) {
             leave_constraint(input, true);
         } else {
             double dx = x, dy = y;
-            if (absolute &&
-                (!input->callbacks.pointer_absolute_delta ||
-                 !input->callbacks.pointer_absolute_delta(input->data, x, y, &dx, &dy))) {
+            if (absolute && !input->observer->pointer_absolute_delta(x, y, dx, dy)) {
                 return;
             }
             if (!wlr_region_confine(constraint_region(input->constraint), origin.sx, origin.sy,
@@ -679,43 +684,41 @@ static void move_pointer(struct seaside_tty_input *input, uint32_t time_msec, bo
             y -= origin.sy;
         }
     }
-    if (input->callbacks.motion) {
-        input->callbacks.motion(input->data, kind, x, y);
-    }
+    input->observer->motion(kind, x, y);
     update_pointer_target(input, time_msec);
 }
 
 static void handle_relative_motion(struct wl_listener *listener, void *data) noexcept {
     struct tty_device *device = wl_container_of(listener, device, event);
     auto *event = static_cast<const wlr_pointer_motion_event *>(data);
-    struct seaside_tty_input *input = device->input;
+    TtyInputState *input = device->input;
     if (input->seat && input->relative_pointer && input->consumed_button_count == 0) {
         wlr_relative_pointer_manager_v1_send_relative_motion(
             input->relative_pointer, input->seat, (uint64_t)event->time_msec * 1000, event->delta_x,
             event->delta_y, event->unaccel_dx, event->unaccel_dy);
     }
     move_pointer(input, event->time_msec, false, event->delta_x, event->delta_y);
-    if (input->callbacks.activity && isfinite(event->delta_x) && isfinite(event->delta_y)) {
-        input->callbacks.activity(input->data, true);
+    if (isfinite(event->delta_x) && isfinite(event->delta_y)) {
+        input->observer->input_activity(true);
     }
 }
 
 static void handle_absolute_motion(struct wl_listener *listener, void *data) noexcept {
     struct tty_device *device = wl_container_of(listener, device, absolute_motion);
     auto *event = static_cast<const wlr_pointer_motion_absolute_event *>(data);
-    struct seaside_tty_input *input = device->input;
+    TtyInputState *input = device->input;
     move_pointer(input, event->time_msec, true, event->x, event->y);
-    if (input->callbacks.activity && isfinite(event->x) && isfinite(event->y)) {
-        input->callbacks.activity(input->data, true);
+    if (isfinite(event->x) && isfinite(event->y)) {
+        input->observer->input_activity(true);
     }
 }
 
-uint32_t seaside_tty_input_begin_client_gesture(struct seaside_tty_input *input,
-                                                struct wlr_seat_client *client,
-                                                struct wlr_surface *root, uint32_t serial) {
-    struct wlr_seat *seat = input ? input->seat : nullptr;
+uint32_t TtyInput::begin_client_gesture(struct wlr_seat_client *client, struct wlr_surface *root,
+                                        uint32_t serial) noexcept {
+    auto *input = state_.get();
+    struct wlr_seat *seat = input->seat;
     if (!seat || !input->attached || !client || client->seat != seat || !root ||
-        !input->pointer_grab_device || !input->callbacks.pointer_button || input->constraint ||
+        !input->pointer_grab_device || !input->options.pointer_targets || input->constraint ||
         input->consumed_button_count > 0 || wlr_seat_pointer_has_grab(seat)) {
         return 0;
     }
@@ -744,7 +747,7 @@ uint32_t seaside_tty_input_begin_client_gesture(struct seaside_tty_input *input,
 static void handle_pointer_button(struct wl_listener *listener, void *data) noexcept {
     struct tty_device *device = wl_container_of(listener, device, button);
     auto *event = static_cast<const wlr_pointer_button_event *>(data);
-    struct seaside_tty_input *input = device->input;
+    TtyInputState *input = device->input;
     struct wlr_seat *seat = input->seat;
     if (!seat) {
         return;
@@ -752,8 +755,8 @@ static void handle_pointer_button(struct wl_listener *listener, void *data) noex
     const uint32_t button = event->button;
     const bool pressed = event->state == WL_POINTER_BUTTON_STATE_PRESSED;
     /* Device removal can synthesize a release without local input. */
-    if (pressed && input->callbacks.activity) {
-        input->callbacks.activity(input->data, true);
+    if (pressed) {
+        input->observer->input_activity(true);
     }
     if (button < KEY_CNT && device->suppressed_drag_buttons[button]) {
         device->suppressed_drag_buttons[button] = pressed;
@@ -802,10 +805,10 @@ static void handle_pointer_button(struct wl_listener *listener, void *data) noex
     struct wlr_surface *hovered = seat->pointer_state.focused_surface;
     struct wlr_surface *root = hovered ? wlr_surface_get_root_surface(hovered) : nullptr;
     const bool input_popup = root && wlr_input_popup_surface_v2_try_from_wlr_surface(root);
-    if (input->callbacks.pointer_button && !wlr_seat_pointer_has_grab(seat) && !input->constraint &&
+    if (input->options.pointer_targets && !wlr_seat_pointer_has_grab(seat) && !input->constraint &&
         !input_popup && (seat->pointer_state.button_count == 0 || !pressed) &&
-        input->callbacks.pointer_button(input->data, window, button, pressed, input->modifiers) &&
-        pressed && button < KEY_CNT) {
+        input->observer->pointer_button(window, button, pressed, input->modifiers) && pressed &&
+        button < KEY_CNT) {
         input->gesture_device = device;
         input->gesture_button = button;
         device->consumed_buttons[button] = true;
@@ -826,10 +829,8 @@ static void handle_pointer_button(struct wl_listener *listener, void *data) noex
 static void handle_pointer_axis(struct wl_listener *listener, void *data) noexcept {
     struct tty_device *device = wl_container_of(listener, device, axis);
     auto *event = static_cast<const wlr_pointer_axis_event *>(data);
-    struct seaside_tty_input *input = device->input;
-    if (input->callbacks.activity) {
-        input->callbacks.activity(input->data, true);
-    }
+    TtyInputState *input = device->input;
+    input->observer->input_activity(true);
     if (input->seat && input->consumed_button_count == 0) {
         update_pointer_target(input, event->time_msec);
         double delta = event->delta;
@@ -850,7 +851,7 @@ static void handle_pointer_axis(struct wl_listener *listener, void *data) noexce
 static void handle_pointer_frame(struct wl_listener *listener, void *data) noexcept {
     (void)data;
     struct tty_device *device = wl_container_of(listener, device, frame);
-    struct seaside_tty_input *input = device->input;
+    TtyInputState *input = device->input;
     if (input->seat) {
         if (device->drag_release_pending) {
             device->drag_release_pending = false;
@@ -866,7 +867,7 @@ static void handle_pointer_frame(struct wl_listener *listener, void *data) noexc
             --input->consumed_button_count;
             input->gesture_device = nullptr;
             input->gesture_released = false;
-            input->callbacks.pointer_button(input->data, 0, button, false, input->modifiers);
+            input->observer->pointer_button(0, button, false, input->modifiers);
             update_pointer_target(input, monotonic_msec());
         }
         wlr_seat_pointer_notify_frame(input->seat);
@@ -876,21 +877,20 @@ static void handle_pointer_frame(struct wl_listener *listener, void *data) noexc
 static void handle_cursor_fixture_key(struct wl_listener *listener, void *data) noexcept {
     struct tty_device *device = wl_container_of(listener, device, event);
     auto *event = static_cast<const wlr_keyboard_key_event *>(data);
-    struct seaside_tty_input *input = device->input;
-    if (input->callbacks.exit_requested && event->keycode == KEY_ESC &&
-        event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
-        input->callbacks.exit_requested(input->data);
+    TtyInputState *input = device->input;
+    if (event->keycode == KEY_ESC && event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
+        input->observer->exit_requested();
     }
 }
 
-static bool launch_shortcut(struct seaside_tty_input *input, uint32_t keycode) {
+static bool launch_shortcut(TtyInputState *input, uint32_t keycode) {
     struct wlr_keyboard *keyboard = &input->group->keyboard;
-    return input->callbacks.launch_requested &&
+    return input->options.fixture_launch &&
            wlr_keyboard_get_modifiers(keyboard) == WLR_MODIFIER_LOGO &&
            xkb_state_key_get_one_sym(keyboard->xkb_state, keycode + 8) == XKB_KEY_Return;
 }
 
-static uint32_t shortcut_modifiers(const struct seaside_tty_input *input) {
+static uint32_t shortcut_modifiers(const TtyInputState *input) {
     const struct wlr_keyboard *keyboard = &input->group->keyboard;
     const xkb_mod_mask_t active =
         xkb_state_serialize_mods(input->shortcut_state, XKB_STATE_MODS_DEPRESSED) |
@@ -910,8 +910,8 @@ static uint8_t binding_modifiers(uint32_t state) {
            ((state & WLR_MODIFIER_ALT) ? 4 : 0) | ((state & WLR_MODIFIER_SHIFT) ? 8 : 0);
 }
 
-static bool configured_shortcut(struct seaside_tty_input *input, uint32_t keycode) {
-    if (!input->callbacks.shortcut_pressed) {
+static bool configured_shortcut(TtyInputState *input, uint32_t keycode) {
+    if (!input->shortcut_state) {
         return false;
     }
     const uint32_t state = shortcut_modifiers(input);
@@ -923,7 +923,7 @@ static bool configured_shortcut(struct seaside_tty_input *input, uint32_t keycod
     const xkb_keycode_t code = keycode + 8;
     const uint8_t modifiers = binding_modifiers(state);
     const xkb_keysym_t effective = xkb_state_key_get_one_sym(xkb, code);
-    if (input->callbacks.shortcut_pressed(input->data, modifiers, effective)) {
+    if (input->observer->shortcut_pressed(modifiers, effective)) {
         return true;
     }
 
@@ -936,7 +936,7 @@ static bool configured_shortcut(struct seaside_tty_input *input, uint32_t keycod
         xkb_keymap_key_get_syms_by_level(xkb_state_get_keymap(xkb), code, layout, 0, &level_zero) ==
             1) {
         base = level_zero[0];
-        if (base != effective && input->callbacks.shortcut_pressed(input->data, modifiers, base)) {
+        if (base != effective && input->observer->shortcut_pressed(modifiers, base)) {
             return true;
         }
     }
@@ -946,23 +946,23 @@ static bool configured_shortcut(struct seaside_tty_input *input, uint32_t keycod
     const xkb_keysym_t upper = xkb_keysym_to_upper(effective);
     const xkb_keysym_t opposite = upper != effective ? upper : xkb_keysym_to_lower(effective);
     return opposite != effective && opposite != base &&
-           input->callbacks.shortcut_pressed(input->data, modifiers, opposite);
+           input->observer->shortcut_pressed(modifiers, opposite);
 }
 
-static void update_binding_modifiers(struct seaside_tty_input *input) {
+static void update_binding_modifiers(TtyInputState *input) {
     if (!input->shortcut_state) {
         return;
     }
     const uint8_t modifiers = binding_modifiers(shortcut_modifiers(input));
     if (input->modifiers != modifiers) {
         input->modifiers = modifiers;
-        if (input->attached && input->callbacks.modifiers_changed) {
-            input->callbacks.modifiers_changed(input->data, modifiers);
+        if (input->attached) {
+            input->observer->modifiers_changed(modifiers);
         }
     }
 }
 
-static void deliver_key(struct seaside_tty_input *input, struct wlr_keyboard_key_event event) {
+static void deliver_key(TtyInputState *input, struct wlr_keyboard_key_event event) {
     if (event.keycode >= KEY_CNT) {
         return;
     }
@@ -999,15 +999,15 @@ static void deliver_key(struct seaside_tty_input *input, struct wlr_keyboard_key
 }
 
 static void handle_group_key(struct wl_listener *listener, void *data) noexcept {
-    struct seaside_tty_input *input = wl_container_of(listener, input, group_key);
+    TtyInputState *input = wl_container_of(listener, input, group_key);
     auto *event = static_cast<const wlr_keyboard_key_event *>(data);
     if (event->keycode >= KEY_CNT) {
         return;
     }
     const bool pressed = event->state == WL_KEYBOARD_KEY_STATE_PRESSED;
     // A release without an XKB update can come from keyboard teardown.
-    if ((pressed || event->update_state) && input->callbacks.activity) {
-        input->callbacks.activity(input->data, false);
+    if ((pressed || event->update_state)) {
+        input->observer->input_activity(false);
     }
     const bool handled =
         pressed && !input->consumed[event->keycode] && configured_shortcut(input, event->keycode);
@@ -1026,13 +1026,13 @@ static void handle_group_key(struct wl_listener *listener, void *data) noexcept 
         if (event->keycode == KEY_ESC && input->modifiers == 0 && input->seat &&
             input->seat->drag) {
             input->consumed[event->keycode] = true;
-            seaside_tty_input_cancel_drag(input);
+            cancel_seat_drag(input->seat);
             return;
         }
         if (launch_shortcut(input, event->keycode)) {
             input->consumed[event->keycode] = true;
             ++input->snapshot.launch_requests;
-            input->callbacks.launch_requested(input->data);
+            input->observer->launch_requested();
             return;
         }
     }
@@ -1044,8 +1044,7 @@ static void handle_group_key(struct wl_listener *listener, void *data) noexcept 
     deliver_key(input, *event);
 }
 
-static void deliver_modifiers(struct seaside_tty_input *input,
-                              const struct wlr_keyboard_modifiers *mods) {
+static void deliver_modifiers(TtyInputState *input, const struct wlr_keyboard_modifiers *mods) {
     wlr_keyboard_notify_modifiers(&input->client_keyboard, mods->depressed, mods->latched,
                                   mods->locked, mods->group);
     if (input->seat && !seaside_text_input_modifiers(input->text_input, &input->client_keyboard)) {
@@ -1055,13 +1054,13 @@ static void deliver_modifiers(struct seaside_tty_input *input,
 }
 
 static void handle_group_modifiers(struct wl_listener *listener, void *data) noexcept {
-    struct seaside_tty_input *input = wl_container_of(listener, input, group_modifiers);
+    TtyInputState *input = wl_container_of(listener, input, group_modifiers);
     auto *keyboard = static_cast<const wlr_keyboard *>(data);
     deliver_modifiers(input, &keyboard->modifiers);
 }
 
 static void handle_group_enter(struct wl_listener *listener, void *data) noexcept {
-    struct seaside_tty_input *input = wl_container_of(listener, input, group_enter);
+    TtyInputState *input = wl_container_of(listener, input, group_enter);
     if (!input->shortcut_state) {
         return;
     }
@@ -1073,7 +1072,7 @@ static void handle_group_enter(struct wl_listener *listener, void *data) noexcep
 }
 
 static void handle_group_leave(struct wl_listener *listener, void *data) noexcept {
-    struct seaside_tty_input *input = wl_container_of(listener, input, group_leave);
+    TtyInputState *input = wl_container_of(listener, input, group_leave);
     auto *keys = static_cast<const wl_array *>(data);
     const uint32_t time_msec = monotonic_msec();
     for (const uint32_t key : wl_array_span<uint32_t>(keys)) {
@@ -1099,7 +1098,8 @@ static void configure_pointer(struct libinput_device *device, double sensitivity
     }
 }
 
-void seaside_tty_input_set_sensitivity(struct seaside_tty_input *input, double sensitivity) {
+void TtyInput::set_sensitivity(double sensitivity) noexcept {
+    auto *input = state_.get();
     if (!input) {
         return;
     }
@@ -1118,8 +1118,9 @@ static void configure_scroll(struct tty_device *device, bool inverse) {
     device->invert_axis = inverse && !configured;
 }
 
-void seaside_tty_input_set_inverse_scroll(struct seaside_tty_input *input, bool inverse) {
-    if (!input || input->inverse_scroll == inverse) {
+void TtyInput::set_inverse_scroll(bool inverse) noexcept {
+    auto *input = state_.get();
+    if (input->inverse_scroll == inverse) {
         return;
     }
     input->inverse_scroll = inverse;
@@ -1132,7 +1133,7 @@ void seaside_tty_input_set_inverse_scroll(struct seaside_tty_input *input, bool 
 }
 
 static void handle_new_input(struct wl_listener *listener, void *data) noexcept {
-    struct seaside_tty_input *input = wl_container_of(listener, input, new_input);
+    TtyInputState *input = wl_container_of(listener, input, new_input);
     auto *base = static_cast<wlr_input_device *>(data);
     if (base->type != WLR_INPUT_DEVICE_POINTER && base->type != WLR_INPUT_DEVICE_KEYBOARD) {
         return;
@@ -1175,7 +1176,7 @@ static void handle_new_input(struct wl_listener *listener, void *data) noexcept 
         wl_signal_add(&pointer->events.frame, &device->frame);
         if (++input->snapshot.pointers == 1) {
             refresh_capabilities(input);
-            seaside_tty_input_refresh_pointer(input);
+            refresh_pointer_focus(input);
         }
     } else {
         if (!input->group) {
@@ -1190,14 +1191,14 @@ static void handle_new_input(struct wl_listener *listener, void *data) noexcept 
     }
 }
 
-static void detach(struct seaside_tty_input *input) {
+static void detach(TtyInputState *input) {
     if (!input->attached) {
         return;
     }
     input->attached = false;
-    seaside_tty_input_cancel_drag(input);
+    cancel_seat_drag(input->seat);
     leave_constraint(input, true);
-    seaside_tty_input_set_focus(input, nullptr);
+    set_keyboard_focus(input, nullptr);
     wl_list_remove(&input->new_input.link);
     wl_list_remove(&input->backend_destroy.link);
     /* Backend and per-device destroy signals can arrive in either order.
@@ -1210,30 +1211,37 @@ static void detach(struct seaside_tty_input *input) {
 
 static void handle_backend_destroy(struct wl_listener *listener, void *data) noexcept {
     (void)data;
-    struct seaside_tty_input *input = wl_container_of(listener, input, backend_destroy);
+    TtyInputState *input = wl_container_of(listener, input, backend_destroy);
     detach(input);
 }
 
-struct seaside_tty_input *
-seaside_tty_input_create(struct wlr_backend *backend,
-                         const struct seaside_tty_input_callbacks *callbacks, void *data) {
-    if (!backend || !callbacks) {
-        return nullptr;
+TtyInput::TtyInput(std::unique_ptr<TtyInputState> state) noexcept : state_(std::move(state)) {}
+
+std::expected<std::unique_ptr<TtyInput>, TtyInputError>
+TtyInput::create(wlr_backend *backend, TtyInputObserver &observer,
+                 TtyInputOptions options) noexcept {
+    if (!backend) {
+        return std::unexpected(TtyInputError::invalid_backend);
     }
-    struct seaside_tty_input *input = new (std::nothrow) seaside_tty_input{};
+    std::unique_ptr<TtyInputState> state(new (std::nothrow) TtyInputState{});
+    if (!state) {
+        return std::unexpected(TtyInputError::allocation);
+    }
+    std::unique_ptr<TtyInput> input(new (std::nothrow) TtyInput(std::move(state)));
     if (!input) {
-        return nullptr;
+        return std::unexpected(TtyInputError::allocation);
     }
-    input->callbacks = *callbacks;
-    input->data = data;
-    wl_list_init(&input->devices);
-    wl_list_init(&input->focus_destroy.link);
-    wl_list_init(&input->pointer_surface_commit.link);
-    input->new_input.notify = handle_new_input;
-    input->backend_destroy.notify = handle_backend_destroy;
-    wl_signal_add(&backend->events.new_input, &input->new_input);
-    wl_signal_add(&backend->events.destroy, &input->backend_destroy);
-    input->attached = true;
+    auto &attached = *input->state_;
+    attached.observer = &observer;
+    attached.options = options;
+    wl_list_init(&attached.devices);
+    wl_list_init(&attached.focus_destroy.link);
+    wl_list_init(&attached.pointer_surface_commit.link);
+    attached.new_input.notify = handle_new_input;
+    attached.backend_destroy.notify = handle_backend_destroy;
+    wl_signal_add(&backend->events.new_input, &attached.new_input);
+    wl_signal_add(&backend->events.destroy, &attached.backend_destroy);
+    attached.attached = true;
     return input;
 }
 
@@ -1242,7 +1250,7 @@ static const struct wlr_keyboard_impl client_keyboard_impl = {.name = "seaside-s
 
 static void handle_seat_destroy(struct wl_listener *listener, void *data) noexcept {
     (void)data;
-    struct seaside_tty_input *input = wl_container_of(listener, input, seat_destroy);
+    TtyInputState *input = wl_container_of(listener, input, seat_destroy);
     seaside_text_input_destroy(input->text_input);
     input->text_input = nullptr;
     leave_constraint(input, false);
@@ -1250,7 +1258,7 @@ static void handle_seat_destroy(struct wl_listener *listener, void *data) noexce
     wl_list_remove(&input->pointer_focus_change.link);
     clear_pointer_surface_watch(input);
     leave_cursor_surface(input);
-    if (input->callbacks.cursor_surface && input->callbacks.cursor_shape) {
+    if (input->options.client_cursor) {
         wl_list_remove(&input->request_cursor_surface.link);
     }
     wl_list_remove(&input->pointer_grab_begin.link);
@@ -1264,15 +1272,15 @@ static void handle_seat_destroy(struct wl_listener *listener, void *data) noexce
     input->focus = nullptr;
     struct wlr_seat *seat = input->seat;
     input->seat = nullptr;
-    cancel_drag(seat);
+    cancel_seat_drag(seat);
     /* A chosen drop can outlive its grab. Retire the source before its
      * destroy callback could access the freed seat. */
     wlr_data_source_destroy(seat->drag_source);
 }
 
-bool seaside_tty_input_enable_keyboard(struct seaside_tty_input *input,
-                                       struct wl_display *display) {
-    if (!input || !display || !input->attached || input->group || input->snapshot.keyboards > 0) {
+bool TtyInput::enable_keyboard(struct wl_display *display) noexcept {
+    auto *input = state_.get();
+    if (!display || !input->attached || input->group || input->snapshot.keyboards > 0) {
         return false;
     }
     struct xkb_context *context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
@@ -1288,9 +1296,8 @@ bool seaside_tty_input_enable_keyboard(struct seaside_tty_input *input,
 
     struct wlr_keyboard_group *group = wlr_keyboard_group_create();
     wlr_keyboard_init(&input->client_keyboard, &client_keyboard_impl, "Seaside keyboard");
-    const bool needs_shortcut_state = input->callbacks.shortcut_pressed ||
-                                      input->callbacks.modifiers_changed ||
-                                      input->callbacks.pointer_button;
+    const bool needs_shortcut_state =
+        input->options.track_modifiers || input->options.pointer_targets;
     struct xkb_state *shortcut_state = needs_shortcut_state ? xkb_state_new(keymap) : nullptr;
     bool mapped = group && (!needs_shortcut_state || shortcut_state) &&
                   wlr_keyboard_set_keymap(&group->keyboard, keymap) &&
@@ -1298,14 +1305,13 @@ bool seaside_tty_input_enable_keyboard(struct seaside_tty_input *input,
     xkb_keymap_unref(keymap);
     struct wlr_seat *seat = mapped ? wlr_seat_create(display, "seat0") : nullptr;
     struct seaside_text_input *text_input =
-        seat ? seaside_text_input_create(display, seat, &input->client_keyboard, &input->callbacks,
-                                         input->data)
+        seat ? seaside_text_input_create(display, seat, &input->client_keyboard, *input->observer)
              : nullptr;
     struct wlr_relative_pointer_manager_v1 *relative_pointer = nullptr;
     struct wlr_pointer_constraints_v1 *constraints = nullptr;
     struct wlr_cursor_shape_manager_v1 *cursor_shapes = nullptr;
-    const bool needs_cursor = input->callbacks.cursor_shape && input->callbacks.cursor_surface;
-    if (seat && input->callbacks.pointer_target) {
+    const bool needs_cursor = input->options.client_cursor;
+    if (seat && input->options.pointer_targets) {
         relative_pointer = wlr_relative_pointer_manager_v1_create(display);
         constraints = wlr_pointer_constraints_v1_create(display);
     }
@@ -1313,7 +1319,7 @@ bool seaside_tty_input_enable_keyboard(struct seaside_tty_input *input,
         cursor_shapes = wlr_cursor_shape_manager_v1_create(display, 1);
     }
     if (!seat || !text_input ||
-        (input->callbacks.pointer_target && (!relative_pointer || !constraints)) ||
+        (input->options.pointer_targets && (!relative_pointer || !constraints)) ||
         (needs_cursor && !cursor_shapes) || !wlr_data_device_manager_create(display) ||
         !wlr_primary_selection_v1_device_manager_create(display) ||
         !wlr_ext_data_control_manager_v1_create(display, 1) ||
@@ -1385,39 +1391,36 @@ bool seaside_tty_input_enable_keyboard(struct seaside_tty_input *input,
     return true;
 }
 
-void seaside_tty_input_destroy(struct seaside_tty_input *input) {
-    if (input) {
-        detach(input);
-        wlr_seat_destroy(input->seat);
-        if (input->relative_pointer) {
-            wl_list_remove(&input->relative_pointer_destroy.link);
-        }
-        if (input->cursor_shapes) {
-            forget_cursor_shapes(input);
-        }
-        if (input->constraints) {
-            wl_list_remove(&input->constraints_destroy.link);
-            wl_list_remove(&input->new_constraint.link);
-        }
-        if (input->group) {
-            wl_list_remove(&input->group_key.link);
-            wl_list_remove(&input->group_modifiers.link);
-            wl_list_remove(&input->group_enter.link);
-            wl_list_remove(&input->group_leave.link);
-            wlr_keyboard_group_destroy(input->group);
-            wlr_keyboard_finish(&input->client_keyboard);
-            xkb_state_unref(input->shortcut_state);
-        }
-        delete input;
+TtyInput::~TtyInput() noexcept {
+    auto *input = state_.get();
+    detach(input);
+    wlr_seat_destroy(input->seat);
+    if (input->relative_pointer) {
+        wl_list_remove(&input->relative_pointer_destroy.link);
+    }
+    if (input->cursor_shapes) {
+        forget_cursor_shapes(input);
+    }
+    if (input->constraints) {
+        wl_list_remove(&input->constraints_destroy.link);
+        wl_list_remove(&input->new_constraint.link);
+    }
+    if (input->group) {
+        wl_list_remove(&input->group_key.link);
+        wl_list_remove(&input->group_modifiers.link);
+        wl_list_remove(&input->group_enter.link);
+        wl_list_remove(&input->group_leave.link);
+        wlr_keyboard_group_destroy(input->group);
+        wlr_keyboard_finish(&input->client_keyboard);
+        xkb_state_unref(input->shortcut_state);
     }
 }
 
-struct seaside_tty_input_snapshot
-seaside_tty_input_get_snapshot(const struct seaside_tty_input *input) {
-    if (!input) {
-        return seaside_tty_input_snapshot{};
-    }
-    struct seaside_tty_input_snapshot snapshot = input->snapshot;
+TtyInputSnapshot TtyInput::snapshot() const noexcept {
+    auto *input = state_.get();
+    TtyInputSnapshot snapshot = input->snapshot;
     snapshot.has_keyboard_focus = input->seat && input->seat->keyboard_state.focused_surface;
     return snapshot;
 }
+
+} // namespace seaside
