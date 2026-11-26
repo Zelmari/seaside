@@ -11,10 +11,8 @@ struct wlr_linux_dmabuf_v1;
 struct wlr_renderer;
 struct wlr_surface;
 
-/* Server ownership and capture tests wrap selected bridge symbols at link time. */
-#ifdef __cplusplus
+// The server ownership test wraps these definitions at link time.
 extern "C" {
-#endif
 
 struct wlr_allocator *seaside_wlr_allocator_create(struct wlr_backend *backend,
                                                    struct wlr_renderer *renderer);
@@ -23,15 +21,13 @@ bool seaside_wlr_renderer_init_display(struct wlr_renderer *renderer, struct wl_
                                        struct wlr_linux_dmabuf_v1 **dmabuf);
 struct wlr_compositor *seaside_wlr_compositor_create(struct wl_display *display,
                                                      struct wlr_renderer *renderer);
-bool seaside_wlr_surface_waits_for_sync_replacement(struct wlr_surface *surface);
 bool seaside_wlr_backend_start(struct wlr_backend *backend);
 void seaside_wlr_backend_destroy(struct wlr_backend *backend);
 void seaside_wlr_allocator_destroy(struct wlr_allocator *allocator);
-const char *seaside_wlr_renderer_name(struct wlr_renderer *renderer);
 void seaside_wlr_renderer_destroy(struct wlr_renderer *renderer);
-
-#ifdef __cplusplus
 }
-#endif
+
+bool seaside_wlr_surface_waits_for_sync_replacement(struct wlr_surface *surface);
+const char *seaside_wlr_renderer_name(struct wlr_renderer *renderer);
 
 #endif

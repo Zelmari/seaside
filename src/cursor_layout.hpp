@@ -17,10 +17,6 @@ enum seaside_pointer_motion {
     SEASIDE_POINTER_CONFINED,
 };
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 bool seaside_cursor_contains(struct seaside_cursor_box box, struct seaside_cursor_point point);
 struct seaside_cursor_point seaside_cursor_clamp(struct seaside_cursor_box box,
                                                  struct seaside_cursor_point point);
@@ -31,9 +27,5 @@ struct seaside_cursor_point
 seaside_cursor_route_relative(struct seaside_cursor_box current, struct seaside_cursor_point origin,
                               struct seaside_cursor_point requested,
                               const struct seaside_cursor_box *destination);
-
-#ifdef __cplusplus
-}
-#endif
 
 #endif

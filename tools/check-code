@@ -51,7 +51,7 @@ def main():
     args = parser.parse_args()
     build_dir = args.build_dir.resolve()
     formatted = sorted(
-        path for directory in ('src', 'tests/unit', 'tests/integration')
+        path for directory in ('src', 'tests/unit', 'tests/integration', 'tests/probe', 'tests/hardware', 'tools')
         for path in (ROOT / directory).rglob('*')
         if path.suffix in ('.c', '.h', '.cpp', '.hpp')
     )
@@ -78,8 +78,6 @@ def main():
         if not sources:
             raise ValueError('Compilation database contains no applicable project translation units')
         sources = sorted(sources)
-        # Retained legacy C clients/probes keep their existing formatting; all
-        # translation units still receive static analysis, including those C files.
         def run_check(command):
             print(f"Checking: {command[0]} {command[-1]}", flush=True)
             try:
