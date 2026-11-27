@@ -752,6 +752,11 @@ part7_native_client = executable('seaside-part7-native-client',
   ['tests/integration/part7_native_client.cpp', xdg_shell_client_header, xdg_shell_private_code],
   dependencies: wayland_client, install: false,
 )
+executable('seaside-frame-pacing-client',
+  ['tests/integration/frame_pacing_client.cpp', xdg_shell_client_header, xdg_shell_private_code,
+   display_protocols['presentation-time']],
+  dependencies: wayland_client, install: false,
+)
 wayland_input_protocols = [xdg_shell_client_header, xdg_shell_private_code]
 foreach protocol : [
   'unstable/text-input/text-input-unstable-v3',
