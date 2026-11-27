@@ -14,6 +14,13 @@ constexpr char selection[] = "selection";
 template <class T> using AppInfo = std::unique_ptr<T, decltype(&g_object_unref)>;
 using Text = std::unique_ptr<char, decltype(&g_free)>;
 using BrowserDefaults = std::array<std::string, browser_mime_types.size()>;
+using BrowserSupport = std::array<bool, browser_mime_types.size()>;
+
+struct BrowserEntry {
+    BrowserSupport supported{};
+    std::string message;
+};
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(BrowserEntry, supported, message)
 
 std::optional<std::string> value(GKeyFile *file, const char *group, const char *key) {
     const Text text(g_key_file_get_value(file, group, key, nullptr), g_free);
@@ -58,8 +65,7 @@ struct MimeEdit {
     bool external_override = false;
 };
 
-MimeEdit update_defaults(GKeyFile *file, const std::string &id,
-                         const std::array<bool, browser_mime_types.size()> &supported) {
+MimeEdit update_defaults(GKeyFile *file, const std::string &id, const BrowserSupport &supported) {
     MimeEdit edit;
     const bool same_selection = value(file, ownership, selection) == id;
     bool owns_any = false;
@@ -103,8 +109,7 @@ MimeEdit update_defaults(GKeyFile *file, const std::string &id,
 
 std::expected<MimeEdit, std::string>
 apply_defaults(const ConfigStore &store, const std::filesystem::path &path, const std::string &id,
-               const std::array<bool, browser_mime_types.size()> &supported,
-               const std::function<bool()> &still_current) {
+               const BrowserSupport &supported, const std::function<bool()> &still_current) {
     for (unsigned attempt = 0; attempt < 4; ++attempt) {
         if (still_current && !still_current())
             return std::unexpected("A newer browser selection is pending");
@@ -147,12 +152,14 @@ apply_defaults(const ConfigStore &store, const std::filesystem::path &path, cons
     return std::unexpected("MIME defaults kept changing while Seaside was applying the browser");
 }
 
-std::expected<BrowserDefaults, std::string> query_browser_defaults() {
-    // GIO's process-wide MIME cache is invalidated asynchronously by its file
-    // monitor. A new process resolves the just-published snapshot immediately.
+template <class Result>
+std::expected<Result, std::string> query_browser_information(std::string desktop_id = {}) {
+    // GIO indexes desktop entries once, including entries inside subdirectories
+    // it does not watch. It also invalidates MIME defaults asynchronously. Use a
+    // new process for each query so both views reflect the files on disk.
     char executable[] = "/proc/self/exe";
-    char option[] = "--browser-defaults";
-    char *args[] = {executable, option, nullptr};
+    char option[] = "--browser-query";
+    char *args[] = {executable, option, desktop_id.empty() ? nullptr : desktop_id.data(), nullptr};
     char *raw_output = nullptr;
     GError *raw_error = nullptr;
     int wait_status = 0;
@@ -164,10 +171,42 @@ std::expected<BrowserDefaults, std::string> query_browser_defaults() {
     if (!success)
         return std::unexpected(error->message);
     try {
-        return nlohmann::json::parse(output.get()).get<BrowserDefaults>();
+        return nlohmann::json::parse(output.get()).get<Result>();
     } catch (const nlohmann::json::exception &) {
-        return std::unexpected("Invalid response from the browser defaults query");
+        return std::unexpected("Invalid response from the browser query");
     }
+}
+
+BrowserEntry inspect_browser_entry(const char *id) {
+    const AppInfo<GDesktopAppInfo> entry(g_desktop_app_info_new(id), g_object_unref);
+    if (!entry || g_desktop_app_info_get_is_hidden(entry.get()))
+        return {{}, "The desktop entry is unavailable"};
+
+    auto *app = G_APP_INFO(entry.get());
+    const auto *types = g_app_info_get_supported_types(app);
+    const bool accepts_urls = g_app_info_supports_uris(app) ||
+                              g_desktop_app_info_get_boolean(entry.get(), "DBusActivatable");
+    if (!types || !accepts_urls || !g_strv_contains(types, browser_mime_types[0]) ||
+        !g_strv_contains(types, browser_mime_types[1]))
+        return {{}, "The desktop entry must accept HTTP and HTTPS URLs"};
+
+    BrowserEntry result;
+    for (std::size_t i = 0; i < result.supported.size(); ++i)
+        result.supported[i] = g_strv_contains(types, browser_mime_types[i]);
+    return result;
+}
+
+BrowserDefaults resolve_browser_defaults() {
+    BrowserDefaults defaults;
+    for (std::size_t i = 0; i < browser_mime_types.size(); ++i) {
+        const AppInfo<GAppInfo> app(g_app_info_get_default_for_type(browser_mime_types[i], false),
+                                    g_object_unref);
+        if (app) {
+            if (const auto *id = g_app_info_get_id(app.get()))
+                defaults[i] = id;
+        }
+    }
+    return defaults;
 }
 } // namespace
 
@@ -175,38 +214,29 @@ BrowserStatus apply_default_browser(const ConfigStore &store, const std::filesys
                                     std::string requested,
                                     const std::function<bool()> &still_current) {
     const std::string id = requested == "firefox" ? "firefox.desktop" : requested;
-    const AppInfo<GDesktopAppInfo> entry(g_desktop_app_info_new(id.c_str()), g_object_unref);
     BrowserStatus status;
     status.requested = std::move(requested);
-    auto supported = std::array<bool, browser_mime_types.size()>{};
-    if (entry && !g_desktop_app_info_get_is_hidden(entry.get())) {
-        const auto *types = g_app_info_get_supported_types(G_APP_INFO(entry.get()));
-        const bool accepts_urls = g_app_info_supports_uris(G_APP_INFO(entry.get())) ||
-                                  g_desktop_app_info_get_boolean(entry.get(), "DBusActivatable");
-        if (types && accepts_urls && g_strv_contains(types, browser_mime_types[0]) &&
-            g_strv_contains(types, browser_mime_types[1])) {
-            for (std::size_t i = 0; i < supported.size(); ++i)
-                supported[i] = g_strv_contains(types, browser_mime_types[i]);
+    const auto entry = query_browser_information<BrowserEntry>(id);
+    if (!entry) {
+        status.state = "lookup-error";
+        status.message = entry.error();
+    } else {
+        const auto edit = apply_defaults(store, path, id, entry->supported, still_current);
+        if (!edit) {
+            status.state = "mimeapps-error";
+            status.message = path.string() + ": " + edit.error();
+        } else if (!entry->supported.front()) {
+            status.state = "unavailable";
+            status.message = entry->message;
+        } else if (edit->external_override) {
+            status.state = "external-override";
+        } else {
+            status.state = "applied";
         }
-        if (!supported.front())
-            status.message = "The desktop entry must accept HTTP and HTTPS URLs";
-    } else {
-        status.message = "The desktop entry is unavailable";
     }
-    const auto edit = apply_defaults(store, path, id, supported, still_current);
-    if (!edit) {
-        status.state = "mimeapps-error";
-        status.message = path.string() + ": " + edit.error();
-    } else if (!supported.front()) {
-        status.state = "unavailable";
-    } else if (edit->external_override) {
-        status.state = "external-override";
-    } else {
-        status.state = "applied";
-    }
-    if (auto effective = query_browser_defaults(); effective) {
+    if (auto effective = query_browser_information<BrowserDefaults>(); effective) {
         for (std::size_t i = 0; i < browser_mime_types.size(); ++i) {
-            if (supported[i] && (*effective)[i] != id && status.state == "applied") {
+            if (status.state == "applied" && entry->supported[i] && (*effective)[i] != id) {
                 status.state = "not-effective";
                 status.message = "The desktop resolves a different default association";
             }
@@ -219,17 +249,10 @@ BrowserStatus apply_default_browser(const ConfigStore &store, const std::filesys
     return status;
 }
 
-int report_browser_defaults() {
-    BrowserDefaults defaults;
-    for (std::size_t i = 0; i < browser_mime_types.size(); ++i) {
-        const AppInfo<GAppInfo> app(g_app_info_get_default_for_type(browser_mime_types[i], false),
-                                    g_object_unref);
-        if (app) {
-            if (const auto *id = g_app_info_get_id(app.get()))
-                defaults[i] = id;
-        }
-    }
-    const auto json = nlohmann::json(defaults).dump();
+int report_browser_information(const char *desktop_id) {
+    const auto response = desktop_id ? nlohmann::json(inspect_browser_entry(desktop_id))
+                                     : nlohmann::json(resolve_browser_defaults());
+    const auto json = response.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
     return std::puts(json.c_str()) >= 0 && std::fflush(stdout) == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 } // namespace seaside

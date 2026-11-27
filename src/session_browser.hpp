@@ -23,8 +23,8 @@ BrowserStatus apply_default_browser(const ConfigStore &store, const std::filesys
                                     std::string requested,
                                     const std::function<bool()> &still_current = {});
 
-// Private entry point for a one-shot GIO query after updating the MIME file.
-int report_browser_defaults();
+// Private entry point for uncached GIO desktop entry and default queries.
+int report_browser_information(const char *desktop_id = nullptr);
 
 } // namespace seaside
 #endif

@@ -1523,8 +1523,8 @@ int main(int argc, char **argv) try {
     if (argc == 6 && std::string_view(argv[1]) == "--activation-environment") {
         return seaside::run_session_environment(argv[2], argv[3], argv[4], argv[5]);
     }
-    if (argc == 2 && std::string_view(argv[1]) == "--browser-defaults") {
-        return seaside::report_browser_defaults();
+    if ((argc == 2 || argc == 3) && std::string_view(argv[1]) == "--browser-query") {
+        return seaside::report_browser_information(argc == 3 ? argv[2] : nullptr);
     }
     if (argc == 2 && std::string_view(argv[1]) == "--help") {
         std::fputs("Usage: seaside [--help | --version]\n"

@@ -5,8 +5,8 @@
 #include <nlohmann/json.hpp>
 
 int main(int argc, char **argv) {
-    if (argc == 2 && std::string_view(argv[1]) == "--browser-defaults")
-        return seaside::report_browser_defaults();
+    if ((argc == 2 || argc == 3) && std::string_view(argv[1]) == "--browser-query")
+        return seaside::report_browser_information(argc == 3 ? argv[2] : nullptr);
     if (argc != 3)
         return 1;
     const seaside::ConfigStore store;

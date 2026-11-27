@@ -21,6 +21,9 @@ def check(executable, root):
     generic = root / "config/mimeapps.list"
     initial = mime.read_text()
     generic_initial = generic.read_bytes()
+    desktop_entries = root / "data/applications"
+    vendor_entries = desktop_entries / "vendor"
+    vendor_entries.mkdir()
     runtime = root / "runtime"
     runtime.mkdir(mode=0o700)
     shared = root / "share"
@@ -95,6 +98,11 @@ def check(executable, root):
         expect("unavailable", APP_B, "missing.desktop")
         assert mime.read_text().strip() == initial.strip()
         assert generic.read_bytes() == generic_initial
+
+        # An app installed in an existing subdirectory must resolve on the
+        # next reload even when the session has already looked up defaults.
+        (vendor_entries / "browser.desktop").write_bytes((desktop_entries / APP_A).read_bytes())
+        expect("applied", "vendor-browser.desktop", "vendor-browser.desktop")
 
         mime.unlink()
         mime.symlink_to(generic)
