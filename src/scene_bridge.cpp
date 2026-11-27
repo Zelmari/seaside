@@ -2700,6 +2700,45 @@ struct exact_target {
     bool found;
 };
 
+bool seaside_scene_pointer_content(struct seaside_scene_bridge *scene, struct wlr_surface *surface,
+                                   struct seaside_pointer_content *content) {
+    if (!scene || !scene->attached || !surface || !surface->mapped) {
+        return false;
+    }
+    *content = {{}, 1, 1, false, false};
+    if (seaside_layer_scene_visible_output(scene->layers, surface, &content->bounds)) {
+        return true;
+    }
+    struct wlr_surface *root = wlr_surface_get_root_surface(surface);
+    if (!root || !root->mapped) {
+        return false;
+    }
+    struct scene_popup *popup = surface_popup(scene, root);
+    struct scene_view *view =
+        popup ? popup->view : toplevel_view(scene, wlr_xdg_toplevel_try_from_wlr_surface(root));
+    if (!view || !view->mapped || !view->placement.visible ||
+        !has_viewport(view->placement.output)) {
+        return false;
+    }
+    struct wlr_scene_tree *tree = popup ? popup->surface_tree : view->tree;
+    if (!seaside_scene_surface_intersects(tree, surface, view->placement.output,
+                                          &content->bounds)) {
+        return false;
+    }
+    const struct projected_surface *projected;
+    wl_list_for_each(projected, &view->projected_surfaces, link) {
+        if (projected->scene_surface->surface == surface && projected->width > 0 &&
+            projected->height > 0) {
+            content->layout_per_surface_x = projected->width / projected->source.width;
+            content->layout_per_surface_y = projected->height / projected->source.height;
+            break;
+        }
+    }
+    content->toplevel = !popup && root == surface;
+    content->fullscreen = view->placement.fullscreen;
+    return true;
+}
+
 static void match_target(struct wlr_surface *surface, int x, int y, void *data) noexcept {
     struct exact_target *search = static_cast<exact_target *>(data);
     if (surface != search->target->surface) {

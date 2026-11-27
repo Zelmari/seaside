@@ -707,7 +707,8 @@ part4_fixture = executable(
   'seaside-part4-fixture',
   ['tests/integration/part4.cpp', 'tests/integration/part3_bridge.cpp',
    xdg_shell_client_header, xdg_shell_private_code, activation_client_header, activation_private_code,
-   layer_client, layer_client_code, display_protocols['xdg-decoration-unstable-v1']],
+   layer_client, layer_client_code, display_protocols['xdg-decoration-unstable-v1'],
+   seat_protocol_code['pointer-constraints']],
   include_directories: include_directories('src', 'tests/integration', 'tests/unit'),
   dependencies: [wlroots, wayland_server, wayland_client, pixman, libdrm, xkbcommon, threads, gtest],
   link_args: ['-Wl,--wrap=wl_event_loop_add_timer', '-Wl,--wrap=wl_event_source_timer_update'],
@@ -732,6 +733,10 @@ test('part6-headless-attention', part4_fixture, args: ['attention'], suite: ['in
 test('part8-fullscreen-aspect', part4_fixture, args: ['fullscreen-aspect'],
   suite: ['integration', 'part8'], timeout: 30,
   env: {'SEASIDE_TEST_PART': '8', 'SEASIDE_REQUIREMENTS': '6.1,6.2,7.2,12.2b'},
+)
+test('part12-fullscreen-confinement', part4_fixture, args: ['fullscreen-confinement'],
+  suite: ['integration', 'part12'], timeout: 30,
+  env: {'SEASIDE_TEST_PART': '12', 'SEASIDE_REQUIREMENTS': '6.1,6.2,7.2,12.2b'},
 )
 test('part9-layer-shell', part4_fixture, args: ['layer-shell'], suite: ['integration', 'part9'],
   timeout: 30, env: {'SEASIDE_TEST_PART': '9', 'SEASIDE_REQUIREMENTS': '4.4,6.1,7.1,11,12.2b'},

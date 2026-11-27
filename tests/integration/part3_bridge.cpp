@@ -212,6 +212,31 @@ void part3_input_button(struct part3_input *input, uint32_t code, bool pressed) 
     wl_signal_emit_mutable(&input->pointer.events.frame, &input->pointer);
 }
 
+void part3_input_relative(struct part3_input *input, double dx, double dy, double raw_x,
+                          double raw_y) {
+    struct wlr_pointer_motion_event event = {
+        .pointer = &input->pointer,
+        .time_msec = 10,
+        .delta_x = dx,
+        .delta_y = dy,
+        .unaccel_dx = raw_x,
+        .unaccel_dy = raw_y,
+    };
+    wl_signal_emit_mutable(&input->pointer.events.motion, &event);
+    wl_signal_emit_mutable(&input->pointer.events.frame, &input->pointer);
+}
+
+void part3_input_absolute(struct part3_input *input, double x, double y) {
+    struct wlr_pointer_motion_absolute_event event = {
+        .pointer = &input->pointer,
+        .time_msec = 10,
+        .x = x,
+        .y = y,
+    };
+    wl_signal_emit_mutable(&input->pointer.events.motion_absolute, &event);
+    wl_signal_emit_mutable(&input->pointer.events.frame, &input->pointer);
+}
+
 struct part3_output_snapshot part3_output_get_snapshot(struct part3_output *output) {
     return output ? output->snapshot : part3_output_snapshot{};
 }

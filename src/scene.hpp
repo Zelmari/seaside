@@ -69,6 +69,7 @@ class Scene final {
     seaside_scene_size_limits window_size_limits(std::uint64_t id) noexcept;
     seaside_scene_window_metadata window_metadata(std::uint64_t id) noexcept;
     bool window_at(double x, double y, seaside_scene_target &target) noexcept;
+    bool pointer_content(wlr_surface *surface, seaside_pointer_content &content) noexcept;
     void set_drag_icon(wlr_drag_icon *icon) noexcept;
     void move_drag_icon(int x, int y) noexcept;
     void set_input_popup(wlr_input_popup_surface_v2 *popup, wlr_surface *focus,

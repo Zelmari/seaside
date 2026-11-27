@@ -520,16 +520,25 @@ class Session : public seaside::TtyInputObserver, public seaside::TtyDrmObserver
 
     bool pointer_target(seaside::TtyPointerTarget &target) noexcept override {
         double x, y;
-        seaside_scene_target hit{.surface = target.surface, .id = 0, .sx = 0, .sy = 0};
         if (stopping_ || !drm_.cursor_position(x, y)) {
             return false;
         }
         scene_.move_drag_icon(static_cast<int>(x), static_cast<int>(y));
+        return pointer_target_at(x, y, target);
+    }
+
+    bool pointer_target_at(double x, double y,
+                           seaside::TtyPointerTarget &target) noexcept override {
+        seaside_scene_target hit{.surface = target.surface, .id = 0, .sx = 0, .sy = 0};
         if (!scene_.window_at(x, y, hit)) {
             return false;
         }
-        target = {hit.surface, hit.sx, hit.sy, hit.id};
+        target = {hit.surface, hit.sx, hit.sy, hit.id, x, y};
         return true;
+    }
+
+    bool pointer_content(wlr_surface *surface, seaside_pointer_content &content) noexcept override {
+        return scene_.pointer_content(surface, content);
     }
 
     bool pointer_button(std::uint64_t window, std::uint32_t button, bool pressed,

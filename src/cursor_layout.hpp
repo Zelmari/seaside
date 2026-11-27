@@ -11,6 +11,12 @@ struct seaside_cursor_point {
     double x, y;
 };
 
+struct seaside_pointer_content {
+    struct seaside_cursor_box bounds;
+    double layout_per_surface_x, layout_per_surface_y;
+    bool toplevel, fullscreen;
+};
+
 enum seaside_pointer_motion {
     SEASIDE_POINTER_RELATIVE,
     SEASIDE_POINTER_ABSOLUTE,

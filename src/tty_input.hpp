@@ -24,6 +24,7 @@ struct TtyPointerTarget {
     wlr_surface *surface;
     double sx, sy;
     std::uint64_t window_id;
+    double lx = 0, ly = 0;
 };
 
 struct TtyInputSnapshot {
@@ -50,6 +51,12 @@ class TtyInputObserver {
     virtual void modifiers_changed(std::uint8_t) noexcept {}
     // Hit-test for a null surface. Otherwise locate the exact surface even outside its bounds.
     virtual bool pointer_target(TtyPointerTarget &) noexcept { return false; }
+    virtual bool pointer_target_at(double, double, TtyPointerTarget &) noexcept { return false; }
+    // A zero-size box is an unclipped 1:1 target for a synthetic input observer.
+    virtual bool pointer_content(wlr_surface *, seaside_pointer_content &content) noexcept {
+        content = {{}, 1, 1, false, false};
+        return true;
+    }
     // A press may be consumed with its release. The window ID is zero over empty space.
     virtual bool pointer_button(std::uint64_t, std::uint32_t, bool, std::uint8_t) noexcept {
         return false;

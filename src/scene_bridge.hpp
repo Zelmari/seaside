@@ -1,6 +1,8 @@
 #ifndef SEASIDE_SCENE_BRIDGE_H
 #define SEASIDE_SCENE_BRIDGE_H
 
+#include "cursor_layout.hpp"
+
 #include <stddef.h>
 #include <stdint.h>
 #include <sys/types.h>
@@ -226,6 +228,8 @@ seaside_scene_get_window_metadata(struct seaside_scene_bridge *scene, uint64_t i
 /* Set target->surface to resolve an implicit grab or constrained surface. */
 bool seaside_scene_window_at(struct seaside_scene_bridge *scene, double x, double y,
                              struct seaside_scene_target *target);
+bool seaside_scene_pointer_content(struct seaside_scene_bridge *scene, struct wlr_surface *surface,
+                                   struct seaside_pointer_content *content);
 /* Watch future maps from one owned client process. The focus callback gets a
  * borrowed mapped surface, then NULL when focus ends. Callbacks run on the
  * display owner thread and must return without reentering this API, destroying

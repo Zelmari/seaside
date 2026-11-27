@@ -4,6 +4,7 @@
 #include "wlr_layer_shell_compat.hpp"
 #include "wlr_scene_compat.hpp"
 
+#include <algorithm>
 #include <limits.h>
 #include <stdlib.h>
 #include <type_traits>
@@ -753,6 +754,7 @@ struct wlr_surface *seaside_layer_scene_keyboard_focus(struct seaside_layer_scen
 struct intersection_search {
     struct wlr_surface *surface;
     struct seaside_scene_rect viewport;
+    seaside_cursor_box *bounds;
     bool intersects;
 };
 
@@ -760,31 +762,40 @@ static void test_buffer_intersection(struct wlr_scene_buffer *buffer, int x, int
                                      void *data) noexcept {
     struct intersection_search *search = static_cast<intersection_search *>(data);
     struct wlr_scene_surface *surface = wlr_scene_surface_try_from_buffer(buffer);
-    if (surface && surface->surface == search->surface && buffer->buffer &&
+    if (!search->intersects && surface && surface->surface == search->surface && buffer->buffer &&
         buffer->primary_output && wlr_scene_node_coords(&buffer->node, &x, &y)) {
         // A popup's scene tree can be anchored under a translated parent.
         // Compare its absolute buffer bounds to the output layout coordinates.
         const struct seaside_scene_rect viewport = search->viewport;
         const int width = buffer->dst_width, height = buffer->dst_height;
-        search->intersects |= width > 0 && height > 0 && x < (int64_t)viewport.x + viewport.width &&
-                              y < (int64_t)viewport.y + viewport.height &&
-                              (int64_t)x + width > viewport.x && (int64_t)y + height > viewport.y;
+        const int left = std::max(x, viewport.x);
+        const int top = std::max(y, viewport.y);
+        const int64_t right = std::min((int64_t)x + width, (int64_t)viewport.x + viewport.width);
+        const int64_t bottom = std::min((int64_t)y + height, (int64_t)viewport.y + viewport.height);
+        search->intersects = width > 0 && height > 0 && left < right && top < bottom;
+        if (search->intersects && search->bounds) {
+            *search->bounds = {left, top, static_cast<int>(right - left),
+                               static_cast<int>(bottom - top)};
+        }
     }
 }
 
 bool seaside_scene_surface_intersects(struct wlr_scene_tree *tree, struct wlr_surface *surface,
-                                      struct seaside_scene_rect viewport) {
+                                      struct seaside_scene_rect viewport,
+                                      seaside_cursor_box *bounds) {
     struct intersection_search search = {
-        .surface = surface, .viewport = viewport, .intersects = false};
+        .surface = surface, .viewport = viewport, .bounds = bounds, .intersects = false};
     wlr_scene_node_for_each_buffer(&tree->node, test_buffer_intersection, &search);
     return search.intersects;
 }
 
 struct wlr_output *seaside_layer_scene_visible_output(struct seaside_layer_scene *layers,
-                                                      struct wlr_surface *surface) {
+                                                      struct wlr_surface *surface,
+                                                      seaside_cursor_box *bounds) {
     struct layer_surface *layer = find_owner(layers, surface);
     return layer && layer->visible &&
-                   seaside_scene_surface_intersects(layer->tree, surface, layer->output->bounds)
+                   seaside_scene_surface_intersects(layer->tree, surface, layer->output->bounds,
+                                                    bounds)
                ? layer->output->output
                : nullptr;
 }

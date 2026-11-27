@@ -392,6 +392,10 @@ bool Scene::window_at(double x, double y, seaside_scene_target &target) noexcept
     return seaside_scene_window_at(bridge_.get(), x, y, &target);
 }
 
+bool Scene::pointer_content(wlr_surface *surface, seaside_pointer_content &content) noexcept {
+    return seaside_scene_pointer_content(bridge_.get(), surface, &content);
+}
+
 void Scene::set_drag_icon(wlr_drag_icon *icon) noexcept {
     seaside_scene_set_drag_icon(bridge_.get(), icon);
 }

@@ -34,10 +34,12 @@ void seaside_layer_scene_select(struct seaside_layer_scene *layers, struct wlr_s
 struct wlr_surface *seaside_layer_scene_keyboard_focus(struct seaside_layer_scene *layers,
                                                        struct wlr_output *focused_output);
 struct wlr_output *seaside_layer_scene_visible_output(struct seaside_layer_scene *layers,
-                                                      struct wlr_surface *surface);
+                                                      struct wlr_surface *surface,
+                                                      seaside_cursor_box *bounds = nullptr);
 bool seaside_layer_scene_has_overlay(const struct seaside_layer_scene *layers,
                                      const struct wlr_output *output);
 bool seaside_scene_surface_intersects(struct wlr_scene_tree *tree, struct wlr_surface *surface,
-                                      struct seaside_scene_rect viewport);
+                                      struct seaside_scene_rect viewport,
+                                      seaside_cursor_box *bounds = nullptr);
 
 #endif

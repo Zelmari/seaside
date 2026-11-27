@@ -36,6 +36,9 @@ struct part3_input *part3_input_create(struct wlr_backend *backend);
 void part3_input_destroy(struct part3_input *input);
 void part3_input_key(struct part3_input *input, uint32_t code, bool pressed);
 void part3_input_button(struct part3_input *input, uint32_t code, bool pressed);
+void part3_input_relative(struct part3_input *input, double dx, double dy, double raw_x,
+                          double raw_y);
+void part3_input_absolute(struct part3_input *input, double x, double y);
 bool part3_seat_has_drag(const struct wlr_seat *seat);
 void part8_reject_next_frame(struct wlr_output *output);
 struct part3_output_snapshot part3_output_get_snapshot(struct part3_output *output);

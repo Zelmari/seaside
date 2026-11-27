@@ -540,8 +540,8 @@ static uint64_t update_pointer_target(TtyInputState *input, uint32_t time_msec) 
         seat->pointer_state.button_count > 0 && !wlr_seat_pointer_has_grab(seat);
     TtyPointerTarget target = {};
     if (input->constraint) {
-        target.surface = input->constraint->surface;
         if (!input->observer->pointer_target(target) ||
+            target.surface != input->constraint->surface ||
             !constraint_contains(input->constraint, target.sx, target.sy)) {
             leave_constraint(input, true);
             target = TtyPointerTarget{};
@@ -657,6 +657,44 @@ static void handle_drag_request(struct wl_listener *listener, void *data) noexce
     }
 }
 
+static bool confine_delta(TtyInputState *input, const TtyPointerTarget &origin, double &dx,
+                          double &dy) {
+    seaside_pointer_content content;
+    if (!input->observer->pointer_content(origin.surface, content)) {
+        return false;
+    }
+    const bool clipped = content.bounds.width > 0 && content.bounds.height > 0;
+    const seaside_cursor_point start{origin.lx, origin.ly};
+    seaside_cursor_point target{start.x + dx, start.y + dy};
+    if (clipped) {
+        if (!seaside_cursor_contains(content.bounds, start)) {
+            return false;
+        }
+        target = seaside_cursor_clamp(content.bounds, target);
+    }
+    const double scale_x = content.layout_per_surface_x, scale_y = content.layout_per_surface_y;
+    double sx, sy;
+    if (!wlr_region_confine(constraint_region(input->constraint), origin.sx, origin.sy,
+                            origin.sx + (target.x - start.x) / scale_x,
+                            origin.sy + (target.y - start.y) / scale_y, &sx, &sy)) {
+        return false;
+    }
+    target = {start.x + (sx - origin.sx) * scale_x, start.y + (sy - origin.sy) * scale_y};
+    if (clipped) {
+        // The visible crop can end partway through a logical surface pixel.
+        target = seaside_cursor_clamp(content.bounds, target);
+        TtyPointerTarget hit{};
+        if (!input->observer->pointer_target_at(target.x, target.y, hit) ||
+            hit.surface != origin.surface ||
+            !constraint_contains(input->constraint, hit.sx, hit.sy)) {
+            return false;
+        }
+    }
+    dx = target.x - start.x;
+    dy = target.y - start.y;
+    return true;
+}
+
 static void move_pointer(TtyInputState *input, uint32_t time_msec, bool absolute, double x,
                          double y) {
     if (!isfinite(x) || !isfinite(y) || pointer_locked(input)) {
@@ -666,8 +704,8 @@ static void move_pointer(TtyInputState *input, uint32_t time_msec, bool absolute
         absolute ? SEASIDE_POINTER_ABSOLUTE : SEASIDE_POINTER_RELATIVE;
     if (input->constraint) {
         TtyPointerTarget origin{};
-        origin.surface = input->constraint->surface;
         if (!input->observer->pointer_target(origin) ||
+            origin.surface != input->constraint->surface ||
             !constraint_contains(input->constraint, origin.sx, origin.sy)) {
             leave_constraint(input, true);
         } else {
@@ -675,13 +713,12 @@ static void move_pointer(TtyInputState *input, uint32_t time_msec, bool absolute
             if (absolute && !input->observer->pointer_absolute_delta(x, y, dx, dy)) {
                 return;
             }
-            if (!wlr_region_confine(constraint_region(input->constraint), origin.sx, origin.sy,
-                                    origin.sx + dx, origin.sy + dy, &x, &y)) {
+            if (!confine_delta(input, origin, dx, dy)) {
                 return;
             }
             kind = SEASIDE_POINTER_CONFINED;
-            x -= origin.sx;
-            y -= origin.sy;
+            x = dx;
+            y = dy;
         }
     }
     input->observer->motion(kind, x, y);
