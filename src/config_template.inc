@@ -100,6 +100,8 @@ profile = "flat"
 sensitivity = 0.0
 # "normal" (default) or "inverse" for mouse wheels and touchpad scrolling.
 scroll_direction = "normal"
+# Center the cursor when an eligible app explicitly locks it.
+auto_center_on_lock = false
 
 [idle]
 # Minutes with no activity before display power-off: 0..1440; 0 disables.

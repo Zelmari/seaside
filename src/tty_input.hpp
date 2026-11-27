@@ -52,6 +52,7 @@ class TtyInputObserver {
     // Hit-test for a null surface. Otherwise locate the exact surface even outside its bounds.
     virtual bool pointer_target(TtyPointerTarget &) noexcept { return false; }
     virtual bool pointer_target_at(double, double, TtyPointerTarget &) noexcept { return false; }
+    virtual bool place_pointer(double, double) noexcept { return false; }
     // A zero-size box is an unclipped 1:1 target for a synthetic input observer.
     virtual bool pointer_content(wlr_surface *, seaside_pointer_content &content) noexcept {
         content = {{}, 1, 1, false, false};
@@ -100,6 +101,7 @@ class TtyInput final {
     bool enable_keyboard(wl_display *display) noexcept;
     void set_sensitivity(double sensitivity) noexcept;
     void set_inverse_scroll(bool inverse) noexcept;
+    void set_auto_center_on_lock(bool enabled) noexcept;
     void set_focus(wlr_surface *surface) noexcept;
     wlr_seat *seat() const noexcept;
     void refresh_pointer() noexcept;

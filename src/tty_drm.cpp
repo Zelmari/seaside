@@ -1723,6 +1723,12 @@ bool TtyDrm::move(seaside_pointer_motion kind, double x, double y) noexcept {
     return move_cursor(drm, target.x, target.y, true);
 }
 
+bool TtyDrm::place_cursor(double x, double y) noexcept {
+    auto *drm = state_.get();
+    return drm->evidence.active && !drm->evidence.failed && isfinite(x) && isfinite(y) &&
+           move_cursor(drm, x, y, true);
+}
+
 bool TtyDrm::change_vt(unsigned vt) noexcept {
     auto *drm = state_.get();
     return drm->session && drm->session->active && wlr_session_change_vt(drm->session, vt);

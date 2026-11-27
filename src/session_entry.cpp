@@ -308,6 +308,7 @@ class Session : public seaside::TtyInputObserver, public seaside::TtyDrmObserver
         input_->set_sensitivity(config.config.input.mouse.sensitivity);
         input_->set_inverse_scroll(config.config.input.mouse.scroll_direction ==
                                    seaside::ScrollDirection::inverse);
+        input_->set_auto_center_on_lock(config.config.input.mouse.auto_center_on_lock);
         attaching_startup_ = false;
         const auto attach = [this](const seaside::OutputConfig::Output &output) {
             const auto &state = output.status;
@@ -518,13 +519,26 @@ class Session : public seaside::TtyInputObserver, public seaside::TtyDrmObserver
     void motion(seaside_pointer_motion kind, double x, double y) noexcept override {
         if (!stopping_ && !ipc_exiting_) {
             drm_.move(kind, x, y);
-            if (capture_) {
-                capture_->cursor_changed();
-            }
-            if (drm_.cursor_position(x, y)) {
-                desktop_.motion(x, y);
-                scene_.capture_pointer(x, y);
-            }
+            track_cursor_motion();
+        }
+    }
+
+    bool place_pointer(double x, double y) noexcept override {
+        if (stopping_ || ipc_exiting_ || !drm_.place_cursor(x, y)) {
+            return false;
+        }
+        track_cursor_motion();
+        return true;
+    }
+
+    void track_cursor_motion() noexcept {
+        if (capture_) {
+            capture_->cursor_changed();
+        }
+        double x, y;
+        if (drm_.cursor_position(x, y)) {
+            desktop_.motion(x, y);
+            scene_.capture_pointer(x, y);
         }
     }
 
@@ -777,6 +791,7 @@ class Session : public seaside::TtyInputObserver, public seaside::TtyDrmObserver
         input_->set_sensitivity(candidate.input.mouse.sensitivity);
         input_->set_inverse_scroll(candidate.input.mouse.scroll_direction ==
                                    seaside::ScrollDirection::inverse);
+        input_->set_auto_center_on_lock(candidate.input.mouse.auto_center_on_lock);
         return {};
     }
 

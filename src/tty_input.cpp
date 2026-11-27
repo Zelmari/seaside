@@ -64,6 +64,7 @@ struct TtyInputState {
     uint8_t modifiers;
     double sensitivity;
     bool inverse_scroll;
+    bool auto_center_on_lock;
     struct tty_device *gesture_device;
     uint32_t gesture_button;
     bool gesture_released;
@@ -187,37 +188,73 @@ static bool constraint_contains(struct wlr_pointer_constraint_v1 *constraint, do
            pixman_region32_contains_point(region, (int32_t)sx, (int32_t)sy, nullptr);
 }
 
-static void refresh_constraint(TtyInputState *input) {
-    if (!input->constraints || !input->seat) {
-        return;
+static struct wlr_pointer_constraint_v1 *center_pending_lock(TtyInputState *input,
+                                                             struct wlr_surface *focus,
+                                                             const TtyPointerTarget &hover,
+                                                             uint64_t &window) {
+    if (!input->auto_center_on_lock || input->seat->pointer_state.button_count) {
+        return nullptr;
     }
+    auto *lock =
+        wlr_pointer_constraints_v1_constraint_for_surface(input->constraints, focus, input->seat);
+    seaside_pointer_content content;
+    if (!lock || lock->type != WLR_POINTER_CONSTRAINT_V1_LOCKED ||
+        !input->observer->pointer_content(focus, content) || !content.toplevel ||
+        (!content.fullscreen && hover.surface != focus)) {
+        return nullptr;
+    }
+
+    const double x = content.bounds.x + content.bounds.width / 2.0;
+    const double y = content.bounds.y + content.bounds.height / 2.0;
+    TtyPointerTarget center{};
+    if (!input->observer->pointer_target_at(x, y, center) || center.surface != focus ||
+        !constraint_contains(lock, center.sx, center.sy) || !input->observer->place_pointer(x, y)) {
+        return nullptr;
+    }
+    wlr_seat_pointer_notify_enter(input->seat, focus, center.sx, center.sy);
+    wlr_seat_pointer_notify_motion(input->seat, monotonic_msec(), center.sx, center.sy);
+    wlr_seat_pointer_notify_frame(input->seat);
+    window = center.window_id;
+    return lock;
+}
+
+static uint64_t refresh_constraint(TtyInputState *input, uint64_t window = 0) {
     struct wlr_seat *seat = input->seat;
-    const struct wlr_seat_pointer_state *pointer = &seat->pointer_state;
+    if (!input->constraints || !seat || wl_list_empty(&input->constraints->constraints)) {
+        return window;
+    }
     struct wlr_surface *focus = seat->keyboard_state.focused_surface;
+    if (!input->attached || !input->snapshot.pointers || !focus ||
+        wlr_seat_pointer_has_grab(seat) || wlr_seat_keyboard_has_grab(seat) ||
+        input->consumed_button_count) {
+        leave_constraint(input, true);
+        return window;
+    }
+
+    TtyPointerTarget hover{};
+    input->observer->pointer_target(hover);
     struct wlr_pointer_constraint_v1 *candidate = nullptr;
-    // Hover scrolling must not let a background window acquire a pointer lock.
-    if (input->attached && focus && pointer->focused_surface &&
-        wlr_surface_get_root_surface(pointer->focused_surface) ==
-            wlr_surface_get_root_surface(focus) &&
-        !wlr_seat_pointer_has_grab(seat) && input->consumed_button_count == 0) {
-        candidate = wlr_pointer_constraints_v1_constraint_for_surface(
-            input->constraints, pointer->focused_surface, seat);
-        if (candidate && !constraint_contains(candidate, pointer->sx, pointer->sy)) {
+    // The scene hit is current even while the seat suppresses locked motion.
+    // Hover scrolling alone cannot activate a background surface's request.
+    if (hover.surface && hover.surface == seat->pointer_state.focused_surface &&
+        wlr_surface_get_root_surface(hover.surface) == wlr_surface_get_root_surface(focus)) {
+        candidate = wlr_pointer_constraints_v1_constraint_for_surface(input->constraints,
+                                                                      hover.surface, seat);
+        if (candidate && !constraint_contains(candidate, hover.sx, hover.sy)) {
             candidate = nullptr;
         }
     }
-    if (candidate == input->constraint) {
-        return;
-    }
-    if (candidate) {
-        TtyPointerTarget target{};
-        target.surface = pointer->button_count ? candidate->surface : nullptr;
-        if (!input->observer->pointer_target(target) || target.surface != candidate->surface ||
-            !constraint_contains(candidate, target.sx, target.sy)) {
-            candidate = nullptr;
-        }
+    if (candidate && candidate == input->constraint) {
+        return window;
     }
     leave_constraint(input, true);
+
+    if ((!candidate || candidate->type == WLR_POINTER_CONSTRAINT_V1_LOCKED) &&
+        (!candidate || candidate->surface == focus)) {
+        if (auto *centered = center_pending_lock(input, focus, hover, window)) {
+            candidate = centered;
+        }
+    }
     if (candidate) {
         input->constraint = candidate;
         input->constraint_destroy.notify = handle_constraint_destroy;
@@ -227,6 +264,7 @@ static void refresh_constraint(TtyInputState *input) {
             input->observer->pointer_locked(true);
         }
     }
+    return window;
 }
 
 static void handle_constraint_commit(struct wl_listener *listener, void *) noexcept {
@@ -442,7 +480,11 @@ static void handle_new_constraint(struct wl_listener *listener, void *data) noex
     wl_signal_add(&constraint->surface->events.commit, &state->commit);
     wl_signal_add(&constraint->events.destroy, &state->destroy);
     constraint->data = state.release();
-    refresh_constraint(input);
+    struct wlr_surface *focus = input->seat->keyboard_state.focused_surface;
+    if (focus &&
+        wlr_surface_get_root_surface(focus) == wlr_surface_get_root_surface(constraint->surface)) {
+        refresh_pointer_focus(input);
+    }
 }
 
 static void forget_constraint_protocol(TtyInputState *input) {
@@ -473,13 +515,15 @@ static void refresh_focus(TtyInputState *input) {
     }
     if (!input->focus || !wlr_seat_get_keyboard(input->seat)) {
         wlr_seat_keyboard_notify_clear_focus(input->seat);
-        refresh_constraint(input);
+        leave_constraint(input, true);
         return;
     }
     struct wlr_keyboard *keyboard = &input->client_keyboard;
     wlr_seat_keyboard_notify_enter(input->seat, input->focus, keyboard->keycodes,
                                    keyboard->num_keycodes, &keyboard->modifiers);
-    refresh_constraint(input);
+    if (input->constraints) {
+        refresh_pointer_focus(input);
+    }
 }
 
 static void set_keyboard_focus(TtyInputState *input, wlr_surface *surface) noexcept {
@@ -643,8 +687,7 @@ static uint64_t update_pointer_target(TtyInputState *input, uint32_t time_msec) 
     } else {
         wlr_seat_pointer_notify_clear_focus(seat);
     }
-    refresh_constraint(input);
-    return target.window_id;
+    return refresh_constraint(input, target.window_id);
 }
 
 static void refresh_pointer_focus(TtyInputState *input) noexcept {
@@ -1249,6 +1292,10 @@ void TtyInput::set_inverse_scroll(bool inverse) noexcept {
             configure_scroll(device, inverse);
         }
     }
+}
+
+void TtyInput::set_auto_center_on_lock(bool enabled) noexcept {
+    state_->auto_center_on_lock = enabled;
 }
 
 static void handle_new_input(struct wl_listener *listener, void *data) noexcept {

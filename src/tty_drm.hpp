@@ -148,6 +148,7 @@ class TtyDrm final : public DrmOutputControl {
     // Position and relative deltas use logical output-layout coordinates.
     bool cursor_position(double &x, double &y) const noexcept;
     bool absolute_delta(double x, double y, double &dx, double &dy) const noexcept;
+    bool place_cursor(double x, double y) noexcept;
     bool set_cursor_visible(bool visible) noexcept;
     // A null shape restores the arrow. A null surface hides the cursor.
     bool set_cursor_shape(const char *shape) noexcept;

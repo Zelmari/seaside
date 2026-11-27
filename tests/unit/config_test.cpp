@@ -41,6 +41,7 @@ TEST_F(ConfigTest, CompiledDefaultsMatchApprovedValues) {
     EXPECT_EQ(value.scrolling.default_column_width, 0.5);
     EXPECT_EQ(value.input.mouse.profile, "flat");
     EXPECT_EQ(value.input.mouse.sensitivity, 0.0);
+    EXPECT_FALSE(value.input.mouse.auto_center_on_lock);
     EXPECT_EQ(value.idle.display_off_after_minutes, 15);
     EXPECT_TRUE(value.render.direct_scanout);
     EXPECT_EQ(value.render.adaptive_sync, seaside::AdaptiveSync::off);
@@ -151,6 +152,7 @@ default_column_width=0.75
 profile='flat'
 sensitivity=-0.7
 scroll_direction='inverse'
+auto_center_on_lock=true
 [idle]
 display_off_after_minutes=42
 [render]
@@ -199,6 +201,7 @@ temperature_kelvin=6000
     EXPECT_EQ(c.input.mouse.profile, "flat");
     EXPECT_EQ(c.input.mouse.sensitivity, -0.7);
     EXPECT_EQ(c.input.mouse.scroll_direction, seaside::ScrollDirection::inverse);
+    EXPECT_TRUE(c.input.mouse.auto_center_on_lock);
     EXPECT_EQ(c.idle.display_off_after_minutes, 42);
     EXPECT_FALSE(c.render.direct_scanout);
     EXPECT_EQ(c.render.adaptive_sync, seaside::AdaptiveSync::always);
@@ -318,6 +321,7 @@ TEST_F(ConfigTest, WrongTypesUnknownFieldsAndInvalidEnumsAreRejected) {
         "[input.mouse]\nprofile='adaptive'",
         "[input.mouse]\nsensitivity=false",
         "[input.mouse]\nscroll_direction='up'",
+        "[input.mouse]\nauto_center_on_lock='true'",
         "[render.blur]\nstrength=1.01",
         "[render.blur]\npasses=0",
         "[render.blur]\npasses=5",

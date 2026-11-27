@@ -115,6 +115,7 @@ struct Config {
             std::string profile = "flat";
             double sensitivity = 0.0;
             ScrollDirection scroll_direction = ScrollDirection::normal;
+            bool auto_center_on_lock = false;
             bool operator==(const Mouse &) const = default;
         } mouse;
         bool operator==(const Input &) const = default;

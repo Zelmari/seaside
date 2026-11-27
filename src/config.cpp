@@ -611,7 +611,9 @@ std::expected<Config, Diagnostic> parse_config(std::string_view text, std::strin
         if (auto *table = v.table(parsed, "input", "input")) {
             v.keys(*table, {"mouse"}, "input");
             if (auto *mouse = v.table(*table, "mouse", "input.mouse")) {
-                v.keys(*mouse, {"profile", "sensitivity", "scroll_direction"}, "input.mouse");
+                v.keys(*mouse,
+                       {"profile", "sensitivity", "scroll_direction", "auto_center_on_lock"},
+                       "input.mouse");
                 if (auto profile = v.string(mouse->get("profile"), "input.mouse.profile")) {
                     if (*profile != "flat")
                         v.fail(mouse->get("profile"), "input.mouse.profile",
@@ -624,6 +626,8 @@ std::expected<Config, Diagnostic> parse_config(std::string_view text, std::strin
                     *mouse, "scroll_direction", "input.mouse.scroll_direction",
                     config.input.mouse.scroll_direction,
                     {{"normal", ScrollDirection::normal}, {"inverse", ScrollDirection::inverse}});
+                v.boolean(*mouse, "auto_center_on_lock", "input.mouse.auto_center_on_lock",
+                          config.input.mouse.auto_center_on_lock);
             }
         }
         if (auto *table = v.table(parsed, "idle", "idle")) {

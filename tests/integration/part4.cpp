@@ -2,6 +2,7 @@
 #include "live_config.hpp"
 #include "part3_bridge.hpp"
 #include "pointer-constraints-client-protocol.h"
+#include "relative-pointer-client-protocol.h"
 #include "server.hpp"
 #include "test_directory.hpp"
 #include "tty_input.hpp"
@@ -104,6 +105,9 @@ struct Client {
         if (constraints) {
             zwp_pointer_constraints_v1_destroy(constraints);
         }
+        if (relative_manager) {
+            zwp_relative_pointer_manager_v1_destroy(relative_manager);
+        }
         if (keyboard) {
             wl_keyboard_release(keyboard);
         }
@@ -183,6 +187,7 @@ struct Client {
     wl_keyboard *keyboard = nullptr;
     wl_pointer *pointer = nullptr;
     zwp_pointer_constraints_v1 *constraints = nullptr;
+    zwp_relative_pointer_manager_v1 *relative_manager = nullptr;
     std::array<wl_output *, 2> outputs{};
     wl_surface *keyboard_surface = nullptr;
     wl_surface *pointer_surface = nullptr;
@@ -402,6 +407,9 @@ void global(void *data, wl_registry *registry, std::uint32_t name, const char *i
     } else if (std::strcmp(interface, zwp_pointer_constraints_v1_interface.name) == 0) {
         client.constraints = static_cast<zwp_pointer_constraints_v1 *>(
             wl_registry_bind(registry, name, &zwp_pointer_constraints_v1_interface, 1));
+    } else if (std::strcmp(interface, zwp_relative_pointer_manager_v1_interface.name) == 0) {
+        client.relative_manager = static_cast<zwp_relative_pointer_manager_v1 *>(
+            wl_registry_bind(registry, name, &zwp_relative_pointer_manager_v1_interface, 1));
     } else if (std::strcmp(interface, wl_output_interface.name) == 0) {
         const auto found = std::ranges::find(client.outputs, nullptr);
         if (found != client.outputs.end()) {
@@ -1526,6 +1534,16 @@ struct LayerSeat : seaside::TtyInputObserver {
         return fixture.scene.pointer_content(surface, content);
     }
 
+    bool place_pointer(double px, double py) noexcept override {
+        x = px;
+        y = py;
+        ++placements;
+        fixture.desktop.motion(x, y);
+        return true;
+    }
+
+    void pointer_locked(bool value) noexcept override { locked = value; }
+
     bool pointer_button(std::uint64_t window, std::uint32_t button, bool pressed,
                         std::uint8_t mods) noexcept override {
         return fixture.desktop.button(window, button, pressed, mods, x, y);
@@ -1570,6 +1588,8 @@ struct LayerSeat : seaside::TtyInputObserver {
     const seaside::BindingMap bindings = seaside::default_bindings();
     double x = 1, y = 1;
     unsigned shortcuts = 0;
+    unsigned placements = 0;
+    bool locked = false;
 };
 
 bool run_cross_output_cycle(const Fixture &fixture) {
@@ -2572,6 +2592,27 @@ struct Confinement {
     unsigned exited = 0;
 };
 
+bool map_pointer_clients(const Fixture &fixture, Connection &connection, Client &passive,
+                         Client &capture, int width, int height) {
+    REQUIRE(connection.connect(passive) && connection.open(passive));
+    REQUIRE(connection.attach(passive, ordinary_width, ordinary_height));
+    xdg_toplevel_set_fullscreen(passive.toplevel, nullptr);
+    REQUIRE(connection.wait(passive, [&] { return passive.configured.fullscreen; }));
+    REQUIRE(connection.attach_configured(passive));
+
+    fixture.desktop.button(0, BTN_LEFT, true, 0, 170, 45);
+    REQUIRE(connection.connect(capture) && connection.open(capture));
+    REQUIRE(connection.attach(capture, ordinary_width, ordinary_height));
+    xdg_toplevel_set_fullscreen(capture.toplevel, nullptr);
+    REQUIRE(connection.wait(capture, [&] { return capture.configured.fullscreen; }));
+    REQUIRE(connection.attach(capture, width, height));
+    REQUIRE(connection.wait(capture, [&] {
+        return capture.keyboard_surface == capture.surface && capture.constraints &&
+               capture.pointer;
+    }));
+    return true;
+}
+
 bool run_fullscreen_confinement(const Fixture &fixture) {
     auto &desktop = fixture.desktop;
     auto primary = fixture.output();
@@ -2584,22 +2625,7 @@ bool run_fullscreen_confinement(const Fixture &fixture) {
     REQUIRE(seat.start());
     Connection connection(fixture.display);
     Client passive, capture;
-    REQUIRE(connection.connect(passive) && connection.open(passive));
-    REQUIRE(connection.attach(passive, ordinary_width, ordinary_height));
-    xdg_toplevel_set_fullscreen(passive.toplevel, nullptr);
-    REQUIRE(connection.wait(passive, [&] { return passive.configured.fullscreen; }));
-    REQUIRE(connection.attach_configured(passive));
-
-    desktop.button(0, BTN_LEFT, true, 0, 170, 45);
-    REQUIRE(connection.connect(capture) && connection.open(capture));
-    REQUIRE(connection.attach(capture, ordinary_width, ordinary_height));
-    xdg_toplevel_set_fullscreen(capture.toplevel, nullptr);
-    REQUIRE(connection.wait(capture, [&] { return capture.configured.fullscreen; }));
-    REQUIRE(connection.attach(capture, 320, 180));
-    REQUIRE(connection.wait(capture, [&] {
-        return capture.keyboard_surface == capture.surface && capture.constraints &&
-               capture.pointer;
-    }));
+    REQUIRE(map_pointer_clients(fixture, connection, passive, capture, 320, 180));
     seaside_scene_target point{};
     REQUIRE(fixture.scene.window_at(170, 45, point) && point.sx == 20 && point.sy == 90);
 
@@ -2642,6 +2668,145 @@ bool run_fullscreen_confinement(const Fixture &fixture) {
     part3_input_button(seat.devices.get(), BTN_LEFT, false);
     REQUIRE(connection.roundtrip(capture) && connection.roundtrip(passive));
     REQUIRE(capture.button_serial != 0 && passive.button_serial == 0);
+    return true;
+}
+
+struct LockEvents {
+    const Client &client;
+    unsigned entered = 0, exited = 0;
+    bool entered_after_pointer = false;
+};
+
+struct RelativeEvents {
+    unsigned count = 0;
+    double dx = 0, dy = 0, raw_x = 0, raw_y = 0;
+};
+
+bool run_fullscreen_lock(const Fixture &fixture) {
+    auto &desktop = fixture.desktop;
+    auto primary = fixture.output();
+    auto secondary = fixture.output();
+    constexpr WindowRect neighbor{160, 0, 160, 90};
+    REQUIRE(primary && secondary);
+    REQUIRE(desktop.add_output(part3_output_handle(primary.get()), "main", output_bounds));
+    REQUIRE(desktop.add_output(part3_output_handle(secondary.get()), "neighbor", neighbor));
+    LayerSeat seat(fixture);
+    REQUIRE(seat.start());
+    seat.input->set_auto_center_on_lock(true);
+    Connection connection(fixture.display);
+    Client passive, capture;
+    REQUIRE(map_pointer_clients(fixture, connection, passive, capture, 300, 300));
+    REQUIRE(passive.relative_manager && capture.relative_manager);
+
+    seat.x = 155;
+    seat.y = 45;
+    seat.input->refresh_pointer();
+    REQUIRE(connection.wait(passive, [&] { return passive.pointer_surface == passive.surface; }));
+    REQUIRE(seat.placements == 0 && !seat.locked);
+
+    const zwp_relative_pointer_v1_listener relative_listener{
+        .relative_motion = [](void *data, zwp_relative_pointer_v1 *, std::uint32_t, std::uint32_t,
+                              wl_fixed_t dx, wl_fixed_t dy, wl_fixed_t raw_x, wl_fixed_t raw_y) {
+            auto &trace = *static_cast<RelativeEvents *>(data);
+            trace = {trace.count + 1, wl_fixed_to_double(dx), wl_fixed_to_double(dy),
+                     wl_fixed_to_double(raw_x), wl_fixed_to_double(raw_y)};
+        }};
+    RelativeEvents capture_relative, passive_relative;
+    using RelativePointer =
+        std::unique_ptr<zwp_relative_pointer_v1, decltype(&zwp_relative_pointer_v1_destroy)>;
+    const auto subscribe = [&](Client &client, RelativeEvents &trace) {
+        RelativePointer relative(zwp_relative_pointer_manager_v1_get_relative_pointer(
+                                     client.relative_manager, client.pointer),
+                                 zwp_relative_pointer_v1_destroy);
+        zwp_relative_pointer_v1_add_listener(relative.get(), &relative_listener, &trace);
+        return relative;
+    };
+    const auto capture_stream = subscribe(capture, capture_relative);
+    const auto passive_stream = subscribe(passive, passive_relative);
+    REQUIRE(connection.roundtrip(passive));
+
+    const std::unique_ptr<wl_region, decltype(&wl_region_destroy)> region(
+        wl_compositor_create_region(capture.compositor), wl_region_destroy);
+    wl_region_add(region.get(), 0, 0, 40, 300);
+    LockEvents trace{capture};
+    const std::unique_ptr<zwp_locked_pointer_v1, decltype(&zwp_locked_pointer_v1_destroy)> lock(
+        zwp_pointer_constraints_v1_lock_pointer(capture.constraints, capture.surface,
+                                                capture.pointer, region.get(),
+                                                ZWP_POINTER_CONSTRAINTS_V1_LIFETIME_PERSISTENT),
+        zwp_locked_pointer_v1_destroy);
+    const zwp_locked_pointer_v1_listener listener{
+        .locked =
+            [](void *data, zwp_locked_pointer_v1 *) {
+                auto &events = *static_cast<LockEvents *>(data);
+                ++events.entered;
+                events.entered_after_pointer =
+                    events.client.pointer_surface == events.client.surface;
+            },
+        .unlocked = [](void *data,
+                       zwp_locked_pointer_v1 *) { ++static_cast<LockEvents *>(data)->exited; }};
+    zwp_locked_pointer_v1_add_listener(lock.get(), &listener, &trace);
+    REQUIRE(connection.roundtrip(capture));
+    REQUIRE(seat.x == 155 && trace.entered == 0);
+    zwp_locked_pointer_v1_set_region(lock.get(), nullptr);
+    REQUIRE(connection.roundtrip(capture) && trace.entered == 0);
+    wl_surface_commit(capture.surface);
+    REQUIRE(connection.wait(capture, [&] { return trace.entered == 1; }));
+    REQUIRE(trace.entered_after_pointer && seat.locked && seat.placements == 1 && seat.x == 240 &&
+            seat.y == 45 && capture_relative.count == 0);
+
+    const auto regular = capture.pointer_motions;
+    part3_input_relative(seat.devices.get(), -250, -40, -201, -28);
+    part3_input_absolute(seat.devices.get(), 0.1, 0.8);
+    part3_input_button(seat.devices.get(), BTN_LEFT, true);
+    part3_input_button(seat.devices.get(), BTN_LEFT, false);
+    REQUIRE(connection.roundtrip(capture) && connection.roundtrip(passive));
+    REQUIRE(seat.x == 240 && seat.y == 45 && seat.placements == 1 &&
+            capture.pointer_motions == regular && capture_relative.count == 1 &&
+            capture_relative.dx == -250 && capture_relative.dy == -40 &&
+            capture_relative.raw_x == -201 && capture_relative.raw_y == -28 &&
+            passive_relative.count == 0 && passive.pointer_surface == nullptr &&
+            passive.button_serial == 0 && capture.button_serial != 0);
+
+    {
+        Popup popup;
+        REQUIRE(connection.open_popup(capture, popup, nullptr, capture.button_serial));
+        REQUIRE(connection.roundtrip(capture) && trace.exited == 1 && !seat.locked);
+        seat.input->refresh_pointer();
+        REQUIRE(connection.roundtrip(capture) && trace.entered == 1 && seat.placements == 1);
+        seat.input->set_auto_center_on_lock(false);
+    }
+    REQUIRE(connection.wait(capture, [&] { return trace.entered == 2; }));
+    REQUIRE(seat.x == 240 && seat.placements == 1);
+    zwp_locked_pointer_v1_set_region(lock.get(), region.get());
+    wl_surface_commit(capture.surface);
+    REQUIRE(connection.wait(capture, [&] { return trace.exited == 2; }));
+    part3_input_relative(seat.devices.get(), -40, 0, -36, 0);
+    REQUIRE(connection.wait(capture, [&] { return trace.entered == 3; }));
+    REQUIRE(seat.x == 200 && seat.placements == 1 && seat.locked);
+    seat.input->set_auto_center_on_lock(true);
+    seat.input->refresh_pointer();
+    REQUIRE(connection.roundtrip(capture) && seat.x == 200 && seat.placements == 1 &&
+            trace.entered == 3 && trace.exited == 2);
+
+    seat.key(KEY_F8);
+    REQUIRE(connection.wait(capture, [&] { return !capture.configured.fullscreen; }));
+    REQUIRE(connection.attach(capture, ordinary_width, ordinary_height));
+    REQUIRE(trace.exited == 3 && !seat.locked);
+    zwp_locked_pointer_v1_set_region(lock.get(), nullptr);
+    wl_surface_commit(capture.surface);
+    REQUIRE(connection.roundtrip(capture) && trace.entered == 3 && seat.placements == 1);
+
+    const auto focused = desktop.keyboard_window();
+    REQUIRE(focused);
+    const auto window = desktop.windows().view(*focused).geometry;
+    part3_input_relative(seat.devices.get(), window.x + 2 - seat.x, window.y + 2 - seat.y, 8, 3);
+    REQUIRE(connection.wait(capture, [&] { return trace.entered == 4; }));
+    REQUIRE(seat.placements == 2 && seat.x == window.x + window.width / 2.0 &&
+            seat.y == window.y + window.height / 2.0);
+    seat.input->set_auto_center_on_lock(false);
+    desktop.remove_output(part3_output_handle(secondary.get()));
+    REQUIRE(connection.wait(capture, [&] { return trace.exited == 4; }));
+    REQUIRE(!seat.locked);
     return true;
 }
 
@@ -3039,6 +3204,10 @@ int main(int argc, char **argv) {
     if (argc == 2 && scenario == "fullscreen-confinement") {
         config.window.tiling = false;
         return run_fixture(config, run_fullscreen_confinement) ? EXIT_SUCCESS : EXIT_FAILURE;
+    }
+    if (argc == 2 && scenario == "fullscreen-lock") {
+        config.window.tiling = false;
+        return run_fixture(config, run_fullscreen_lock) ? EXIT_SUCCESS : EXIT_FAILURE;
     }
     if (argc == 2 && scenario == "attention") {
         config.window.tiling = false;

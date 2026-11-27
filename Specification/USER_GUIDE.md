@@ -127,7 +127,14 @@ their own appearance setting can override the session preference. Set
 `"#RRGGBB"` hex colors.
 
 Under `[input.mouse]`, choose `scroll_direction = "normal"` or `"inverse"`
-for wheel and touchpad scrolling. Under `[render.blur]`, set `enabled = true`
+for wheel and touchpad scrolling. Set `auto_center_on_lock = true` to center
+the cursor in the visible content of a focused app when its pointer lock
+activates and its input and lock regions include that point. A fullscreen app
+can acquire its lock from another output. A windowed app requires the cursor
+to be over its content. This policy is off by default and reloads apply from
+the next lock acquisition.
+
+Under `[render.blur]`, set `enabled = true`
 to blur the backdrop behind translucent windows. Blur is off by default.
 Use `strength` from `0.0` through `1.0` and `passes` from `1` through `4`.
 
