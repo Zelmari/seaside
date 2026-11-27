@@ -2824,6 +2824,75 @@ bool run_fullscreen_lock(const Fixture &fixture) {
     return true;
 }
 
+bool run_lock_around_compositor_drag(const Fixture &fixture) {
+    auto &desktop = fixture.desktop;
+    auto primary = fixture.output();
+    auto secondary = fixture.output();
+    REQUIRE(primary && secondary);
+    REQUIRE(desktop.add_output(part3_output_handle(primary.get()), "main", output_bounds));
+    REQUIRE(
+        desktop.add_output(part3_output_handle(secondary.get()), "neighbor", {160, 0, 160, 90}));
+    LayerSeat seat(fixture);
+    REQUIRE(seat.start());
+    seat.input->set_auto_center_on_lock(true);
+    Connection connection(fixture.display);
+    Client passive, capture;
+    REQUIRE(connection.connect(passive) && connection.open(passive));
+    REQUIRE(connection.attach(passive, ordinary_width, ordinary_height));
+    const auto first = desktop.keyboard_window();
+    REQUIRE(first);
+    seat.click(240, 45);
+    REQUIRE(connection.connect(capture) && connection.open(capture));
+    REQUIRE(connection.attach(capture, ordinary_width, ordinary_height));
+    const auto second = desktop.keyboard_window();
+    REQUIRE(second && second != first && capture.constraints && capture.pointer);
+    const auto passive_box = desktop.windows().view(*first).geometry;
+    seat.click(passive_box.x + 2, passive_box.y + 2);
+    REQUIRE(desktop.keyboard_window() == first);
+
+    const auto original = desktop.windows().view(*second).geometry;
+    seat.x = original.x + 2;
+    seat.y = original.y + 2;
+    seat.input->refresh_pointer();
+    REQUIRE(connection.wait(capture, [&] { return capture.pointer_surface == capture.surface; }));
+    unsigned activations = 0;
+    const zwp_locked_pointer_v1_listener listener{
+        .locked = [](void *data, zwp_locked_pointer_v1 *) { ++*static_cast<unsigned *>(data); },
+        .unlocked = [](void *, zwp_locked_pointer_v1 *) {},
+    };
+    const std::unique_ptr<zwp_locked_pointer_v1, decltype(&zwp_locked_pointer_v1_destroy)> lock(
+        zwp_pointer_constraints_v1_lock_pointer(capture.constraints, capture.surface,
+                                                capture.pointer, nullptr,
+                                                ZWP_POINTER_CONSTRAINTS_V1_LIFETIME_PERSISTENT),
+        zwp_locked_pointer_v1_destroy);
+    zwp_locked_pointer_v1_add_listener(lock.get(), &listener, &activations);
+    REQUIRE(connection.roundtrip(capture) && activations == 0);
+
+    seat.key_state(KEY_LEFTMETA, true);
+    part3_input_button(seat.devices.get(), BTN_LEFT, true);
+    REQUIRE(desktop.keyboard_window() == second);
+    REQUIRE(seat.placements == 0 && desktop.windows().view(*second).geometry == original);
+    part3_input_relative(seat.devices.get(), 5, 0, 5, 0);
+    REQUIRE(connection.roundtrip(capture) && activations == 0 && capture.button_serial == 0);
+    auto moved = original;
+    moved.x += 5;
+    REQUIRE(desktop.windows().view(*second).geometry == moved);
+    part3_input_button(seat.devices.get(), BTN_LEFT, false);
+    seat.key_state(KEY_LEFTMETA, false);
+    REQUIRE(connection.wait(capture, [&] { return activations == 1; }));
+    REQUIRE(seat.placements == 1 && seat.locked && capture.button_serial == 0);
+    REQUIRE(seat.x == moved.x + moved.width / 2.0 && seat.y == moved.y + moved.height / 2.0);
+    REQUIRE(desktop.windows().view(*second).geometry == moved);
+
+    REQUIRE(desktop.action(action(ActionKind::cycle_focus_mru)));
+    REQUIRE(desktop.keyboard_window() == first && !seat.locked);
+    seat.click(moved.x + 2, moved.y + 2);
+    REQUIRE(
+        connection.wait(capture, [&] { return activations == 2 && capture.button_serial > 0; }));
+    REQUIRE(seat.placements == 2 && seat.locked);
+    return true;
+}
+
 bool run_dwindle(const Fixture &fixture) {
     auto &desktop = fixture.desktop;
     auto output = fixture.output();
@@ -3236,7 +3305,10 @@ int main(int argc, char **argv) {
     }
     if (argc == 2 && scenario == "fullscreen-lock") {
         config.window.tiling = false;
-        return run_fixture(config, run_fullscreen_lock) ? EXIT_SUCCESS : EXIT_FAILURE;
+        return run_fixture(config, run_fullscreen_lock) &&
+                       run_fixture(config, run_lock_around_compositor_drag)
+                   ? EXIT_SUCCESS
+                   : EXIT_FAILURE;
     }
     if (argc == 2 && scenario == "attention") {
         config.window.tiling = false;

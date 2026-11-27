@@ -69,6 +69,7 @@ struct TtyInputState {
     uint32_t gesture_button;
     bool gesture_released;
     size_t consumed_button_count;
+    bool dispatching_button_press;
     struct wlr_relative_pointer_manager_v1 *relative_pointer;
     struct wlr_pointer_constraints_v1 *constraints;
     struct wlr_pointer_constraint_v1 *constraint;
@@ -226,7 +227,7 @@ static uint64_t refresh_constraint(TtyInputState *input, uint64_t window = 0) {
     struct wlr_surface *focus = seat->keyboard_state.focused_surface;
     if (!input->attached || !input->snapshot.pointers || !focus ||
         wlr_seat_pointer_has_grab(seat) || wlr_seat_keyboard_has_grab(seat) ||
-        input->consumed_button_count) {
+        input->consumed_button_count || input->dispatching_button_press) {
         leave_constraint(input, true);
         return window;
     }
@@ -968,15 +969,23 @@ static void handle_pointer_button(struct wl_listener *listener, void *data) noex
     struct wlr_surface *root = hovered ? wlr_surface_get_root_surface(hovered) : nullptr;
     const bool input_popup = root && wlr_input_popup_surface_v2_try_from_wlr_surface(root);
     if (input->options.pointer_targets && !wlr_seat_pointer_has_grab(seat) && !input->constraint &&
-        !input_popup && (seat->pointer_state.button_count == 0 || !pressed) &&
-        input->observer->pointer_button(window, button, pressed, input->modifiers) && pressed &&
-        button < KEY_CNT) {
-        input->gesture_device = device;
-        input->gesture_button = button;
-        device->consumed_buttons[button] = true;
-        ++input->consumed_button_count;
-        wlr_seat_pointer_notify_clear_focus(seat);
-        return;
+        !input_popup && (seat->pointer_state.button_count == 0 || !pressed)) {
+        // The desktop may change focus before reporting that the press started a drag.
+        input->dispatching_button_press = pressed;
+        const bool consumed =
+            input->observer->pointer_button(window, button, pressed, input->modifiers);
+        input->dispatching_button_press = false;
+        if (pressed) {
+            if (consumed && button < KEY_CNT) {
+                input->gesture_device = device;
+                input->gesture_button = button;
+                device->consumed_buttons[button] = true;
+                ++input->consumed_button_count;
+                wlr_seat_pointer_notify_clear_focus(seat);
+                return;
+            }
+            refresh_constraint(input);
+        }
     }
     const bool first_press = pressed && seat->pointer_state.button_count == 0;
     if (wlr_seat_pointer_notify_button(seat, event->time_msec, button, event->state) &&
