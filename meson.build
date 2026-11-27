@@ -596,7 +596,9 @@ browser_test = executable(
 )
 test('part12-browser-preferences', python,
   args: [files('tests/integration/test_browser_preferences.py'), browser_test],
-  suite: ['integration', 'part12'], timeout: 30)
+  suite: ['integration', 'part12'], timeout: 30,
+  env: {'SEASIDE_TEST_PART': '12'},
+)
 
 seaside = executable(
   'seaside', ['src/session_entry.cpp', 'src/session_environment.cpp', 'src/session_control.cpp', 'src/session_browser.cpp', 'src/output_config.cpp', build_info],

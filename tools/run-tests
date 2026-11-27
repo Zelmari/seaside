@@ -37,6 +37,7 @@ PART_QUALIFICATION = {
     8: "software_checks_only_arch_vm_and_native_drm_evidence_reported_separately",
     9: "software_checks_only_arch_vm_session_and_native_display_evidence_reported_separately",
     10: "software_checks_only_installed_arch_vm_and_native_release_evidence_reported_separately",
+    12: "software_checks_only_dual_output_vm_and_native_timing_evidence_reported_separately",
 }
 
 
@@ -455,7 +456,7 @@ def load_test_manifest(build_dir: Path, suites: list[str]) -> list[dict]:
         ):
             continue
         part = int(env.get("SEASIDE_TEST_PART", "1"))
-        if not 1 <= part <= 10:
+        if not 1 <= part <= 12:
             raise ValueError("Invalid test part marker")
         requirements = env.get("SEASIDE_REQUIREMENTS", "12.2b")
         if not isinstance(requirements, str) or any(not value.strip() for value in requirements.split(",")):

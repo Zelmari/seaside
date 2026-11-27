@@ -541,6 +541,14 @@ class ResultEvidenceTests(unittest.TestCase):
         self.assertEqual(manifest[0]["part"], 3)
         self.assertEqual(manifest[0]["requirement_sections"], ["3", "12.2b"])
 
+    def test_part12_discovery_accepts_desktop_workflow_fixtures(self):
+        declaration = self.declaration(name="fullscreen-lock", part="12", suite="part12", gtest="0")
+        manifest = self.manifest([declaration], ["part12"])
+        self.assertEqual(manifest[0]["part"], 12)
+        declaration["env"]["SEASIDE_TEST_PART"] = "13"
+        with self.assertRaisesRegex(ValueError, "Invalid test part marker"):
+            self.manifest([declaration], ["part12"])
+
     def test_part3_software_pass_does_not_qualify_the_real_graphical_session(self):
         self.metadata[0]["part"] = 3
         self.metadata[0]["requirement_sections"] = ["3", "12.2b"]
