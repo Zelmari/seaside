@@ -167,6 +167,115 @@ TEST(WindowManager, KeepsHeldMruStableAndSkipsUnmappedWindows) {
     EXPECT_FALSE(manager.focused_window());
 }
 
+TEST(WindowManager, CyclesSeatHistoryAcrossDisplayedWorkspacesWithoutChangingThem) {
+    WindowManager manager;
+    ASSERT_TRUE(manager.add_output("left", left, left, true));
+    ASSERT_TRUE(manager.add_output("right", right, right));
+    const auto a = open_window(manager);
+    const auto b = open_window(manager);
+    ASSERT_TRUE(manager.focus_output("right"));
+    const auto c = open_window(manager);
+    const auto d = open_window(manager);
+    ASSERT_TRUE(manager.click(a));
+
+    for (const auto &[id, output] : {std::pair{d, "right"},
+                                     {c, "right"},
+                                     {b, "left"},
+                                     {a, "left"},
+                                     {d, "right"},
+                                     {c, "right"}}) {
+        ASSERT_TRUE(manager.cycle_focus(true));
+        EXPECT_EQ(manager.focused_window(), id);
+        EXPECT_EQ(manager.focused_output(), output);
+        EXPECT_EQ(manager.state().output("left")->shown, 1U);
+        EXPECT_EQ(manager.state().output("right")->shown, 6U);
+    }
+    manager.finish_focus_cycle();
+    ASSERT_TRUE(manager.cycle_focus(false));
+    EXPECT_EQ(manager.focused_window(), a);
+    ASSERT_TRUE(manager.cycle_focus(false));
+    EXPECT_EQ(manager.focused_window(), c);
+
+    ASSERT_TRUE(manager.focus_output("left"));
+    EXPECT_EQ(manager.focused_window(), a);
+    ASSERT_TRUE(manager.focus_output("right"));
+    EXPECT_EQ(manager.focused_window(), c);
+}
+
+TEST(WindowManager, RevalidatesHeldCycleAfterMapUnmapAndOutputRemoval) {
+    WindowManager manager;
+    ASSERT_TRUE(manager.add_output("left", left, left, true));
+    ASSERT_TRUE(manager.add_output("right", right, right));
+    const auto a = open_window(manager);
+    const auto b = open_window(manager);
+    ASSERT_TRUE(manager.focus_output("right"));
+    const auto c = open_window(manager);
+    const auto d = open_window(manager);
+    ASSERT_TRUE(manager.click(a));
+
+    ASSERT_TRUE(manager.cycle_focus(true));
+    EXPECT_EQ(manager.focused_window(), d);
+    ASSERT_TRUE(manager.unmap_window(c));
+    ASSERT_TRUE(manager.cycle_focus(true));
+    EXPECT_EQ(manager.focused_window(), b);
+    const auto newcomer = open_window(manager);
+    ASSERT_TRUE(manager.remove_output("right"));
+    EXPECT_FALSE(manager.view(d).visible);
+    ASSERT_TRUE(manager.cycle_focus(true));
+    EXPECT_EQ(manager.focused_window(), a);
+    ASSERT_TRUE(manager.cycle_focus(true));
+    EXPECT_EQ(manager.focused_window(), b);
+    manager.finish_focus_cycle();
+    ASSERT_TRUE(manager.cycle_focus(false));
+    EXPECT_EQ(manager.focused_window(), a);
+    EXPECT_TRUE(manager.view(newcomer).visible);
+}
+
+TEST(WindowManager, CyclesAFloatingPinAndFullscreenDialogsAcrossOutputs) {
+    WindowManager manager(false);
+    ASSERT_TRUE(manager.add_output("left", left, left, true));
+    ASSERT_TRUE(manager.add_output("right", right, right));
+    const auto pinned = open_window(manager);
+    ASSERT_TRUE(manager.toggle_pin(pinned));
+    ASSERT_TRUE(manager.select_workspace(3));
+    const auto ordinary = open_window(manager);
+    ASSERT_TRUE(manager.focus_output("right"));
+    const auto fullscreen = open_window(manager);
+    ASSERT_TRUE(manager.set_fullscreen(fullscreen, true));
+    const auto dialog = open_window(manager, fullscreen);
+    ASSERT_TRUE(manager.click(ordinary));
+    for (const auto id : {dialog, fullscreen, pinned, ordinary}) {
+        ASSERT_TRUE(manager.cycle_focus(true));
+        EXPECT_EQ(manager.focused_window(), id);
+    }
+    EXPECT_TRUE(manager.view(fullscreen).fullscreen);
+    EXPECT_EQ(manager.state().output("left")->shown, 3U);
+    EXPECT_EQ(manager.state().output("right")->shown, 6U);
+}
+
+TEST(WindowManager, CyclesVisibleClientsWithoutHistoryInWindowIdOrder) {
+    WindowManager manager(false);
+    ASSERT_TRUE(manager.add_output("left", left, left, true));
+    ASSERT_TRUE(manager.add_output("right", right, right));
+    const auto first = manager.create_window();
+    const auto second = manager.create_window();
+    ASSERT_TRUE(first && second);
+    ASSERT_TRUE(manager.focus_output("right"));
+    EXPECT_FALSE(manager.cycle_focus(false));
+    ASSERT_TRUE(manager.initialize_window(*second));
+    ASSERT_TRUE(manager.map_window(*second, client));
+    ASSERT_TRUE(manager.initialize_window(*first));
+    ASSERT_TRUE(manager.map_window(*first, client));
+    ASSERT_TRUE(manager.cycle_focus(true));
+    EXPECT_EQ(manager.focused_window(), first);
+    EXPECT_EQ(manager.focused_output(), "left");
+    ASSERT_TRUE(manager.cycle_focus(true));
+    EXPECT_EQ(manager.focused_window(), second);
+    manager.finish_focus_cycle();
+    ASSERT_TRUE(manager.unmap_window(*first));
+    EXPECT_FALSE(manager.cycle_focus(false));
+}
+
 TEST(WindowManager, FocusRevealsATileWithoutChangingMaximizedOrTiledGeometry) {
     WindowManager manager;
     ASSERT_TRUE(manager.add_output("left", left, usable, true));
@@ -250,7 +359,9 @@ TEST(WindowManager, KeyboardNavigationAndUnpinFollowVisiblePinnedWindows) {
     EXPECT_TRUE(manager.view(pinned).visible);
     EXPECT_EQ(manager.focused_window(), pinned);
     ASSERT_TRUE(manager.focus_output("right"));
-    EXPECT_FALSE(manager.cycle_focus(false));
+    EXPECT_TRUE(manager.cycle_focus(false));
+    EXPECT_EQ(manager.focused_output(), "left");
+    EXPECT_EQ(manager.focused_window(), pinned);
     EXPECT_TRUE(manager.state().valid());
 }
 

@@ -697,6 +697,7 @@ std::expected<bool, DesktopActionError> Desktop::dispatch(const Action &action,
     try {
     using Error = DesktopActionError;
     const auto focused = windows_.focused_window();
+    const auto focused_output = windows_.focused_output();
     const auto id = target.value_or(keyboard_window_.value_or(0));
     const auto before = windows_.view(id);
     const auto current_workspace = windows_.focused_workspace();
@@ -728,7 +729,8 @@ std::expected<bool, DesktopActionError> Desktop::dispatch(const Action &action,
         if (!windows_.cycle_focus(modifiers != 0)) {
             return std::unexpected(Error::no_target);
         }
-        changed = focused != windows_.focused_window();
+        discard_drag();
+        changed = true;
         break;
     case ActionKind::workspace: {
         if (action.argument <= 0 || action.argument > workspace_count) {
@@ -820,8 +822,9 @@ std::expected<bool, DesktopActionError> Desktop::dispatch(const Action &action,
         }
         break;
     }
-    const bool focus_changed =
-        focused != windows_.focused_window() || current_workspace != windows_.focused_workspace();
+    const bool focus_changed = focused != windows_.focused_window() ||
+                               focused_output != windows_.focused_output() ||
+                               current_workspace != windows_.focused_workspace();
     if (focus_changed) {
         scene_.select_layer(nullptr);
     }

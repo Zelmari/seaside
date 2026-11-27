@@ -1470,11 +1470,16 @@ struct LayerSeat : seaside::TtyInputObserver {
     ~LayerSeat() { fixture.desktop.set_input(nullptr); }
 
     bool shortcut_pressed(std::uint8_t mods, std::uint32_t keysym) noexcept override {
-        if (keysym != XKB_KEY_F8) {
-            return false;
+        if (keysym == XKB_KEY_F8) {
+            ++shortcuts;
+            return fixture.desktop.action(action(ActionKind::toggle_window_fullscreen), mods);
         }
-        ++shortcuts;
-        return fixture.desktop.action(action(ActionKind::toggle_window_fullscreen), mods);
+        const auto binding = bindings.find({mods, seaside::ChordKind::keyboard, keysym});
+        return binding != bindings.end() && fixture.desktop.action(binding->second, mods);
+    }
+
+    void modifiers_changed(std::uint8_t modifiers) noexcept override {
+        fixture.desktop.modifiers_changed(modifiers);
     }
 
     bool pointer_target(seaside::TtyPointerTarget &target) noexcept override {
@@ -1507,9 +1512,13 @@ struct LayerSeat : seaside::TtyInputObserver {
         return devices && !input->snapshot().failed;
     }
 
+    void key_state(std::uint32_t code, bool pressed) const {
+        part3_input_key(devices.get(), code, pressed);
+    }
+
     void key(std::uint32_t code) const {
-        part3_input_key(devices.get(), code, true);
-        part3_input_key(devices.get(), code, false);
+        key_state(code, true);
+        key_state(code, false);
     }
 
     void click(double px, double py) {
@@ -1523,9 +1532,92 @@ struct LayerSeat : seaside::TtyInputObserver {
     std::unique_ptr<seaside::TtyInput> input;
     std::unique_ptr<part3_input, decltype(&part3_input_destroy)> devices{nullptr,
                                                                          part3_input_destroy};
+    const seaside::BindingMap bindings = seaside::default_bindings();
     double x = 1, y = 1;
     unsigned shortcuts = 0;
 };
+
+bool run_cross_output_cycle(const Fixture &fixture) {
+    auto &desktop = fixture.desktop;
+    const auto &windows = desktop.windows();
+    auto left = fixture.output();
+    auto right = fixture.output();
+    REQUIRE(left && right);
+    auto *left_output = part3_output_handle(left.get());
+    auto *right_output = part3_output_handle(right.get());
+    REQUIRE(desktop.add_output(left_output, "left", output_bounds));
+    REQUIRE(desktop.add_output(right_output, "right", {160, 0, 160, 90}));
+    LayerSeat seat(fixture);
+    REQUIRE(seat.start());
+    Connection connection(fixture.display);
+    Client first, second, remote;
+    REQUIRE(connection.connect(first) && connection.open(first));
+    REQUIRE(connection.attach(first, ordinary_width, ordinary_height));
+    const auto a = desktop.keyboard_window();
+    REQUIRE(a);
+    REQUIRE(connection.connect(second) && connection.open(second));
+    REQUIRE(connection.attach(second, ordinary_width, ordinary_height));
+    const auto b = desktop.keyboard_window();
+    REQUIRE(b && b != a);
+
+    seat.click(200, 45);
+    REQUIRE(!desktop.keyboard_window() && desktop.focused_output_handle() == right_output);
+    seat.key_state(KEY_LEFTALT, true);
+    seat.key(KEY_TAB);
+    seat.key_state(KEY_LEFTALT, false);
+    REQUIRE(desktop.keyboard_window() == b && desktop.focused_output_handle() == left_output);
+    seat.click(200, 45);
+    REQUIRE(connection.connect(remote) && connection.open(remote));
+    REQUIRE(connection.attach(remote, ordinary_width, ordinary_height));
+    const auto c = desktop.keyboard_window();
+    REQUIRE(c && c != a && c != b);
+    const auto box = windows.view(*a).geometry;
+    seat.click(box.x + 1, box.y + 1);
+    REQUIRE(connection.wait(first, [&] { return first.pointer_surface == first.surface; }));
+    REQUIRE(desktop.keyboard_window() == a);
+    Popup menu;
+    REQUIRE(connection.open_popup(first, menu, nullptr, first.button_serial, 0));
+    REQUIRE(first.keyboard_surface == menu.surface);
+
+    seat.key_state(KEY_LEFTALT, true);
+    seat.key(KEY_TAB);
+    REQUIRE(desktop.keyboard_window() == c && desktop.focused_output_handle() == right_output);
+    REQUIRE(connection.wait(first, [&] { return menu.dismissed; }));
+    REQUIRE(connection.wait(remote, [&] { return remote.keyboard_surface == remote.surface; }));
+    seat.key(KEY_TAB);
+    REQUIRE(desktop.keyboard_window() == b && desktop.focused_output_handle() == left_output);
+    seat.key(KEY_TAB);
+    REQUIRE(desktop.keyboard_window() == a);
+    seat.key(KEY_TAB);
+    REQUIRE(desktop.keyboard_window() == c);
+    seat.key_state(KEY_LEFTALT, false);
+    REQUIRE(connection.roundtrip(first) && connection.roundtrip(remote));
+    const auto first_keys = first.keys;
+    const auto remote_keys = remote.keys;
+    seat.key(KEY_C);
+    REQUIRE(connection.roundtrip(first) && connection.roundtrip(remote));
+    REQUIRE(remote.keys == remote_keys + 1 && first.keys == first_keys);
+    REQUIRE(first.pointer_surface == first.surface && !remote.pointer_surface);
+    REQUIRE(windows.state().output("left")->shown == 1);
+    REQUIRE(windows.state().output("right")->shown == 6);
+
+    seat.key_state(KEY_LEFTALT, true);
+    seat.key(KEY_TAB);
+    REQUIRE(desktop.keyboard_window() == a && desktop.focused_output_handle() == left_output);
+    desktop.remove_output(right_output);
+    right.reset();
+    seat.key(KEY_TAB);
+    REQUIRE(desktop.keyboard_window() == b);
+    seat.key_state(KEY_LEFTALT, false);
+    REQUIRE(connection.roundtrip(second));
+    const auto second_keys = second.keys;
+    seat.key(KEY_B);
+    REQUIRE(connection.roundtrip(second) && second.keys == second_keys + 1);
+    REQUIRE(windows.state().output("left")->shown == 1 && !windows.view(*c).visible);
+    REQUIRE(!desktop.failed() && !fixture.scene.snapshot().failed);
+    desktop.remove_output(left_output);
+    return true;
+}
 
 bool run_wayland_input(const Fixture &fixture, const char *executable) {
     auto output = fixture.output();
@@ -2679,6 +2771,7 @@ int main(int argc, char **argv) {
         config.window.tiling = false;
         return run_fixture(config, run_part4) && run_fixture(config, run_sparse_view_ids) &&
                        run_fixture(config, run_workspace_topology) &&
+                       run_fixture(config, run_cross_output_cycle) &&
                        run_fixture(config, run_floating_borders) &&
                        run_fixture(config, run_floating_resize_dialogs) &&
                        run_fixture(config, run_floating_resize_limits) &&

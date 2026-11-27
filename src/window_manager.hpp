@@ -149,6 +149,7 @@ class WindowManager final {
 
     bool show_workspace(std::string_view output, WorkspaceId workspace);
     bool reconcile_workspaces(WorkspaceId previous_workspace);
+    bool set_focused_output(std::string_view id);
     bool focus_on_output(std::string_view id, bool restore_workspace_focus = false);
     bool relocate_window(WindowId id, WorkspaceId workspace, WorkspaceLayout *prepared = nullptr);
     void remember_focus(WindowId id, WorkspaceId workspace);
@@ -188,6 +189,7 @@ class WindowManager final {
     std::optional<std::string_view> primary_output_;
     WorkspaceId disconnected_workspace_ = 1;
     std::optional<WindowId> focused_window_;
+    std::vector<WindowId> seat_focus_history_;
     std::optional<FocusCycle> cycle_;
     std::optional<TileMove> tile_move_;
     std::optional<FloatingMove> floating_move_;

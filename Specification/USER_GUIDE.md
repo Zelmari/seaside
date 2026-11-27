@@ -173,7 +173,7 @@ until it observes a completed save.
 | Super+Shift+1 through Super+Shift+9, Super+Shift+0 | Move the focused window to workspaces 1 through 9, then 10, and follow it |
 | Super+arrow keys | Focus a window in that direction |
 | Super+Shift+arrow keys | Move the focused tile in that direction. Scrolling columns move left or right. |
-| Alt+Tab | Cycle through the current workspace's recent focus history |
+| Alt+Tab | Cycle through recently focused windows on the workspaces currently displayed on all outputs |
 | Super+left mouse drag | Move a window |
 | Super+right mouse drag | Resize from a side or corner, or move a shared tile boundary |
 | Media volume down/up and mute | Adjust the default playback device in five-point steps, cap at 100%, or toggle mute |
