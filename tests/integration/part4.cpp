@@ -2613,7 +2613,8 @@ bool map_pointer_clients(const Fixture &fixture, Connection &connection, Client 
     return true;
 }
 
-bool run_fullscreen_confinement(const Fixture &fixture) {
+bool run_fullscreen_confinement(const Fixture &fixture, int width, int height, int content_left,
+                                bool reproject = false) {
     auto &desktop = fixture.desktop;
     auto primary = fixture.output();
     auto secondary = fixture.output();
@@ -2625,9 +2626,11 @@ bool run_fullscreen_confinement(const Fixture &fixture) {
     REQUIRE(seat.start());
     Connection connection(fixture.display);
     Client passive, capture;
-    REQUIRE(map_pointer_clients(fixture, connection, passive, capture, 320, 180));
+    REQUIRE(map_pointer_clients(fixture, connection, passive, capture, width, height));
+    seat.input->set_auto_center_on_lock(true);
+    const int inside = content_left + 10;
     seaside_scene_target point{};
-    REQUIRE(fixture.scene.window_at(170, 45, point) && point.sx == 20 && point.sy == 90);
+    REQUIRE(fixture.scene.window_at(inside, 45, point) && point.id == desktop.keyboard_window());
 
     seat.x = 155;
     seat.y = 45;
@@ -2648,26 +2651,37 @@ bool run_fullscreen_confinement(const Fixture &fixture) {
             }};
     zwp_confined_pointer_v1_add_listener(confine.get(), &listener, &trace);
     REQUIRE(connection.roundtrip(capture) && trace.entered == 0);
-    part3_input_relative(seat.devices.get(), 15, 0, 9, 0);
+    part3_input_relative(seat.devices.get(), inside - 155, 0, 9, 0);
     REQUIRE(connection.wait(capture, [&] { return trace.entered == 1; }));
-    REQUIRE(capture.pointer_surface == capture.surface && seat.x == 170);
+    REQUIRE(capture.pointer_surface == capture.surface && seat.x == inside && seat.placements == 0);
     REQUIRE(connection.roundtrip(passive));
     const auto passive_motions = passive.pointer_motions;
 
     part3_input_relative(seat.devices.get(), -80, 0, -60, 0);
     REQUIRE(connection.roundtrip(capture) && connection.roundtrip(passive));
-    std::fprintf(stderr, "Downscaled confinement x=%.3f activation=%u deactivation=%u\n", seat.x,
-                 trace.entered, trace.exited);
-    REQUIRE(seat.x >= 160 && seat.x < 161 && trace.exited == 0 &&
+    std::fprintf(stderr, "Confinement %dx%d: x=%.3f activation=%u deactivation=%u\n", width, height,
+                 seat.x, trace.entered, trace.exited);
+    REQUIRE(seat.x >= content_left && seat.x < content_left + 1 && trace.exited == 0 &&
             passive.pointer_surface == nullptr && passive.pointer_motions == passive_motions);
 
     part3_input_absolute(seat.devices.get(), 0.1, 0.5);
     REQUIRE(connection.roundtrip(capture) && connection.roundtrip(passive));
-    REQUIRE(seat.x >= 160 && seat.x < 161 && trace.exited == 0);
+    REQUIRE(seat.x >= content_left && seat.x < content_left + 1 && trace.exited == 0);
     part3_input_button(seat.devices.get(), BTN_LEFT, true);
     part3_input_button(seat.devices.get(), BTN_LEFT, false);
     REQUIRE(connection.roundtrip(capture) && connection.roundtrip(passive));
     REQUIRE(capture.button_serial != 0 && passive.button_serial == 0);
+    if (reproject) {
+        REQUIRE(part3_output_set_scale(secondary.get(), 1.25F) &&
+                part3_output_set_transform(secondary.get(), WL_OUTPUT_TRANSFORM_90) &&
+                desktop.update_output(part3_output_handle(secondary.get()), {160, 0, 72, 128}));
+        REQUIRE(connection.roundtrip(capture));
+        REQUIRE(trace.entered == 1 && trace.exited == 0);
+        part3_input_relative(seat.devices.get(), -100, -100, -80, -80);
+        REQUIRE(connection.roundtrip(capture) && connection.roundtrip(passive));
+        REQUIRE(seat.x >= 160 && seat.x < 161 && seat.y >= 43 && seat.y < 44 && trace.exited == 0 &&
+                passive.pointer_surface == nullptr);
+    }
     return true;
 }
 
@@ -3203,7 +3217,22 @@ int main(int argc, char **argv) {
     }
     if (argc == 2 && scenario == "fullscreen-confinement") {
         config.window.tiling = false;
-        return run_fixture(config, run_fullscreen_confinement) ? EXIT_SUCCESS : EXIT_FAILURE;
+        auto stretch = config;
+        stretch.render.fullscreen_aspect = seaside::FullscreenAspect::stretch;
+        return run_fixture(config,
+                           [](const Fixture &fixture) {
+                               return run_fullscreen_confinement(fixture, 320, 180, 160, true);
+                           }) &&
+                       run_fixture(config,
+                                   [](const Fixture &fixture) {
+                                       return run_fullscreen_confinement(fixture, 60, 60, 195);
+                                   }) &&
+                       run_fixture(stretch,
+                                   [](const Fixture &fixture) {
+                                       return run_fullscreen_confinement(fixture, 320, 320, 160);
+                                   })
+                   ? EXIT_SUCCESS
+                   : EXIT_FAILURE;
     }
     if (argc == 2 && scenario == "fullscreen-lock") {
         config.window.tiling = false;

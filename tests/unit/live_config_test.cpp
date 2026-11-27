@@ -248,24 +248,28 @@ TEST_F(LiveConfigTest, EditorReplacementAndRepairPreserveLastGood) {
     ASSERT_TRUE(pump_until([&] { return transaction().recovery_persisted(); }));
     EXPECT_EQ(snapshot(), default_template());
     const std::string valid = "[workspaces]\nmode='per-monitor'\n[window]\ngaps_outer=24\n"
-                              "[keybinds]\n";
+                              "[input.mouse]\nauto_center_on_lock=true\n[keybinds]\n";
     ASSERT_NO_FATAL_FAILURE(replace(valid));
     ASSERT_TRUE(pump_until([&] {
         return transaction().active().window.gaps_outer == 24 && transaction().recovery_persisted();
     }));
     EXPECT_TRUE(transaction().active().keybinds.empty());
+    EXPECT_TRUE(transaction().active().input.mouse.auto_center_on_lock);
     EXPECT_EQ(snapshot(), valid);
 
-    ASSERT_NO_FATAL_FAILURE(replace("[window]\ngaps_outer='broken'\n"));
+    ASSERT_NO_FATAL_FAILURE(replace("[input.mouse]\nauto_center_on_lock='true'\n"));
     ASSERT_TRUE(pump_until([&] { return transaction().diagnostic().has_value(); }));
     EXPECT_EQ(events.back(), Change::rejected);
     EXPECT_EQ(transaction().active().window.gaps_outer, 24);
+    EXPECT_TRUE(transaction().active().input.mouse.auto_center_on_lock);
+    EXPECT_EQ(transaction().diagnostic()->field, "input.mouse.auto_center_on_lock");
     EXPECT_EQ(snapshot(), valid);
 
-    ASSERT_NO_FATAL_FAILURE(replace(valid));
+    ASSERT_NO_FATAL_FAILURE(replace("[window]\ngaps_outer=24\n[keybinds]\n"));
     ASSERT_TRUE(pump_until(
         [&] { return !transaction().diagnostic() && transaction().recovery_persisted(); }));
     EXPECT_EQ(load_startup_config(store, paths).config.window.gaps_outer, 24);
+    EXPECT_FALSE(transaction().active().input.mouse.auto_center_on_lock);
 }
 
 TEST_F(LiveConfigTest, InvalidStartupUsesRecoveryAndRepairsOnSave) {
