@@ -35,6 +35,8 @@ constexpr char manager_name[] = "org.freedesktop.systemd1";
 constexpr char manager_interface[] = "org.freedesktop.systemd1.Manager";
 constexpr char manager_path[] = "/org/freedesktop/systemd1";
 constexpr char unit_prefix[] = "/org/freedesktop/systemd1/unit";
+constexpr std::array xdg_keys{"XDG_CONFIG_HOME", "XDG_CONFIG_DIRS", "XDG_DATA_HOME",
+                              "XDG_DATA_DIRS"};
 
 struct Portal {
     const char *suffix;
@@ -220,10 +222,10 @@ class PortalActivationTest : public testing::Test {
         return 0;
     }
 
-    static bool read_environment(sd_bus_message *message) {
+    static std::optional<std::vector<std::string>> read_strings(sd_bus_message *message) {
         if (sd_bus_message_enter_container(message, 'v', "as") <= 0 ||
             sd_bus_message_enter_container(message, 'a', "s") <= 0) {
-            return false;
+            return std::nullopt;
         }
         std::vector<std::string> values;
         const char *value = nullptr;
@@ -233,7 +235,28 @@ class PortalActivationTest : public testing::Test {
         }
         if (read < 0 || sd_bus_message_exit_container(message) < 0 ||
             sd_bus_message_exit_container(message) < 0) {
+            return std::nullopt;
+        }
+        return values;
+    }
+
+    static bool read_environment(sd_bus_message *message, bool unset) {
+        const auto entries = read_strings(message);
+        if (!entries)
             return false;
+        const auto &values = *entries;
+        for (const auto *key : xdg_keys) {
+            const auto *value = std::getenv(key);
+            const bool home = std::string_view(key).ends_with("_HOME");
+            const bool assign = value && *value && (!home || *value == '/');
+            if (unset && !assign)
+                EXPECT_NE(std::ranges::find(values, key), values.end());
+            if (!unset && assign)
+                EXPECT_NE(std::ranges::find(values, std::string(key) + '=' + value), values.end());
+        }
+        if (unset) {
+            EXPECT_NE(std::ranges::find(values, "DISPLAY"), values.end());
+            return true;
         }
         EXPECT_NE(std::ranges::find(values, "WAYLAND_DISPLAY=wayland-seaside-activation-test"),
                   values.end());
@@ -285,7 +308,7 @@ class PortalActivationTest : public testing::Test {
         if (chosen == portals.end()) {
             return -EINVAL;
         }
-        bool environment = false;
+        bool environment = false, unset_environment = false;
         bool graphical_wants = false, graphical_after = false, bound_to_session = false;
         int entry = 0;
         while ((entry = sd_bus_message_enter_container(message, 'r', "sv")) > 0) {
@@ -293,11 +316,13 @@ class PortalActivationTest : public testing::Test {
             if (sd_bus_message_read(message, "s", &key) <= 0) {
                 return -EINVAL;
             }
-            if (std::string_view(key) == "Environment") {
-                environment = read_environment(message);
-                if (!environment) {
+            if (std::string_view(key) == "Environment" ||
+                std::string_view(key) == "UnsetEnvironment") {
+                const bool unset = std::string_view(key) == "UnsetEnvironment";
+                if (!read_environment(message, unset)) {
                     return -EINVAL;
                 }
+                (unset ? unset_environment : environment) = true;
             } else if (std::string_view(key) == "Wants" || std::string_view(key) == "After" ||
                        std::string_view(key) == "BindsTo") {
                 const char *target = nullptr;
@@ -333,6 +358,7 @@ class PortalActivationTest : public testing::Test {
             }
         }
         EXPECT_TRUE(environment);
+        EXPECT_TRUE(unset_environment);
         EXPECT_TRUE(bound_to_session);
         EXPECT_TRUE(graphical_wants);
         EXPECT_TRUE(graphical_after);

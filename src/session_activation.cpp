@@ -10,11 +10,13 @@
 #include <fcntl.h>
 #include <filesystem>
 #include <optional>
+#include <span>
 #include <string>
 #include <sys/random.h>
 #include <systemd/sd-bus.h>
 #include <unistd.h>
 #include <utility>
+#include <vector>
 #include <wayland-server-core.h>
 
 namespace seaside {
@@ -29,6 +31,8 @@ constexpr char bus_name[] = "org.freedesktop.DBus";
 constexpr char bus_path[] = "/org/freedesktop/DBus";
 constexpr char unit_prefix[] = "/org/freedesktop/systemd1/unit";
 constexpr char graphical_target[] = "graphical-session.target";
+constexpr std::array xdg_keys{"XDG_CONFIG_HOME", "XDG_CONFIG_DIRS", "XDG_DATA_HOME",
+                              "XDG_DATA_DIRS"};
 
 struct Service {
     const char *suffix;
@@ -58,9 +62,35 @@ bool valid_socket(std::string_view name) {
                std::string_view::npos;
 }
 
-std::string config_home_environment() {
-    const auto *path = std::getenv("XDG_CONFIG_HOME");
-    return path && path[0] == '/' ? std::string("XDG_CONFIG_HOME=") + path : std::string{};
+std::array<std::string, xdg_keys.size()> xdg_environment() {
+    std::array<std::string, xdg_keys.size()> result;
+    for (std::size_t i = 0; i < xdg_keys.size(); ++i) {
+        const auto *key = xdg_keys[i];
+        const auto *value = std::getenv(key);
+        const bool single_directory = std::string_view(key).ends_with("_HOME");
+        if (value && *value && (!single_directory || *value == '/'))
+            result[i] = std::string(key) + '=' + value;
+    }
+    return result;
+}
+
+int append_string_array(sd_bus_message *message, const char *key,
+                        std::span<const char *const> values) {
+    int result = sd_bus_message_open_container(message, 'r', "sv");
+    if (result >= 0)
+        result = sd_bus_message_append(message, "s", key);
+    if (result >= 0)
+        result = sd_bus_message_open_container(message, 'v', "as");
+    if (result >= 0)
+        result = sd_bus_message_open_container(message, 'a', "s");
+    for (const auto *value : values) {
+        if (result < 0)
+            return result;
+        result = sd_bus_message_append(message, "s", value);
+    }
+    for (int i = 0; i < 3 && result >= 0; ++i)
+        result = sd_bus_message_close_container(message);
+    return result;
 }
 
 bool is_missing(sd_bus_message *message) {
@@ -107,7 +137,7 @@ struct PortalActivation::Impl final : std::enable_shared_from_this<Impl> {
     std::string executable, display, authority;
     std::string wayland;
     std::string bus_address;
-    std::string config_home;
+    std::array<std::string, xdg_keys.size()> xdg;
     Completion completion;
     Clock::time_point deadline;
     std::size_t stage = 0;
@@ -123,8 +153,7 @@ struct PortalActivation::Impl final : std::enable_shared_from_this<Impl> {
         : bus(&connection), wayland("WAYLAND_DISPLAY=" + std::string(socket)),
           bus_address("DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/" + std::to_string(getuid()) +
                       "/bus"),
-          config_home(config_home_environment()), completion(std::move(callback)),
-          deadline(Clock::now() + limit) {}
+          xdg(xdg_environment()), completion(std::move(callback)), deadline(Clock::now() + limit) {}
 
     ~Impl() {
         remove_timer();
@@ -225,17 +254,27 @@ struct PortalActivation::Impl final : std::enable_shared_from_this<Impl> {
         if (graphical < 0) {
             return graphical;
         }
-        // An explicit XDG config directory also contains the external chooser's config.
-        const int environment = sd_bus_message_append(
-            message, "(sv)", "Environment", "as", config_home.empty() ? 5 : 6, wayland.c_str(),
-            bus_address.c_str(), "XDG_CURRENT_DESKTOP=Seaside", "XDG_SESSION_TYPE=wayland",
-            "GDK_BACKEND=wayland", config_home.c_str());
+        // The portals resolve config, desktop entries, and MIME defaults in the
+        // same XDG directories as apps launched from this Seaside session.
+        std::vector<const char *> assignments{wayland.c_str(), bus_address.c_str(),
+                                              "XDG_CURRENT_DESKTOP=Seaside",
+                                              "XDG_SESSION_TYPE=wayland", "GDK_BACKEND=wayland"};
+        std::vector<const char *> unset{"DISPLAY"};
+        for (std::size_t i = 0; i < xdg.size(); ++i) {
+            if (xdg[i].empty())
+                unset.push_back(xdg_keys[i]);
+            else
+                assignments.push_back(xdg[i].c_str());
+        }
+        const int environment = append_string_array(message, "Environment", assignments);
         if (environment < 0) {
             return environment;
         }
-        const int exec =
-            sd_bus_message_append(message, "(sv)(sv)", "UnsetEnvironment", "as", 1, "DISPLAY",
-                                  "ExecStart", "a(sasb)", 1, service.binary, 1, service.binary, 0);
+        const int cleared = append_string_array(message, "UnsetEnvironment", unset);
+        if (cleared < 0)
+            return cleared;
+        const int exec = sd_bus_message_append(message, "(sv)", "ExecStart", "a(sasb)", 1,
+                                               service.binary, 1, service.binary, 0);
         if (exec < 0) {
             return exec;
         }
