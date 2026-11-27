@@ -91,6 +91,25 @@ TEST_F(ConfigTest, ApprovedFieldsAcceptValidValues) {
     }
 }
 
+TEST_F(ConfigTest, DefaultBrowserAcceptsOnlyAnApplicationId) {
+    for (const auto *value : {"firefox", "firefox.desktop", "org.mozilla.Firefox.desktop",
+                              "vendor-app_browser.desktop"}) {
+        SCOPED_TRACE(value);
+        const auto parsed =
+            seaside::parse_config(std::string("[applications]\ndefault_browser='") + value + "'");
+        ASSERT_TRUE(parsed);
+        EXPECT_EQ(parsed->applications.default_browser, value);
+    }
+    for (const auto *value : {"''", "'chromium'", "'/usr/bin/firefox'", "'a/b.desktop'",
+                              "'firefox %u'", "'a.desktop;b.desktop'", "'.desktop'", "false"}) {
+        SCOPED_TRACE(value);
+        const auto parsed =
+            seaside::parse_config(std::string("[applications]\ndefault_browser=") + value);
+        ASSERT_FALSE(parsed);
+        EXPECT_EQ(parsed.error().field, "applications.default_browser");
+    }
+}
+
 TEST_F(ConfigTest, NondefaultValuesPopulateEveryTypedConfigurationField) {
     auto parsed = seaside::parse_config(R"(
 [autostart]

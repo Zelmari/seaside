@@ -78,6 +78,10 @@ struct Config {
         ColorScheme color_scheme = ColorScheme::dark;
         bool operator==(const Appearance &) const = default;
     } appearance;
+    struct Applications {
+        std::string default_browser = "firefox";
+        bool operator==(const Applications &) const = default;
+    } applications;
     struct Audio {
         std::optional<std::string> default_output;
         std::optional<std::string> default_input;

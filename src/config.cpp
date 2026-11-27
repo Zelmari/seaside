@@ -474,9 +474,9 @@ std::expected<Config, Diagnostic> parse_config(std::string_view text, std::strin
         Validator v(path);
         Config config = default_config();
         v.keys(parsed,
-               {"autostart", "wallpaper", "window", "appearance", "audio", "power", "workspaces",
-                "monitors", "dwindle", "scrolling", "input", "idle", "render", "night_light",
-                "keybinds"},
+               {"autostart", "wallpaper", "window", "appearance", "applications", "audio", "power",
+                "workspaces", "monitors", "dwindle", "scrolling", "input", "idle", "render",
+                "night_light", "keybinds"},
                "");
         if (auto *table = v.table(parsed, "autostart", "autostart")) {
             v.keys(*table, {"commands"}, "autostart");
@@ -530,6 +530,23 @@ std::expected<Config, Diagnostic> parse_config(std::string_view text, std::strin
             v.enumeration(*table, "color_scheme", "appearance.color_scheme",
                           config.appearance.color_scheme,
                           {{"dark", ColorScheme::dark}, {"light", ColorScheme::light}});
+        }
+        if (auto *table = v.table(parsed, "applications", "applications")) {
+            v.keys(*table, {"default_browser"}, "applications");
+            auto *node = table->get("default_browser");
+            if (auto value = v.string(node, "applications.default_browser")) {
+                const bool desktop_id =
+                    value->size() > sizeof(".desktop") - 1 && value->size() <= 255 &&
+                    value->front() != '.' && value->ends_with(".desktop") &&
+                    value->find_first_not_of(
+                        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-") ==
+                        value->npos;
+                if (*value == "firefox" || desktop_id)
+                    config.applications.default_browser = std::move(*value);
+                else
+                    v.fail(node, "applications.default_browser",
+                           "Expected 'firefox' or a desktop entry ID ending in .desktop");
+            }
         }
         if (auto *table = v.table(parsed, "audio", "audio")) {
             v.keys(*table, {"default_output", "default_input"}, "audio");

@@ -35,6 +35,11 @@ allow_edge_drag = false
 # Global color preference for Seaside and compatible apps. "dark" or "light".
 color_scheme = "dark"
 
+[applications]
+# Browser for web links and supported local HTML in Seaside. Use "firefox" or
+# the installed desktop entry ID of another browser, such as "chromium.desktop".
+default_browser = "firefox"
+
 [audio]
 # Run `wpctl get-volume @DEFAULT_AUDIO_SINK@` to see the current playback volume.
 # Run `wpctl status --name` and copy the name from the Sinks or Sources list.
