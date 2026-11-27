@@ -119,18 +119,20 @@ activation_private_code = custom_target(
   'xdg-activation-private-code', input: activation_xml, output: 'xdg-activation-v1-protocol.c',
   command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'],
 )
-seat_protocols = []
+seat_protocol_code = {}
 foreach name : ['pointer-constraints', 'relative-pointer', 'primary-selection']
   xml = wayland_protocols.get_variable(pkgconfig: 'pkgdatadir') / 'unstable' / name / (name + '-unstable-v1.xml')
-  seat_protocols += custom_target(
+  header = custom_target(
     name + '-client-header', input: xml, output: name + '-client-protocol.h',
     command: [wayland_scanner, 'client-header', '@INPUT@', '@OUTPUT@'],
   )
-  seat_protocols += custom_target(
+  code = custom_target(
     name + '-private-code', input: xml, output: name + '-protocol.c',
     command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'],
   )
+  seat_protocol_code += {name: [header, code]}
 endforeach
+seat_protocols = seat_protocol_code['pointer-constraints'] + seat_protocol_code['relative-pointer'] + seat_protocol_code['primary-selection']
 
 foreach protocol : ['staging/cursor-shape/cursor-shape-v1', 'stable/tablet/tablet-v2']
   name = protocol.split('/')[-1]
@@ -519,7 +521,8 @@ test('part7-satellite', satellite_tests, suite: ['unit', 'part7'], timeout: 20,
 
 executable(
   'seaside-part7-x11-client', 'tests/integration/part7_x11_client.cpp',
-  dependencies: dependency('xcb', method: 'pkg-config'), install: false,
+  dependencies: [dependency('xcb', method: 'pkg-config'), dependency('xcb-xfixes', method: 'pkg-config')],
+  install: false,
 )
 
 ipc_foundation = static_library(
@@ -749,7 +752,8 @@ portal_stream = executable('seaside-portal-stream', 'tests/integration/portal_st
   dependencies: [systemd, pipewire], install: false,
 )
 part7_native_client = executable('seaside-part7-native-client',
-  ['tests/integration/part7_native_client.cpp', xdg_shell_client_header, xdg_shell_private_code],
+  ['tests/integration/part7_native_client.cpp', xdg_shell_client_header, xdg_shell_private_code,
+   seat_protocol_code['pointer-constraints'], seat_protocol_code['relative-pointer']],
   dependencies: wayland_client, install: false,
 )
 executable('seaside-frame-pacing-client',
