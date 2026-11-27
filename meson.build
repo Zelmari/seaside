@@ -60,6 +60,7 @@ turbojpeg = dependency('libturbojpeg', version: '>=3.0.0')
 libwebp = dependency('libwebp')
 pangocairo = dependency('pangocairo', include_type: 'system')
 glib = dependency('glib-2.0', include_type: 'system')
+gio_unix = dependency('gio-unix-2.0', include_type: 'system')
 find_program('dbus-daemon')
 find_program('pipewire')
 wayland_scanner = find_program('wayland-scanner')
@@ -587,10 +588,20 @@ executable('seaside-part9-panel',
   dependencies: wayland_client, install: false,
 )
 
-seaside = executable(
-  'seaside', ['src/session_entry.cpp', 'src/session_environment.cpp', 'src/session_control.cpp', 'src/output_config.cpp', build_info],
+browser_test = executable(
+  'seaside-browser-preferences-test',
+  ['tests/integration/browser_preferences.cpp', 'src/session_browser.cpp'],
   include_directories: include_directories('src'),
-  dependencies: [wlroots, wayland_server, pixman, libdrm, systemd, pipewire, xkbcommon, xau, threads, nlohmann_json],
+  dependencies: [gio_unix, nlohmann_json], link_with: config_foundation, install: false,
+)
+test('part12-browser-preferences', python,
+  args: [files('tests/integration/test_browser_preferences.py'), browser_test],
+  suite: ['integration', 'part12'], timeout: 30)
+
+seaside = executable(
+  'seaside', ['src/session_entry.cpp', 'src/session_environment.cpp', 'src/session_control.cpp', 'src/session_browser.cpp', 'src/output_config.cpp', build_info],
+  include_directories: include_directories('src'),
+  dependencies: [wlroots, wayland_server, pixman, libdrm, systemd, pipewire, xkbcommon, xau, threads, nlohmann_json, gio_unix],
   link_with: [core, tty_foundation, config_foundation, capture_foundation, session_foundation,
               desktop_foundation, ipc_foundation, idle_foundation, trace_foundation],
   link_depends: bridge_binary,

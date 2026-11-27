@@ -6,6 +6,7 @@
 #include "scene.hpp"
 #include "server.hpp"
 #include "session_activation.hpp"
+#include "session_browser.hpp"
 #include "session_control.hpp"
 #include "session_environment.hpp"
 #include "session_portal.hpp"
@@ -16,6 +17,7 @@
 #include "tty_drm.hpp"
 #include "tty_input.hpp"
 #include "wlroots_bridge.hpp"
+#include "work_queue.hpp"
 
 #include <algorithm>
 #include <array>
@@ -408,6 +410,13 @@ class Session : public seaside::TtyInputObserver, public seaside::TtyDrmObserver
                          std::strerror(satellite.error()));
         }
         commands_.emplace(socket_, ipc_->path(), satellite_.get());
+        const auto &browser = config_->transaction().active().applications.default_browser;
+        browser_store_ = store;
+        browser_status_ =
+            seaside::apply_default_browser(browser_store_, browser_mimeapps(), browser);
+        log_browser_status();
+        if (auto queue = seaside::WorkQueue::create(loop_, {.workers = 1, .max_tasks = 2}); queue)
+            browser_queue_ = std::move(*queue);
         desktop_.on_projection([this] {
             idle_->visibility_changed();
             publish();
@@ -433,6 +442,7 @@ class Session : public seaside::TtyInputObserver, public seaside::TtyDrmObserver
     Outcome shut_down() noexcept {
         stopping_ = true;
         timer_.reset();
+        browser_queue_.reset();
         scene_.set_frame_observer(nullptr, nullptr);
         idle_->set_active(false);
         portal_.reset();
@@ -699,8 +709,10 @@ class Session : public seaside::TtyInputObserver, public seaside::TtyDrmObserver
                 }
                 append_preferences_status(*result);
             }
-            if (result && method == "query.settings")
+            if (result && method == "query.settings") {
                 (*result)["power"] = power_status();
+                (*result)["applications"] = {{"default_browser", browser_status_json()}};
+            }
             return result;
         }
         if (method == "action.exit") {
@@ -824,7 +836,74 @@ class Session : public seaside::TtyInputObserver, public seaside::TtyDrmObserver
         result["appearance"] = {
             {"color_scheme",
              active.appearance.color_scheme == seaside::ColorScheme::dark ? "dark" : "light"}};
+        result["applications"] = {{"default_browser", browser_status_json()}};
         result["power"] = power_status();
+    }
+
+    std::filesystem::path browser_mimeapps() const {
+        return paths_.user.parent_path().parent_path() / "seaside-mimeapps.list";
+    }
+
+    IpcJson browser_status_json() const {
+        auto effective = IpcJson::object();
+        for (std::size_t i = 0; i < seaside::browser_mime_types.size(); ++i) {
+            const auto &app = browser_status_.effective[i];
+            effective[seaside::browser_mime_types[i]] = app ? IpcJson(*app) : nullptr;
+        }
+        return {{"requested", browser_status_.requested},
+                {"state", browser_status_.state},
+                {"effective", std::move(effective)},
+                {"message", browser_status_.message.empty() ? IpcJson(nullptr)
+                                                            : IpcJson(browser_status_.message)}};
+    }
+
+    void log_browser_status() const {
+        if (!browser_status_.message.empty()) {
+            std::fprintf(stderr, "seaside: applications.default_browser %s: %s\n",
+                         browser_status_.requested.c_str(), browser_status_.message.c_str());
+        }
+    }
+
+    void update_browser(const std::string &requested) {
+        if (stopping_)
+            return;
+        browser_status_.requested = requested;
+        browser_status_.state = "checking";
+        browser_status_.message.clear();
+        if (browser_job_)
+            browser_job_->invalidate();
+        browser_job_ = std::make_shared<seaside::WorkLifetime>();
+        const auto generation = ++browser_generation_;
+        const auto report_error = [this] {
+            browser_status_.state = "mimeapps-error";
+            browser_status_.message = "Could not run the browser preference update";
+            log_browser_status();
+        };
+        if (!browser_queue_ || !browser_queue_->set_generation(generation) ||
+            !browser_queue_->submit(
+                generation, browser_job_, 64 * 1024 * 1024,
+                [store = browser_store_, path = browser_mimeapps(), requested,
+                 job = browser_job_](std::stop_token stop) {
+                    auto status = std::make_shared<seaside::BrowserStatus>(
+                        seaside::apply_default_browser(store, path, requested, [&] {
+                            return !stop.stop_requested() && job->active();
+                        }));
+                    return seaside::WorkResult{std::move(status), 4 * seaside::max_config_bytes};
+                },
+                [this, report_error](seaside::WorkResult result) {
+                    if (result.value) {
+                        browser_status_ =
+                            *std::static_pointer_cast<const seaside::BrowserStatus>(result.value);
+                        log_browser_status();
+                    } else {
+                        report_error();
+                    }
+                    ipc_->event("settings.effective_changed",
+                                {{"setting", "applications.default_browser"},
+                                 {"status", browser_status_json()}});
+                })) {
+            report_error();
+        }
     }
 
     IpcJson power_status() const {
@@ -843,6 +922,7 @@ class Session : public seaside::TtyInputObserver, public seaside::TtyDrmObserver
             apply_idle_timeout();
             desktop_.apply_config(transaction.active());
             apply_service_preferences();
+            update_browser(transaction.active().applications.default_browser);
             if (std::exchange(config_error_visible_, false)) {
                 scene_.set_config_error(std::nullopt);
                 ipc_->event("config.recovered", {{"source", "user"}});
@@ -1320,6 +1400,11 @@ class Session : public seaside::TtyInputObserver, public seaside::TtyDrmObserver
     std::unique_ptr<seaside::IdlePower> idle_;
     std::unique_ptr<seaside::Trace> trace_;
     std::unique_ptr<seaside::IpcServer> ipc_;
+    seaside::ConfigStore browser_store_;
+    seaside::BrowserStatus browser_status_;
+    std::shared_ptr<seaside::WorkLifetime> browser_job_;
+    std::unique_ptr<seaside::WorkQueue> browser_queue_;
+    std::uint64_t browser_generation_ = 0;
     IpcJson last_error_ = nullptr;
     seaside::TtyInput *input_ = nullptr;
     std::unique_ptr<wl_event_source, decltype(&wl_event_source_remove)> timer_{
@@ -1423,6 +1508,9 @@ int main(int argc, char **argv) try {
     if (argc == 6 && std::string_view(argv[1]) == "--activation-environment") {
         return seaside::run_session_environment(argv[2], argv[3], argv[4], argv[5]);
     }
+    if (argc == 2 && std::string_view(argv[1]) == "--browser-defaults") {
+        return seaside::report_browser_defaults();
+    }
     if (argc == 2 && std::string_view(argv[1]) == "--help") {
         std::fputs("Usage: seaside [--help | --version]\n"
                    "Start Seaside as your normal user on the active Linux console.\n"
@@ -1445,6 +1533,10 @@ int main(int argc, char **argv) try {
     const auto cursor_size = std::to_string(seaside::default_cursor_size);
     if (setenv("XCURSOR_SIZE", cursor_size.c_str(), 0) != 0) {
         std::perror("seaside: could not set the session cursor size");
+        return EXIT_FAILURE;
+    }
+    if (setenv("XDG_CURRENT_DESKTOP", "Seaside", 1) != 0) {
+        std::perror("seaside: could not set the current desktop");
         return EXIT_FAILURE;
     }
     const std::string runtime = "/run/user/" + std::to_string(getuid());

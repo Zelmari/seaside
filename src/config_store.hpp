@@ -79,6 +79,10 @@ class ConfigStore {
     std::expected<PublishResult, StorageError>
     replace_user(const std::filesystem::path &path, std::string_view expected,
                  std::string_view text, const std::function<bool()> &still_current = {}) const;
+    // As above, but require a regular file at the final path component.
+    std::expected<PublishResult, StorageError>
+    replace_regular(const std::filesystem::path &path, std::string_view expected,
+                    std::string_view text, const std::function<bool()> &still_current = {}) const;
 
   private:
     std::expected<PublishResult, StorageError>

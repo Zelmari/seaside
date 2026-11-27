@@ -251,6 +251,19 @@ ConfigStore::replace_user(const std::filesystem::path &path, std::string_view ex
 }
 
 std::expected<PublishResult, StorageError>
+ConfigStore::replace_regular(const std::filesystem::path &path, std::string_view expected,
+                             std::string_view text,
+                             const std::function<bool()> &still_current) const {
+    const auto parent = path.has_parent_path() ? path.parent_path() : std::filesystem::path(".");
+    std::error_code error;
+    const auto resolved = std::filesystem::canonical(parent, error);
+    if (error)
+        return std::unexpected(failure(StorageStep::open_directory, parent, error));
+    return publish_at(resolved / path.filename(), text, PublishMode::replace_snapshot,
+                      still_current, &path, expected);
+}
+
+std::expected<PublishResult, StorageError>
 ConfigStore::publish_at(const std::filesystem::path &path, std::string_view text, PublishMode mode,
                         const std::function<bool()> &still_current,
                         const std::filesystem::path *user_link, std::string_view expected) const {
