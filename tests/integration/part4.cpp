@@ -2003,6 +2003,39 @@ bool run_pending_opening_focus(const Fixture &fixture) {
     return true;
 }
 
+bool run_alt_tab_during_opening(const Fixture &fixture) {
+    auto &desktop = fixture.desktop;
+    OpeningDeadline deadline(desktop);
+    auto left = fixture.output();
+    auto right = fixture.output();
+    REQUIRE(left && right);
+    auto *left_output = part3_output_handle(left.get());
+    auto *right_output = part3_output_handle(right.get());
+    REQUIRE(desktop.add_output(left_output, "left", output_bounds));
+    REQUIRE(desktop.add_output(right_output, "right", {160, 0, 160, 90}));
+    LayerSeat seat(fixture);
+    REQUIRE(seat.start());
+    Connection connection(fixture.display);
+    Client remote, current, pending;
+    WindowId remote_id{}, current_id{};
+    seat.click(210, 45);
+    REQUIRE(map_tiled(fixture, connection, remote, remote_id, 160, 90, 0, blue));
+    seat.click(30, 45);
+    REQUIRE(map_tiled(fixture, connection, current, current_id, 160, 90, 0, red));
+    REQUIRE(connection.connect(pending) && connection.open(pending));
+    REQUIRE(connection.attach(pending, 8, 8, true, green));
+    REQUIRE(desktop.windows().focused_window() != current_id);
+    REQUIRE(desktop.keyboard_window() == current_id);
+    seat.key_state(KEY_LEFTALT, true);
+    seat.key(KEY_TAB);
+    seat.key_state(KEY_LEFTALT, false);
+    REQUIRE(desktop.keyboard_window() == remote_id);
+    REQUIRE(connection.wait(remote, [&] { return remote.keyboard_surface == remote.surface; }));
+    desktop.remove_output(right_output);
+    desktop.remove_output(left_output);
+    return true;
+}
+
 bool run_fullscreen_idle_focus(const Fixture &fixture) {
     auto &desktop = fixture.desktop;
     OpeningDeadline deadline(desktop);
@@ -3030,6 +3063,7 @@ int main(int argc, char **argv) {
                        run_fixture(transaction, run_opening_transaction) &&
                        run_fixture(transaction, run_workspace_during_opening) &&
                        run_fixture(transaction, run_pending_opening_focus) &&
+                       run_fixture(transaction, run_alt_tab_during_opening) &&
                        run_fixture(transaction, run_fullscreen_idle_focus) &&
                        run_fixture(transaction,
                                    run_overlapping_openings<OpeningFinish::right_first>) &&

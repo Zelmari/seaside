@@ -70,7 +70,7 @@ std::uint32_t resize_edges_toward(int dx, int dy, std::uint32_t available) noexc
 } // namespace
 
 Desktop::Desktop(Scene &scene, const Config &config)
-    : scene_(scene), windows_(config), bindings_(config.keybinds),
+    : scene_(scene), windows_(config, /*track_keyboard_focus=*/true), bindings_(config.keybinds),
       fullscreen_aspect_(config.render.fullscreen_aspect) {
     scene_.set_titlebars(config.window.titlebars);
     scene_.set_border_colors(config.window.active_border_color,
@@ -379,6 +379,7 @@ void Desktop::project(WindowId resize, bool geometry_only) {
 void Desktop::update_keyboard_focus(wlr_surface *layer_focus, WindowId focused) noexcept {
     auto *surface = layer_focus ? layer_focus : scene_.window_surface(focused);
     keyboard_window_ = surface && !layer_focus ? std::optional{focused} : std::nullopt;
+    windows_.record_seat_focus(keyboard_window_);
     if (input_) {
         scene_.dismiss_unfocused_grabs(surface);
         input_->set_focus(surface);
@@ -840,7 +841,8 @@ std::expected<bool, DesktopActionError> Desktop::dispatch(const Action &action,
     }
     const bool focus_changed = focused != windows_.focused_window() ||
                                focused_output != windows_.focused_output() ||
-                               current_workspace != windows_.focused_workspace();
+                               current_workspace != windows_.focused_workspace() ||
+                               (action.kind == ActionKind::cycle_focus_mru && changed);
     if (focus_changed) {
         scene_.select_layer(nullptr);
     }

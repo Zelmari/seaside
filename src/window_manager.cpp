@@ -82,7 +82,9 @@ WindowManager::WindowManager(bool tiling) : tiling_(tiling) {
     workspaces_.try_emplace(scratchpad_workspace);
 }
 
-WindowManager::WindowManager(const Config &config) : WindowManager(config.window.tiling) {
+WindowManager::WindowManager(const Config &config, bool track_keyboard_focus)
+    : WindowManager(config.window.tiling) {
+    track_keyboard_focus_ = track_keyboard_focus;
     allow_edge_drag_ = config.window.allow_edge_drag;
     layout_settings_ = layout_settings(config);
     for (auto &[id, workspace] : workspaces_) {
@@ -569,8 +571,8 @@ bool WindowManager::unmap_window(WindowId id) {
     }
     remove_tile(id);
     forget_focus(id);
-    std::erase(seat_focus_history_, id);
     auto &window = windows_.at(id);
+    window.last_seat_focus = 0;
     // The next map starts a fresh XDG toplevel state, while its ID and original
     // mapping order belong to the lifetime of the Wayland object.
     window.maximized = false;
@@ -599,7 +601,6 @@ bool WindowManager::destroy_window(WindowId id) {
     }
     remove_tile(id);
     forget_focus(id);
-    std::erase(seat_focus_history_, id);
     if (!state_.destroy_window(id)) {
         return false;
     }
@@ -998,20 +999,36 @@ void WindowManager::forget_focus(WindowId id) {
     }
 }
 
+void WindowManager::promote_seat_focus() noexcept {
+    if (seat_focus_window_) {
+        auto window = windows_.find(*seat_focus_window_);
+        if (window != windows_.end() && state_.window(window->first)->mapped) {
+            window->second.last_seat_focus = ++sequence_;
+        }
+    }
+}
+
+void WindowManager::record_seat_focus(std::optional<WindowId> id) noexcept {
+    if (seat_focus_window_ != id) {
+        seat_focus_window_ = id;
+        if (!cycle_) {
+            promote_seat_focus();
+        }
+    }
+}
+
 void WindowManager::set_focus(std::optional<WindowId> id, bool remember,
                               std::optional<Direction> direction) {
     if (id && remember && focused_workspace()) {
         remember_focus(*id, *focused_workspace());
     }
-    if (id && id != focused_window_) {
-        if (!cycle_) {
-            promote_focus(seat_focus_history_, *id);
-        }
-        if (!is_tiled(*id, windows_.at(*id))) {
-            windows_.at(*id).stacking = ++sequence_;
-        }
+    if (id && id != focused_window_ && !is_tiled(*id, windows_.at(*id))) {
+        windows_.at(*id).stacking = ++sequence_;
     }
     focused_window_ = id;
+    if (!track_keyboard_focus_) {
+        record_seat_focus(id);
+    }
     if (id) {
         reveal(*id, direction);
     }
@@ -1141,31 +1158,32 @@ bool WindowManager::focus_direction(Direction direction) {
 bool WindowManager::cycle_focus(bool held) {
     if (!cycle_) {
         FocusCycle cycle;
-        const auto append = [&](WindowId id) {
-            if (is_visible(id) && std::ranges::find(cycle.windows, id) == cycle.windows.end()) {
+        for (const auto &[id, window] : windows_) {
+            if (is_visible(id)) {
                 cycle.windows.push_back(id);
             }
-        };
-        if (focused_window_) {
-            append(*focused_window_);
-        }
-        for (const auto id : seat_focus_history_) {
-            append(id);
-        }
-        // The window registry is ordered by ID for clients without seat focus history.
-        for (const auto &[id, window] : windows_) {
-            append(id);
         }
         if (cycle.windows.empty()) {
             return false;
         }
-        cycle.next = focused_window_ == cycle.windows.front() ? 1 % cycle.windows.size() : 0;
+        std::ranges::sort(cycle.windows, [&](WindowId a, WindowId b) {
+            const auto first = windows_.at(a).last_seat_focus;
+            const auto second = windows_.at(b).last_seat_focus;
+            return first == second ? a < b : first > second;
+        });
+        const auto current = seat_focus_window_
+                                 ? std::ranges::find(cycle.windows, *seat_focus_window_)
+                                 : cycle.windows.end();
+        if (current != cycle.windows.end()) {
+            std::rotate(cycle.windows.begin(), current, current + 1);
+            cycle.next = 1 % cycle.windows.size();
+        }
         cycle_ = std::move(cycle);
     }
     for (std::size_t attempt = 0; attempt < cycle_->windows.size(); ++attempt) {
         const auto id = cycle_->windows[cycle_->next];
         cycle_->next = (cycle_->next + 1) % cycle_->windows.size();
-        if (id != focused_window_ && is_visible(id) && set_focused_output(*window_output(id))) {
+        if (id != seat_focus_window_ && is_visible(id) && set_focused_output(*window_output(id))) {
             set_focus(id, false);
             if (!held) {
                 finish_focus_cycle();
@@ -1184,8 +1202,8 @@ void WindowManager::finish_focus_cycle() {
         return;
     }
     cycle_.reset();
+    promote_seat_focus();
     if (focused_window_ && focused_workspace()) {
-        promote_focus(seat_focus_history_, *focused_window_);
         remember_focus(*focused_window_, *focused_workspace());
     }
 }

@@ -35,7 +35,7 @@ struct WindowView {
 class WindowManager final {
   public:
     explicit WindowManager(bool tiling = true);
-    explicit WindowManager(const Config &config);
+    explicit WindowManager(const Config &config, bool track_keyboard_focus = false);
     WindowManager(const WindowManager &) = delete;
     WindowManager &operator=(const WindowManager &) = delete;
 
@@ -73,6 +73,7 @@ class WindowManager final {
     bool focus_direction(Direction direction);
     bool cycle_focus(bool held);
     void finish_focus_cycle();
+    void record_seat_focus(std::optional<WindowId> id) noexcept;
 
     bool select_workspace(WorkspaceId id);
     bool move_to_workspace(WindowId id, WorkspaceId destination);
@@ -123,6 +124,7 @@ class WindowManager final {
         int dialog_dy = 0;
         std::optional<WindowId> parent;
         std::uint64_t stacking = 0;
+        std::uint64_t last_seat_focus = 0;
         bool positioned = false;
         bool edge_positioned = false;
         bool maximized = false;
@@ -157,6 +159,7 @@ class WindowManager final {
     bool relocate_window(WindowId id, WorkspaceId workspace, WorkspaceLayout *prepared = nullptr);
     WindowId transient_root(WindowId id) const;
     void remember_focus(WindowId id, WorkspaceId workspace);
+    void promote_seat_focus() noexcept;
     void forget_focus(WindowId id);
     void set_focus(std::optional<WindowId> id, bool remember = true,
                    std::optional<Direction> direction = {});
@@ -184,6 +187,7 @@ class WindowManager final {
 
     State state_;
     bool tiling_;
+    bool track_keyboard_focus_ = false;
     bool allow_edge_drag_ = false;
     LayoutSettings layout_settings_;
     std::map<OutputId, Output, std::less<>> outputs_;
@@ -194,7 +198,7 @@ class WindowManager final {
     WorkspaceId disconnected_workspace_ = 1;
     std::optional<WorkspaceId> scratchpad_restore_;
     std::optional<WindowId> focused_window_;
-    std::vector<WindowId> seat_focus_history_;
+    std::optional<WindowId> seat_focus_window_;
     std::optional<FocusCycle> cycle_;
     std::optional<TileMove> tile_move_;
     std::optional<FloatingMove> floating_move_;
