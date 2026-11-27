@@ -76,6 +76,8 @@ constexpr std::array methods{
     Method{"action.cycle_focus_mru"},
     Method{"action.workspace_select", workspace},
     Method{"action.window_to_workspace", workspace, window},
+    Method{"action.scratchpad_toggle"},
+    Method{"action.window_to_scratchpad", 0, window},
     Method{"action.window_toggle_tiling", 0, window},
     Method{"action.window_toggle_pin", 0, window},
     Method{"action.window_toggle_maximize", 0, window},

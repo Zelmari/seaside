@@ -48,7 +48,7 @@ TEST_F(ConfigTest, CompiledDefaultsMatchApprovedValues) {
     EXPECT_EQ(value.render.fullscreen_aspect, seaside::FullscreenAspect::preserve);
     EXPECT_FALSE(value.night_light.enabled);
     EXPECT_EQ(value.night_light.temperature_kelvin, 4500);
-    EXPECT_EQ(value.keybinds.size(), 44U);
+    EXPECT_EQ(value.keybinds.size(), 45U);
 }
 
 TEST_F(ConfigTest, CanonicalGenerationMatchesIndependentReferenceAndCompiledDefaults) {
@@ -400,6 +400,8 @@ allow_edge_drag = true
 
 TEST_F(ConfigTest, AddsDirectionalMovesToAnOldStockMap) {
     auto old = seaside::default_bindings();
+    const auto scratchpad = seaside::parse_chord("Super+grave").value();
+    old.erase(scratchpad);
     for (const auto *direction : {"Left", "Right", "Up", "Down"}) {
         old.erase(seaside::parse_chord(std::string("Super+Shift+") + direction).value());
     }
@@ -410,12 +412,45 @@ TEST_F(ConfigTest, AddsDirectionalMovesToAnOldStockMap) {
         text += '"' + seaside::format_chord(chord) + "\" = \"" + seaside::format_action(action) +
                 "\"\n";
     }
+    text += std::string(seaside::legacy_bindings_comment) + '\n';
     text += seaside::legacy_move_binding_example;
     const auto migrated = seaside::parse_config(text);
     ASSERT_TRUE(migrated);
-    EXPECT_EQ(migrated->keybinds.size(), old.size() + 4);
+    EXPECT_EQ(migrated->keybinds.size(), old.size() + 5);
+    EXPECT_EQ(migrated->keybinds.at(scratchpad).kind, seaside::ActionKind::toggle_scratchpad);
     EXPECT_FALSE(migrated->keybinds.contains(seaside::parse_chord("Super+S").value()));
     EXPECT_TRUE(migrated->keybinds.contains(seaside::parse_chord("Super+Shift+Up").value()));
+}
+
+TEST_F(ConfigTest, MigratesGeneratedStockAndHonorsScratchpadBindingEdits) {
+    const auto chord = seaside::parse_chord("Super+grave").value();
+    const std::string line = "\"Super+grave\" = \"toggle_scratchpad\"\n";
+    std::string removed(seaside::default_template());
+    ASSERT_NE(removed.find(line), std::string::npos);
+    removed.erase(removed.find(line), line.size());
+    const auto fresh_edit = seaside::parse_config(removed);
+    ASSERT_TRUE(fresh_edit);
+    EXPECT_FALSE(fresh_edit->keybinds.contains(chord));
+
+    auto old_stock = removed;
+    old_stock.replace(old_stock.find(seaside::bindings_comment), seaside::bindings_comment.size(),
+                      seaside::legacy_bindings_comment);
+    const auto migrated = seaside::parse_config(old_stock);
+    ASSERT_TRUE(migrated);
+    EXPECT_EQ(migrated->keybinds, seaside::default_bindings());
+
+    auto customized = old_stock;
+    const std::string existing = "\"Super+Q\" = \"close_window\"";
+    ASSERT_NE(customized.find(existing), std::string::npos);
+    customized.replace(customized.find(existing), existing.size(), "\"Super+Q\" = \"exit\"");
+    const auto custom_map = seaside::parse_config(customized);
+    ASSERT_TRUE(custom_map);
+    EXPECT_FALSE(custom_map->keybinds.contains(chord));
+
+    const auto rebound =
+        seaside::parse_config(removed + "\n\"Super+grave\" = \"move_to_scratchpad\"\n");
+    ASSERT_TRUE(rebound);
+    EXPECT_EQ(rebound->keybinds.at(chord).kind, seaside::ActionKind::move_to_scratchpad);
 }
 
 TEST_F(ConfigTest, MonitorOverridesDistinguishInheritanceFromExplicitAuto) {

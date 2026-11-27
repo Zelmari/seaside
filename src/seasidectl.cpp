@@ -28,10 +28,11 @@ constexpr std::string_view usage =
     "Usage: seasidectl status|bindings|outputs|workspaces|windows|exit|events\n"
     "       seasidectl focus [left|right|up|down]\n"
     "       seasidectl workspace ID\n"
+    "       seasidectl scratchpad toggle\n"
     "       seasidectl window toggle-tiling|toggle-pin|toggle-maximize|toggle-fullscreen|close\n"
     "       seasidectl window move|swap DIR\n"
     "       seasidectl window resize DIR [DELTA]\n"
-    "       seasidectl window to-workspace ID\n"
+    "       seasidectl window to-workspace ID | to-scratchpad\n"
     "       seasidectl window icon ID\n"
     "       seasidectl night-light status|on|off|toggle\n"
     "       seasidectl settings [set SETTING VALUE]\n"
@@ -59,6 +60,7 @@ std::optional<Command> window_command(Args args) {
         {"toggle-maximize", "action.window_toggle_maximize"},
         {"toggle-fullscreen", "action.window_toggle_fullscreen"},
         {"close", "action.window_close"},
+        {"to-scratchpad", "action.window_to_scratchpad"},
     };
     const std::string_view operation = args[0];
     if (args.size() == 1) {
@@ -154,6 +156,9 @@ std::optional<Command> command(Args args) {
     const std::string_view operation = args[1];
     if (args.size() != 2) {
         return {};
+    }
+    if (group == "scratchpad" && operation == "toggle") {
+        return Command{"action.scratchpad_toggle", IpcJson::object()};
     }
     if (group == "workspace") {
         return Command{"action.workspace_select", IpcJson{{"workspace_id", integer(operation)}}};

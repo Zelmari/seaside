@@ -235,7 +235,7 @@ TEST_F(BindingsTest, RetiredWorkspaceTransferIsRejected) {
 
 TEST_F(BindingsTest, DefaultsHaveOnlyTheApprovedBindings) {
     auto map = seaside::default_bindings();
-    ASSERT_EQ(map.size(), 44U);
+    ASSERT_EQ(map.size(), 45U);
     EXPECT_EQ(map.at(seaside::parse_chord("Super+Return").value()).text, "foot");
     const auto &launcher = map.at(seaside::parse_chord("Super+Space").value());
     EXPECT_EQ(launcher.kind, seaside::ActionKind::exec);
@@ -256,6 +256,8 @@ TEST_F(BindingsTest, DefaultsHaveOnlyTheApprovedBindings) {
               seaside::ActionKind::close_window);
     EXPECT_EQ(map.at(seaside::parse_chord("Super+P").value()).kind,
               seaside::ActionKind::toggle_window_pin);
+    EXPECT_EQ(map.at(seaside::parse_chord("Super+grave").value()).kind,
+              seaside::ActionKind::toggle_scratchpad);
     EXPECT_EQ(map.at(seaside::parse_chord("Super+Shift+E").value()).kind,
               seaside::ActionKind::exit);
     for (const auto &[key, direction] : {std::pair{"Left", seaside::Direction::left},

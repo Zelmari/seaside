@@ -85,6 +85,132 @@ TEST(WindowManager, KeepsTenWorkspacesAndAdmitsAtMostTwoOutputs) {
     EXPECT_TRUE(manager.state().valid());
 }
 
+TEST(WindowManager, TogglesPrimaryScratchpadAndRestoresFocusOnBothOutputs) {
+    WindowManager manager;
+    ASSERT_TRUE(manager.add_output("left", left, left, true));
+    ASSERT_TRUE(manager.add_output("right", right, right));
+    ASSERT_TRUE(manager.select_workspace(3));
+    const auto normal = open_window(manager);
+    ASSERT_TRUE(manager.select_workspace(8));
+    const auto secondary = open_window(manager);
+    ASSERT_FALSE(manager.workspace_owner(scratchpad_workspace));
+    ASSERT_TRUE(manager.toggle_scratchpad());
+    EXPECT_EQ(manager.focused_output(), "left");
+    EXPECT_EQ(manager.focused_workspace(), scratchpad_workspace);
+    EXPECT_FALSE(manager.focused_window());
+    EXPECT_FALSE(manager.view(normal).visible);
+    const auto scratch = open_window(manager);
+    EXPECT_EQ(manager.state().window(scratch)->home_workspace, scratchpad_workspace);
+    EXPECT_TRUE(manager.view(scratch).visible);
+    ASSERT_TRUE(manager.cycle_focus(false));
+    EXPECT_EQ(manager.focused_window(), secondary);
+    ASSERT_TRUE(manager.cycle_focus(false));
+    EXPECT_EQ(manager.focused_window(), scratch);
+    ASSERT_TRUE(manager.select_workspace(8));
+    EXPECT_EQ(manager.state().output("left")->shown, scratchpad_workspace);
+    ASSERT_TRUE(manager.toggle_scratchpad());
+    EXPECT_EQ(manager.focused_output(), "right");
+    EXPECT_EQ(manager.focused_window(), secondary);
+    EXPECT_EQ(manager.state().output("left")->shown, 3U);
+    EXPECT_FALSE(manager.view(scratch).visible);
+    ASSERT_TRUE(manager.cycle_focus(false));
+    EXPECT_EQ(manager.focused_window(), normal);
+    ASSERT_TRUE(manager.toggle_scratchpad());
+    EXPECT_EQ(manager.focused_window(), scratch);
+    ASSERT_TRUE(manager.select_workspace(2));
+    EXPECT_EQ(manager.state().output("left")->shown, 2U);
+    EXPECT_FALSE(manager.view(scratch).visible);
+    ASSERT_TRUE(manager.toggle_scratchpad());
+    ASSERT_TRUE(manager.toggle_scratchpad());
+    EXPECT_EQ(manager.focused_workspace(), 2U);
+    EXPECT_TRUE(manager.state().valid());
+}
+
+TEST(WindowManager, MovesTransientFamilyIntoScratchpadAndKeepsPinsNumbered) {
+    WindowManager manager(false);
+    ASSERT_TRUE(manager.add_output("left", left, left, true));
+    ASSERT_TRUE(manager.add_output("right", right, right));
+    const auto sibling = open_window(manager);
+    const auto keep_pinned = open_window(manager);
+    ASSERT_TRUE(manager.toggle_pin(keep_pinned));
+    const auto parent = open_window(manager);
+    ASSERT_TRUE(manager.toggle_pin(parent));
+    const auto dialog = open_window(manager, parent);
+    ASSERT_TRUE(manager.move_to_scratchpad(dialog));
+    EXPECT_EQ(manager.focused_window(), keep_pinned);
+    EXPECT_FALSE(manager.view(parent).visible);
+    EXPECT_FALSE(manager.view(dialog).visible);
+    EXPECT_FALSE(manager.view(parent).pinned);
+    EXPECT_EQ(manager.state().window(parent)->home_workspace, scratchpad_workspace);
+    EXPECT_EQ(manager.state().window(dialog)->home_workspace, scratchpad_workspace);
+    EXPECT_FALSE(manager.toggle_pin(parent));
+    EXPECT_FALSE(manager.click(dialog));
+    ASSERT_TRUE(manager.toggle_scratchpad());
+    EXPECT_EQ(manager.focused_window(), dialog);
+    EXPECT_GT(manager.view(dialog).stacking, manager.view(parent).stacking);
+    EXPECT_FALSE(manager.view(keep_pinned).visible);
+    EXPECT_FALSE(manager.view(sibling).visible);
+    const auto geometry = manager.view(parent).geometry;
+    ASSERT_TRUE(manager.toggle_scratchpad());
+    EXPECT_TRUE(manager.view(keep_pinned).visible);
+    ASSERT_TRUE(manager.toggle_scratchpad());
+    EXPECT_EQ(manager.focused_window(), dialog);
+    EXPECT_EQ(manager.view(parent).geometry, geometry);
+    ASSERT_TRUE(manager.move_to_workspace(dialog, 8));
+    EXPECT_EQ(manager.focused_output(), "right");
+    EXPECT_EQ(manager.focused_window(), dialog);
+    EXPECT_EQ(manager.state().window(parent)->home_workspace, 8U);
+    EXPECT_EQ(manager.state().window(dialog)->home_workspace, 8U);
+    EXPECT_EQ(manager.state().output("left")->shown, scratchpad_workspace);
+    ASSERT_TRUE(manager.move_to_scratchpad(dialog));
+    EXPECT_EQ(manager.focused_output(), "left");
+    EXPECT_EQ(manager.focused_window(), dialog);
+    EXPECT_EQ(manager.state().output("right")->shown, 8U);
+    EXPECT_TRUE(manager.state().valid());
+}
+
+TEST(WindowManager, KeepsScratchpadClientsWhenThePrimaryChangesOrDisconnects) {
+    WindowManager manager;
+    ASSERT_TRUE(manager.add_output("left", left, left, true));
+    ASSERT_TRUE(manager.select_workspace(8));
+    const auto normal = open_window(manager);
+    ASSERT_TRUE(manager.toggle_scratchpad());
+    const auto scratch = open_window(manager);
+    ASSERT_TRUE(manager.add_output("right", right, right));
+    EXPECT_EQ(manager.primary_output(), "left");
+    EXPECT_EQ(manager.focused_window(), scratch);
+    EXPECT_EQ(manager.state().output("right")->shown, 8U);
+    ASSERT_TRUE(manager.set_primary_output("right"));
+    EXPECT_EQ(manager.primary_output(), "right");
+    EXPECT_EQ(manager.state().output("left")->shown, 8U);
+    EXPECT_EQ(manager.state().output("right")->shown, 1U);
+    EXPECT_FALSE(manager.view(scratch).visible);
+    EXPECT_TRUE(manager.view(normal).visible);
+    EXPECT_FALSE(manager.focused_window());
+    ASSERT_TRUE(manager.toggle_scratchpad());
+    EXPECT_EQ(manager.focused_window(), scratch);
+    EXPECT_EQ(manager.window_output(scratch), "right");
+    ASSERT_TRUE(manager.remove_output("right"));
+    EXPECT_EQ(manager.primary_output(), "left");
+    EXPECT_NE(manager.focused_workspace(), scratchpad_workspace);
+    EXPECT_FALSE(manager.view(scratch).visible);
+    ASSERT_TRUE(manager.toggle_scratchpad());
+    EXPECT_EQ(manager.focused_window(), scratch);
+    ASSERT_TRUE(manager.remove_output("left"));
+    EXPECT_FALSE(manager.focused_output());
+    EXPECT_FALSE(manager.toggle_scratchpad());
+    EXPECT_FALSE(manager.view(scratch).visible);
+    const auto unrelated = open_window(manager);
+    EXPECT_NE(manager.state().window(unrelated)->home_workspace, scratchpad_workspace);
+    ASSERT_TRUE(manager.add_output("right", right, right));
+    EXPECT_NE(manager.focused_workspace(), scratchpad_workspace);
+    EXPECT_FALSE(manager.view(scratch).visible);
+    ASSERT_TRUE(manager.toggle_scratchpad());
+    EXPECT_EQ(manager.focused_window(), scratch);
+    EXPECT_TRUE(manager.state().window(scratch)->mapped);
+    EXPECT_TRUE(manager.state().valid());
+}
+
 TEST(WindowManager, MovingAPinnedWindowFollowsAndFocusesItOverFullscreen) {
     WindowManager manager;
     ASSERT_TRUE(manager.add_output("left", left, left, true));

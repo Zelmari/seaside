@@ -866,7 +866,8 @@ class Session : public seaside::TtyInputObserver, public seaside::TtyDrmObserver
     }
 
     void attention(seaside::WindowId window, seaside::WorkspaceId workspace) noexcept try {
-        ipc_->event("window.attention", {{"window_id", window}, {"workspace_id", workspace}});
+        ipc_->event("window.attention",
+                    seaside::ipc_workspace_reference(workspace, {{"window_id", window}}));
     } catch (const std::exception &error) {
         std::fprintf(stderr, "seaside: could not publish attention event: %s\n", error.what());
     }

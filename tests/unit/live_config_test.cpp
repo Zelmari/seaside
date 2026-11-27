@@ -190,6 +190,32 @@ TEST_F(LiveConfigTest, UnsettingMigratedStockBindingsKeepsRemainingChordsAndSurv
     EXPECT_EQ(load_startup_config(store, paths).config.keybinds, stock);
 }
 
+TEST_F(LiveConfigTest, KeepsMigratedScratchpadBindingRemovalAndReassignmentAcrossRestart) {
+    const auto chord = parse_chord("Super+grave").value();
+    auto stock = default_bindings();
+    stock.erase(chord);
+    std::string text = "[keybinds]\n";
+    for (const auto &[key, binding] : stock) {
+        text += '"' + format_chord(key) + "\" = \"" + format_action(binding) + "\"\n";
+    }
+    text += legacy_bindings_comment;
+    ASSERT_TRUE(store.publish(paths.user, text, PublishMode::create_user_file));
+    ASSERT_NO_FATAL_FAILURE(start());
+    ASSERT_EQ(transaction().active().keybinds, default_bindings());
+
+    const auto removed = update({Setting::keybinds, {}, chord});
+    ASSERT_TRUE(removed) << removed.error().message;
+    EXPECT_TRUE(*removed);
+    EXPECT_EQ(transaction().active().keybinds, stock);
+    EXPECT_EQ(load_startup_config(store, paths).config.keybinds, stock);
+
+    const auto rebound = update({Setting::keybinds, std::string("move_to_scratchpad"), chord});
+    ASSERT_TRUE(rebound) << rebound.error().message;
+    EXPECT_TRUE(*rebound);
+    EXPECT_EQ(transaction().active().keybinds.at(chord).kind, ActionKind::move_to_scratchpad);
+    EXPECT_EQ(load_startup_config(store, paths).config.keybinds, transaction().active().keybinds);
+}
+
 TEST_F(LiveConfigTest, QueuedTogglesUseTheSettingAcceptedByThePreviousEdit) {
     ASSERT_NO_FATAL_FAILURE(start());
     std::vector<std::pair<LiveConfig::EditResult, bool>> replies;

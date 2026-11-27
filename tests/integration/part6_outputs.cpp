@@ -359,6 +359,54 @@ TEST_F(OutputTrial, ReportsNoUsableOutputsAndRecoversTheSameOutputAndWorkspace) 
     EXPECT_EQ(watermark, before_rename + 1);
 }
 
+TEST_F(OutputTrial, ReportsScratchpadByNameAndKeepsNumberedWorkspaceQueriesStable) {
+    auto left = make_output();
+    auto right = make_output();
+    ASSERT_TRUE(left && right);
+    ASSERT_NO_FATAL_FAILURE(attach(left.get(), "left", 0));
+    ASSERT_NO_FATAL_FAILURE(attach(right.get(), "right", 160));
+    SessionControl control(*scene, *desktop, *outputs);
+    const auto query = [&](std::string_view method) {
+        return control.query(method, *live, *trace, paths.user.string(), "ready", nullptr).value();
+    };
+    const auto initial = query("query.workspaces");
+    EXPECT_EQ(initial["workspaces"].size(), workspace_count);
+    EXPECT_EQ(initial["scratchpad"]["name"], "scratchpad");
+    EXPECT_FALSE(initial["scratchpad"]["visible"].get<bool>());
+    EXPECT_TRUE(initial["scratchpad"]["output_id"].is_null());
+    const auto normal_focus = query("query.focus");
+    EXPECT_EQ(normal_focus["workspace_id"], 1);
+
+    const auto toggle = decode_ipc_action("action.scratchpad_toggle", IpcJson::object());
+    ASSERT_EQ(toggle.action.kind, ActionKind::toggle_scratchpad);
+    ASSERT_TRUE(desktop->dispatch(toggle.action).value_or(false));
+    const auto displayed = query("query.workspaces");
+    EXPECT_EQ(displayed["workspaces"].size(), workspace_count);
+    EXPECT_TRUE(displayed["scratchpad"]["visible"].get<bool>());
+    EXPECT_TRUE(displayed["scratchpad"]["focused"].get<bool>());
+    EXPECT_EQ(displayed["scratchpad"]["output_id"], normal_focus["output_id"]);
+    const auto focused = query("query.focus");
+    EXPECT_EQ(focused["workspace_name"], "scratchpad");
+    EXPECT_TRUE(focused["workspace_id"].is_null());
+    EXPECT_TRUE(focused["window_id"].is_null());
+    const auto output_rows = query("query.outputs")["outputs"];
+    for (const auto &output : output_rows) {
+        if (output["id"] == focused["output_id"]) {
+            EXPECT_EQ(output["workspace_name"], "scratchpad");
+            EXPECT_TRUE(output["workspace_id"].is_null());
+        } else {
+            EXPECT_EQ(output["workspace_id"], 6);
+        }
+    }
+    ASSERT_TRUE(desktop->dispatch(toggle.action).value_or(false));
+    EXPECT_EQ(query("query.workspaces"), initial);
+    EXPECT_EQ(query("query.focus"), normal_focus);
+
+    const auto move = decode_ipc_action("action.window_to_scratchpad", {{"window_id", 42}});
+    EXPECT_EQ(move.action.kind, ActionKind::move_to_scratchpad);
+    EXPECT_EQ(move.window, 42U);
+}
+
 TEST_F(OutputTrial, ReportsOnlyActiveConfigAndShortcutsAcrossReloads) {
     auto output = make_output();
     ASSERT_TRUE(output);

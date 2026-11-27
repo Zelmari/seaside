@@ -75,16 +75,16 @@ class TextEdit {
         return !table.is_inline() && text_[offset(table.source().begin)] == '[';
     }
 
-    void retire_binding_example(const toml::table &root) {
-        if (!text_.contains(legacy_move_binding_example))
+    void replace_comment(const toml::table &root, std::string_view old,
+                         std::string_view replacement) {
+        if (!text_.contains(old))
             return;
         for (std::size_t line = 0; line < lines_.size(); ++line) {
             const auto begin = lines_[line];
             const auto end = text_.find_first_of("\r\n", begin);
-            const auto count = end == text_.npos ? text_.npos : end - begin;
-            if (text_.substr(begin, count) == legacy_move_binding_example &&
-                !is_value_line(root, line + 1))
-                add(begin + 2, begin + 2, "Example: ");
+            const auto count = (end == text_.npos ? text_.size() : end) - begin;
+            if (text_.substr(begin, count) == old && !is_value_line(root, line + 1))
+                add(begin, begin + count, std::string(replacement));
         }
     }
 
@@ -227,7 +227,9 @@ std::expected<BindingMap, SettingError> rewrite_binding(TextEdit &patch, const t
 
     // Old stock tables get additional active bindings on read. Preserve
     // those chords when editing and retire the template's migration marker.
-    patch.retire_binding_example(root);
+    patch.replace_comment(root, legacy_move_binding_example,
+                          "# Example: \"Super+Shift+Left\" = \"move_window left\"");
+    patch.replace_comment(root, legacy_bindings_comment, bindings_comment);
     implicit.erase(*edit.chord);
     if (table->is_inline() && !implicit.empty()) {
         auto updated = *table;

@@ -170,6 +170,7 @@ until it observes a completed save.
 | Super+F | Maximize the focused window within the configured outer gaps |
 | Super+Shift+F | Toggle fullscreen without outer gaps |
 | Super+1 through Super+9, Super+0 | Switch to workspaces 1 through 9, then 10 |
+| Super+grave (backtick) | Show or hide the scratchpad on the primary monitor |
 | Super+Shift+1 through Super+Shift+9, Super+Shift+0 | Move the focused window to workspaces 1 through 9, then 10, and follow it |
 | Super+arrow keys | Focus a window in that direction |
 | Super+Shift+arrow keys | Move the focused tile in that direction. Scrolling columns move left or right. |
@@ -212,6 +213,27 @@ title bars in Foot and other Wayland apps that support decoration negotiation.
 The setting updates open windows when you save the file. Set it to `true`
 to restore app-drawn title bars. Seaside's focus border is controlled by
 `border_width`. Apps that draw a header as part of their content can keep it.
+
+### Scratchpad
+
+Press **Super+grave** from either monitor to show the scratchpad on the
+primary monitor and focus it. You can launch apps there and arrange them with
+the same layout controls used on numbered workspaces. Press the shortcut
+again to restore the numbered workspace and its previous focus. If you close
+the scratchpad while the secondary monitor has keyboard focus, that monitor
+keeps focus. Selecting a numbered workspace on the primary also hides the
+scratchpad. A change of primary monitor hides it until you open it again.
+
+Use `seasidectl window to-scratchpad` to move the focused window and its
+dialogs into the scratchpad, or bind `move_to_scratchpad` to a shortcut.
+Use the regular numbered move shortcut to bring them back. Moving a pinned
+window into the scratchpad unpins it. Hidden scratchpad windows stay open
+and are excluded from Alt+Tab.
+
+Use `seasidectl scratchpad toggle` to toggle it from a script. The
+`seasidectl workspaces` result describes it in the `scratchpad` field.
+An IPC row that refers to the scratchpad uses `workspace_name: "scratchpad"`
+and a null `workspace_id`.
 
 ### Monitors and layouts
 

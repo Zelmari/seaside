@@ -2,6 +2,7 @@
 
 #include <limits>
 #include <new>
+#include <utility>
 
 namespace seaside {
 
@@ -82,9 +83,22 @@ std::expected<void, StateError> State::show_workspace(std::string_view output_id
     output->second.shown = workspace_id;
     return {};
 }
+std::expected<void, StateError> State::show_scratchpad(std::string_view output_id) noexcept {
+    auto output = outputs_.find(output_id);
+    if (output == outputs_.end()) {
+        return std::unexpected(StateError::missing_output);
+    }
+    for (const auto &[id, record] : outputs_) {
+        if (id != output_id && record.shown == scratchpad_workspace) {
+            return std::unexpected(StateError::wrong_owner);
+        }
+    }
+    output->second.shown = scratchpad_workspace;
+    return {};
+}
 std::expected<WindowId, StateError> State::create_window(WorkspaceId workspace_id) noexcept {
-    auto workspace = workspaces_.find(workspace_id);
-    if (workspace == workspaces_.end()) {
+    auto *workspace = workspace_record(workspace_id);
+    if (!workspace) {
         return std::unexpected(StateError::missing_workspace);
     }
     if (next_window_id_ > 9007199254740991ULL) {
@@ -92,11 +106,11 @@ std::expected<WindowId, StateError> State::create_window(WorkspaceId workspace_i
     }
     const auto id = next_window_id_++;
     try {
-        workspace->second.windows.insert(id);
+        workspace->windows.insert(id);
         try {
             windows_.emplace(id, WindowState{id, workspace_id, false, false, {}, 0});
         } catch (const std::bad_alloc &) {
-            workspace->second.windows.erase(id);
+            workspace->windows.erase(id);
             throw;
         }
         return id;
@@ -148,7 +162,7 @@ std::expected<void, StateError> State::destroy_window(WindowId id) noexcept {
     if (window == windows_.end()) {
         return std::unexpected(StateError::missing_window);
     }
-    workspaces_.at(window->second.home_workspace).windows.erase(id);
+    workspace_record(window->second.home_workspace)->windows.erase(id);
     windows_.erase(window);
     return {};
 }
@@ -157,8 +171,8 @@ std::expected<void, StateError> State::move_window(WindowId id, WorkspaceId dest
     if (window == windows_.end()) {
         return std::unexpected(StateError::missing_window);
     }
-    auto workspace = workspaces_.find(destination);
-    if (workspace == workspaces_.end()) {
+    auto *workspace = workspace_record(destination);
+    if (!workspace) {
         return std::unexpected(StateError::missing_workspace);
     }
     if (window->second.home_workspace == destination) {
@@ -166,8 +180,8 @@ std::expected<void, StateError> State::move_window(WindowId id, WorkspaceId dest
     }
     // Transferring the existing set node keeps parent-and-dialog moves free of
     // allocation failures after the destination workspace has been prepared.
-    auto &source = workspaces_.at(window->second.home_workspace).windows;
-    workspace->second.windows.insert(source.extract(id));
+    auto &source = workspace_record(window->second.home_workspace)->windows;
+    workspace->windows.insert(source.extract(id));
     window->second.home_workspace = destination;
     return {};
 }
@@ -190,7 +204,13 @@ const WindowState *State::window(WindowId id) const noexcept {
     auto found = windows_.find(id);
     return found == windows_.end() ? nullptr : &found->second;
 }
+WorkspaceState *State::workspace_record(WorkspaceId id) noexcept {
+    return const_cast<WorkspaceState *>(std::as_const(*this).workspace(id));
+}
 const WorkspaceState *State::workspace(WorkspaceId id) const noexcept {
+    if (id == scratchpad_workspace) {
+        return &scratchpad_;
+    }
     auto found = workspaces_.find(id);
     return found == workspaces_.end() ? nullptr : &found->second;
 }
@@ -218,24 +238,38 @@ State::mapped_windows(WorkspaceId id) const noexcept {
 }
 bool State::valid() const noexcept {
     for (const auto &[id, window] : windows_) {
-        auto workspace = workspaces_.find(window.home_workspace);
-        if (workspace == workspaces_.end() || !workspace->second.windows.contains(id) ||
+        const auto *home = workspace(window.home_workspace);
+        if (!home || !home->windows.contains(id) ||
             (window.mapped && (!window.initialized || window.initial_mapping_seq == 0))) {
             return false;
         }
     }
-    for (const auto &[id, workspace] : workspaces_) {
-        for (const auto window_id : workspace.windows) {
-            auto window = windows_.find(window_id);
-            if (window == windows_.end() || window->second.home_workspace != id) {
+    const auto membership_valid = [&](const WorkspaceState &record) {
+        for (const auto window_id : record.windows) {
+            const auto *member = window(window_id);
+            if (!member || member->home_workspace != record.id) {
                 return false;
             }
         }
+        return true;
+    };
+    for (const auto &[id, record] : workspaces_) {
+        if (!membership_valid(record)) {
+            return false;
+        }
     }
+    if (!membership_valid(scratchpad_)) {
+        return false;
+    }
+    bool scratchpad_shown = false;
     for (const auto &[id, output] : outputs_) {
-        if (output.shown) {
-            auto workspace = workspaces_.find(*output.shown);
-            if (workspace == workspaces_.end() || workspace->second.owner_or_last_output != id) {
+        if (output.shown == scratchpad_workspace) {
+            if (std::exchange(scratchpad_shown, true)) {
+                return false;
+            }
+        } else if (output.shown) {
+            const auto *shown = workspace(*output.shown);
+            if (!shown || shown->owner_or_last_output != id) {
                 return false;
             }
         }

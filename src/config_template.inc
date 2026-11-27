@@ -142,7 +142,7 @@ temperature_kelvin = 4500
 # Modifiers: Super, Ctrl, Alt, Shift. Examples: Left, Tab, D, Return, F12.
 # Drag gestures: Super+MouseLeftDrag and Super+MouseRightDrag.
 # All default bindings can be removed or remapped.
-# This table is the complete active map: delete/comment an entry to disable it.
+# This table is the complete binding map. Delete or comment an entry to disable it.
 # An empty [keybinds] table disables all bindings; omitting the table uses defaults.
 "Super+Space" = "exec wofi --show drun"
 "Super+S" = "exec seaside-screenshot region"
@@ -184,6 +184,8 @@ temperature_kelvin = 4500
 "Super+Shift+Up" = "move_window up"
 "Super+Shift+Down" = "move_window down"
 "Alt+Tab" = "cycle_focus_mru"
+# Show or hide the named scratchpad on the primary monitor.
+"Super+grave" = "toggle_scratchpad"
 "Super+MouseLeftDrag" = "move_window"
 "Super+MouseRightDrag" = "resize_window"
 "Super+Return" = "exec foot"  # Default terminal; installed through Seaside package dependencies.
@@ -198,7 +200,7 @@ temperature_kelvin = 4500
 #   toggle_window_tiling; focus DIR; cycle_focus_mru
 #   move_window (mouse drag only); resize_window (mouse drag only)
 #   move_window DIR; swap_window DIR; resize_window DIR [DISTANCE]
-#   workspace ID; move_to_workspace ID
+#   workspace ID; move_to_workspace ID; toggle_scratchpad; move_to_scratchpad
 #   toggle_window_pin; toggle_window_maximize; toggle_window_fullscreen
 #   close_window; night_light on; night_light off; night_light toggle
 #   exit; exec SHELL_COMMAND
@@ -206,6 +208,7 @@ temperature_kelvin = 4500
 # DISTANCE = optional positive logical pixels, default 32.
 # Optional examples (uncomment ONLY those you want):
 # "Super+B" = "exec firefox"
+# "Super+Shift+grave" = "move_to_scratchpad"
 # "Super+Alt+Left" = "swap_window left"
 # "Super+Ctrl+Left" = "resize_window left 32"
 # "Super+N" = "night_light toggle"

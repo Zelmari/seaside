@@ -79,6 +79,7 @@ WindowManager::WindowManager(bool tiling) : tiling_(tiling) {
         }
         workspaces_.try_emplace(id);
     }
+    workspaces_.try_emplace(scratchpad_workspace);
 }
 
 WindowManager::WindowManager(const Config &config) : WindowManager(config.window.tiling) {
@@ -184,12 +185,21 @@ bool WindowManager::show_workspace(std::string_view output, WorkspaceId workspac
     if (!state_.show_workspace(output, workspace)) {
         return false;
     }
+    if (output == primary_output_) {
+        scratchpad_restore_.reset();
+    }
     workspaces_.at(workspace).last_shown = ++sequence_;
     update_layout_area(workspace);
     return true;
 }
 
-bool WindowManager::reconcile_workspaces(WorkspaceId previous_workspace) {
+WorkspaceId WindowManager::numbered_focus() const noexcept {
+    const auto workspace = focused_workspace();
+    return workspace == scratchpad_workspace ? scratchpad_restore_.value_or(disconnected_workspace_)
+                                             : workspace.value_or(disconnected_workspace_);
+}
+
+bool WindowManager::reconcile_workspaces(WorkspaceId previous_workspace, bool scratchpad_focused) {
     if (!primary_output_) {
         disconnected_workspace_ = previous_workspace;
         focused_output_.reset();
@@ -197,11 +207,12 @@ bool WindowManager::reconcile_workspaces(WorkspaceId previous_workspace) {
         return true;
     }
     const auto primary = *primary_output_;
+    const bool keep_scratchpad = scratchpad_restore_.has_value();
     const auto secondary = std::ranges::find_if(outputs_, [primary](const auto &output) {
         return output.second.connected && output.first != primary;
     });
     const bool split = secondary != outputs_.end();
-    for (const auto &[id, workspace] : workspaces_) {
+    for (const auto &[id, workspace] : state_.workspaces()) {
         const std::string_view owner =
             split && id > primary_workspace_count ? std::string_view(secondary->first) : primary;
         if (!state_.assign_workspace(id, owner)) {
@@ -227,6 +238,13 @@ bool WindowManager::reconcile_workspaces(WorkspaceId previous_workspace) {
         (split && !show(secondary->first, primary_workspace_count + 1, workspace_count))) {
         return false;
     }
+    if (keep_scratchpad) {
+        const auto restore = state_.output(primary)->shown;
+        if (!state_.show_scratchpad(primary)) {
+            return false;
+        }
+        scratchpad_restore_ = restore;
+    }
     for (auto &[id, window] : windows_) {
         if (state_.window(id)->mapped) {
             position_window(id, window);
@@ -234,6 +252,9 @@ bool WindowManager::reconcile_workspaces(WorkspaceId previous_workspace) {
     }
     update_layout_areas();
     const auto owner = workspace_output(previous_workspace);
+    if (scratchpad_restore_ && (scratchpad_focused || owner == primary)) {
+        return focus_on_output(primary, true);
+    }
     return owner && focus_on_output(*owner, true);
 }
 
@@ -242,7 +263,8 @@ bool WindowManager::add_output(std::string_view id, WindowRect bounds, WindowRec
     if (!valid_area(bounds, usable) || id.empty() || state_.output_count() >= 2) {
         return false;
     }
-    const auto previous_workspace = focused_workspace().value_or(disconnected_workspace_);
+    const bool scratchpad_focused = focused_workspace() == scratchpad_workspace;
+    const auto previous_workspace = numbered_focus();
     cancel_active_move();
     auto [position, inserted] = outputs_.try_emplace(OutputId{id});
     auto &[name, output] = *position;
@@ -256,9 +278,10 @@ bool WindowManager::add_output(std::string_view id, WindowRect bounds, WindowRec
     output.usable = usable;
     output.connected = true;
     if (!primary_output_ || primary) {
+        scratchpad_restore_.reset();
         primary_output_ = name;
     }
-    return reconcile_workspaces(previous_workspace);
+    return reconcile_workspaces(previous_workspace, scratchpad_focused);
 }
 
 bool WindowManager::remove_output(std::string_view id) {
@@ -266,7 +289,8 @@ bool WindowManager::remove_output(std::string_view id) {
     if (position == outputs_.end() || !position->second.connected) {
         return false;
     }
-    const auto previous_workspace = focused_workspace().value_or(disconnected_workspace_);
+    const bool scratchpad_focused = focused_workspace() == scratchpad_workspace;
+    const auto previous_workspace = numbered_focus();
     cancel_active_move();
     auto &[name, output] = *position;
     if (!state_.remove_output(name)) {
@@ -274,6 +298,7 @@ bool WindowManager::remove_output(std::string_view id) {
     }
     output.connected = false;
     if (primary_output_ == name) {
+        scratchpad_restore_.reset();
         const auto remaining = std::ranges::find_if(
             outputs_, [](const auto &record) { return record.second.connected; });
         primary_output_ = remaining == outputs_.end()
@@ -283,7 +308,7 @@ bool WindowManager::remove_output(std::string_view id) {
     if (focused_output_ == name) {
         focused_output_.reset();
     }
-    return reconcile_workspaces(previous_workspace);
+    return reconcile_workspaces(previous_workspace, scratchpad_focused);
 }
 
 bool WindowManager::update_output(std::string_view id, WindowRect bounds, WindowRect usable) {
@@ -349,11 +374,12 @@ bool WindowManager::set_primary_output(std::string_view id) {
     if (found == outputs_.end() || !found->second.connected || primary_output_ == id) {
         return false;
     }
-    const auto previous_workspace = focused_workspace().value_or(disconnected_workspace_);
+    const auto previous_workspace = numbered_focus();
     cancel_active_move();
     finish_focus_cycle();
+    scratchpad_restore_.reset();
     primary_output_ = found->first;
-    return reconcile_workspaces(previous_workspace);
+    return reconcile_workspaces(previous_workspace, false);
 }
 
 bool WindowManager::has_fullscreen(std::string_view id) const {
@@ -378,6 +404,9 @@ bool WindowManager::focus_output_at(double x, double y) {
 }
 
 std::optional<std::string_view> WindowManager::workspace_output(WorkspaceId id) const noexcept {
+    if (id == scratchpad_workspace) {
+        return primary_output_;
+    }
     const auto *workspace = state_.workspace(id);
     if (workspace && workspace->owner_or_last_output) {
         auto found = outputs_.find(*workspace->owner_or_last_output);
@@ -402,6 +431,9 @@ std::optional<std::string_view> WindowManager::workspace_owner(WorkspaceId id) c
 }
 
 bool WindowManager::select_workspace(WorkspaceId id) {
+    if (id == scratchpad_workspace) {
+        return false;
+    }
     const auto output = workspace_output(id);
     if (!output) {
         return false;
@@ -411,6 +443,31 @@ bool WindowManager::select_workspace(WorkspaceId id) {
     }
     finish_focus_cycle();
     return show_workspace(*output, id) && focus_on_output(*output, true);
+}
+
+bool WindowManager::toggle_scratchpad() {
+    if (!primary_output_) {
+        return false;
+    }
+    cancel_active_move();
+    finish_focus_cycle();
+    const auto primary = *primary_output_;
+    if (scratchpad_restore_) {
+        if (!show_workspace(primary, *scratchpad_restore_)) {
+            return false;
+        }
+        if (focused_output_ == primary) {
+            restore_focus();
+        }
+        return true;
+    }
+    const auto previous = state_.output(primary)->shown;
+    if (!previous || !state_.show_scratchpad(primary)) {
+        return false;
+    }
+    scratchpad_restore_ = previous;
+    update_layout_area(scratchpad_workspace);
+    return focus_on_output(primary, true);
 }
 
 std::optional<WindowId> WindowManager::create_window(std::optional<WindowId> parent) {
@@ -565,6 +622,13 @@ bool WindowManager::is_descendant(WindowId id, WindowId ancestor) const {
     return false;
 }
 
+WindowId WindowManager::transient_root(WindowId id) const {
+    while (const auto parent = windows_.at(id).parent) {
+        id = *parent;
+    }
+    return id;
+}
+
 bool WindowManager::relocate_window(WindowId id, WorkspaceId workspace, WorkspaceLayout *prepared) {
     if (state_.window(id)->home_workspace != workspace) {
         cancel_active_move();
@@ -578,6 +642,9 @@ bool WindowManager::relocate_window(WindowId id, WorkspaceId workspace, Workspac
             return false;
         }
         if (old != workspace) {
+            if (workspace == scratchpad_workspace) {
+                windows_.at(member).pinned = false;
+            }
             workspaces_.at(old).layout.erase(member);
             forget_focus(member);
             if (member != id || !prepared) {
@@ -804,7 +871,8 @@ bool WindowManager::is_visible(WindowId id) const {
         const auto fullscreen = pinned ? fullscreen_on(*output) : std::nullopt;
         return !fullscreen || id == fullscreen || is_descendant(id, *fullscreen);
     }
-    return shown && pinned && !window.fullscreen && !fullscreen_on(*output);
+    return shown && shown != scratchpad_workspace && pinned && !window.fullscreen &&
+           !fullscreen_on(*output);
 }
 
 bool WindowManager::is_tiled(WindowId id, const Window &window) const {
@@ -1125,13 +1193,14 @@ void WindowManager::finish_focus_cycle() {
 bool WindowManager::move_to_workspace(WindowId id, WorkspaceId destination) {
     const auto *entry = state_.window(id);
     const auto output = workspace_output(destination);
-    if (!entry || !entry->mapped || windows_.at(id).parent || !output) {
+    if (!entry || !entry->mapped || destination == scratchpad_workspace || !output ||
+        (windows_.at(id).parent && entry->home_workspace != scratchpad_workspace)) {
         return false;
     }
     cancel_active_move();
     finish_focus_cycle();
-    if (!relocate_window(id, destination) || !show_workspace(*output, destination) ||
-        !set_focused_output(*output)) {
+    if (!relocate_window(transient_root(id), destination) ||
+        !show_workspace(*output, destination) || !set_focused_output(*output)) {
         return false;
     }
     // The explicit move gives a pinned window focus even if the destination
@@ -1139,6 +1208,25 @@ bool WindowManager::move_to_workspace(WindowId id, WorkspaceId destination) {
     if (windows_.at(id).pinned || is_visible(id)) {
         set_focus(id);
     } else {
+        restore_focus();
+    }
+    return true;
+}
+
+bool WindowManager::move_to_scratchpad(WindowId id) {
+    const auto *entry = state_.window(id);
+    if (!entry || !entry->mapped || entry->home_workspace == scratchpad_workspace) {
+        return false;
+    }
+    cancel_active_move();
+    finish_focus_cycle();
+    if (!relocate_window(transient_root(id), scratchpad_workspace)) {
+        return false;
+    }
+    if (scratchpad_restore_ && is_visible(id)) {
+        set_focused_output(*primary_output_);
+        set_focus(id);
+    } else if (focused_window_ && !is_visible(*focused_window_)) {
         restore_focus();
     }
     return true;
@@ -1193,7 +1281,9 @@ bool WindowManager::set_fullscreen(WindowId id, bool enabled) {
 
 bool WindowManager::toggle_pin(WindowId id) {
     auto found = windows_.find(id);
-    if (found == windows_.end() || !state_.window(id)->mapped || found->second.parent) {
+    const auto *entry = state_.window(id);
+    if (found == windows_.end() || !entry->mapped || found->second.parent ||
+        entry->home_workspace == scratchpad_workspace) {
         return false;
     }
     cancel_active_move();
@@ -1201,7 +1291,7 @@ bool WindowManager::toggle_pin(WindowId id) {
     if (found->second.pinned) {
         const auto output = window_output(id);
         const auto shown = output ? state_.output(*output)->shown : std::nullopt;
-        if (shown && !relocate_window(id, *shown)) {
+        if (shown && shown != scratchpad_workspace && !relocate_window(id, *shown)) {
             return false;
         }
     }

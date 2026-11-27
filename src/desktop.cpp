@@ -747,6 +747,13 @@ std::expected<bool, DesktopActionError> Desktop::dispatch(const Action &action,
         changed = windows_.select_workspace(destination);
         break;
     }
+    case ActionKind::toggle_scratchpad:
+        if (!windows_.primary_output()) {
+            return std::unexpected(Error::no_target);
+        }
+        discard_drag();
+        changed = windows_.toggle_scratchpad();
+        break;
     case ActionKind::night_light:
     case ActionKind::exit:
     case ActionKind::exec:
@@ -776,6 +783,15 @@ std::expected<bool, DesktopActionError> Desktop::dispatch(const Action &action,
             changed = would_change;
             break;
         }
+        case ActionKind::move_to_scratchpad:
+            if (entry->home_workspace == scratchpad_workspace) {
+                if (had_drag) {
+                    project();
+                }
+                return false;
+            }
+            changed = windows_.move_to_scratchpad(id);
+            break;
         case ActionKind::toggle_window_pin:
             changed = windows_.toggle_pin(id);
             break;

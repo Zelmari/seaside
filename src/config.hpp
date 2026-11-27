@@ -14,6 +14,10 @@
 namespace seaside {
 
 inline constexpr std::size_t max_config_bytes = 1024 * 1024;
+inline constexpr std::string_view legacy_bindings_comment =
+    "# This table is the complete active map: delete/comment an entry to disable it.";
+inline constexpr std::string_view bindings_comment =
+    "# This table is the complete binding map. Delete or comment an entry to disable it.";
 inline constexpr std::string_view legacy_move_binding_example =
     "# \"Super+Shift+Left\" = \"move_window left\"";
 enum class Layout { dwindle, scrolling };

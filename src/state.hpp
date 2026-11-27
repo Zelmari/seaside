@@ -14,6 +14,9 @@ namespace seaside {
 using WindowId = std::uint64_t;
 using WorkspaceId = std::uint32_t;
 using OutputId = std::string;
+// The scratchpad uses an internal ID outside the public numbered range.
+inline constexpr WorkspaceId scratchpad_workspace = 0;
+inline constexpr std::string_view scratchpad_name = "scratchpad";
 inline constexpr WorkspaceId workspace_count = 10;
 inline constexpr WorkspaceId primary_workspace_count = workspace_count / 2;
 
@@ -60,6 +63,7 @@ class State final {
                                                      std::string_view output) noexcept;
     std::expected<void, StateError> show_workspace(std::string_view output,
                                                    WorkspaceId workspace) noexcept;
+    std::expected<void, StateError> show_scratchpad(std::string_view output) noexcept;
     std::expected<WindowId, StateError> create_window(WorkspaceId workspace) noexcept;
     std::expected<void, StateError> initialize_window(WindowId window) noexcept;
     std::expected<void, StateError> map_window(WindowId window) noexcept;
@@ -83,6 +87,9 @@ class State final {
     std::size_t window_count() const noexcept { return windows_.size(); }
 
   private:
+    WorkspaceState *workspace_record(WorkspaceId id) noexcept;
+
+    WorkspaceState scratchpad_{scratchpad_workspace, {}, {}};
     std::map<WindowId, WindowState> windows_;
     std::map<WorkspaceId, WorkspaceState> workspaces_;
     std::map<OutputId, OutputState, std::less<>> outputs_;

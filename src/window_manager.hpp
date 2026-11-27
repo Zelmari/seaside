@@ -76,6 +76,8 @@ class WindowManager final {
 
     bool select_workspace(WorkspaceId id);
     bool move_to_workspace(WindowId id, WorkspaceId destination);
+    bool toggle_scratchpad();
+    bool move_to_scratchpad(WindowId id);
 
     bool set_maximized(WindowId id, bool enabled);
     bool set_fullscreen(WindowId id, bool enabled);
@@ -148,10 +150,12 @@ class WindowManager final {
     };
 
     bool show_workspace(std::string_view output, WorkspaceId workspace);
-    bool reconcile_workspaces(WorkspaceId previous_workspace);
+    WorkspaceId numbered_focus() const noexcept;
+    bool reconcile_workspaces(WorkspaceId previous_workspace, bool scratchpad_focused);
     bool set_focused_output(std::string_view id);
     bool focus_on_output(std::string_view id, bool restore_workspace_focus = false);
     bool relocate_window(WindowId id, WorkspaceId workspace, WorkspaceLayout *prepared = nullptr);
+    WindowId transient_root(WindowId id) const;
     void remember_focus(WindowId id, WorkspaceId workspace);
     void forget_focus(WindowId id);
     void set_focus(std::optional<WindowId> id, bool remember = true,
@@ -188,6 +192,7 @@ class WindowManager final {
     std::optional<std::string_view> focused_output_;
     std::optional<std::string_view> primary_output_;
     WorkspaceId disconnected_workspace_ = 1;
+    std::optional<WorkspaceId> scratchpad_restore_;
     std::optional<WindowId> focused_window_;
     std::vector<WindowId> seat_focus_history_;
     std::optional<FocusCycle> cycle_;

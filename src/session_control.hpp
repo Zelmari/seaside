@@ -18,6 +18,7 @@ IpcAction decode_ipc_action(std::string_view method, const IpcJson &params);
 IpcResult desktop_action_result(std::expected<bool, DesktopActionError> result);
 IpcJson ipc_diagnostic(const Diagnostic &diagnostic, std::string_view component = "config");
 IpcJson ipc_action_result(bool changed);
+IpcJson ipc_workspace_reference(std::optional<WorkspaceId> workspace, IpcJson data);
 
 class SessionControl {
   public:
@@ -77,6 +78,7 @@ class SessionControl {
 
     IpcJson focus() const;
     IpcJson workspaces() const;
+    IpcJson scratchpad() const;
     IpcJson windows() const;
     IpcJson output_rows() const;
     IpcJson night_light(const ConfigTransaction &config) const;

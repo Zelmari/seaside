@@ -54,22 +54,43 @@ bool retired_workspace_binding(std::string_view text, Chord chord) {
 }
 
 void upgrade_stock_bindings(std::string_view text, BindingMap &bindings) {
-    if (!text.contains(legacy_move_binding_example) || bindings.empty())
+    const bool upgrade_directions = text.contains(legacy_move_binding_example);
+    const bool upgrade_scratchpad =
+        text.contains(legacy_bindings_comment) && !text.contains(bindings_comment);
+    if ((!upgrade_directions && !upgrade_scratchpad) || bindings.empty()) {
         return;
+    }
 
-    auto old = default_bindings();
+    auto stock = default_bindings();
+    const auto scratchpad = parse_chord("Super+grave").value();
     BindingMap added;
-    for (const auto *key : {"Left", "Right", "Up", "Down"}) {
-        auto chord = parse_chord(std::string("Super+Shift+") + key).value();
-        added.insert(old.extract(chord));
+    added.insert(stock.extract(scratchpad));
+    if (upgrade_directions) {
+        auto old = stock;
+        BindingMap directional;
+        for (const auto *key : {"Left", "Right", "Up", "Down"}) {
+            auto chord = parse_chord(std::string("Super+Shift+") + key).value();
+            directional.insert(old.extract(chord));
+        }
+        for (const auto *key : {"Super+S", "Super+Shift+S"}) {
+            const auto chord = parse_chord(key).value();
+            if (!bindings.contains(chord)) {
+                old.erase(chord);
+            }
+        }
+        if (bindings.contains(scratchpad)) {
+            old.insert(*added.begin());
+        }
+        if (old == bindings) {
+            bindings.merge(directional);
+            if (upgrade_scratchpad) {
+                bindings.merge(added);
+            }
+        }
     }
-    for (const auto *key : {"Super+S", "Super+Shift+S"}) {
-        const auto chord = parse_chord(key).value();
-        if (!bindings.contains(chord))
-            old.erase(chord);
-    }
-    if (old == bindings)
+    if (upgrade_scratchpad && stock == bindings) {
         bindings.merge(added);
+    }
 }
 
 // toml++ bounds nested values, but not arbitrarily long dotted table paths.

@@ -1654,6 +1654,90 @@ bool run_cross_output_cycle(const Fixture &fixture) {
     return true;
 }
 
+bool run_scratchpad(const Fixture &fixture) {
+    auto &desktop = fixture.desktop;
+    const auto &windows = desktop.windows();
+    auto left = fixture.output();
+    auto right = fixture.output();
+    REQUIRE(left && right);
+    auto *left_output = part3_output_handle(left.get());
+    auto *right_output = part3_output_handle(right.get());
+    REQUIRE(desktop.add_output(left_output, "left", output_bounds));
+    REQUIRE(desktop.add_output(right_output, "right", {160, 0, 160, 90}));
+    LayerSeat seat(fixture);
+    REQUIRE(seat.start());
+    Connection connection(fixture.display);
+    Client normal, secondary, scratch;
+    REQUIRE(connection.connect(normal) && connection.open(normal));
+    REQUIRE(connection.attach(normal, ordinary_width, ordinary_height));
+    const auto a = desktop.keyboard_window();
+    REQUIRE(a);
+    seat.click(200, 45);
+    REQUIRE(connection.connect(secondary) && connection.open(secondary));
+    REQUIRE(connection.attach(secondary, ordinary_width, ordinary_height));
+    const auto b = desktop.keyboard_window();
+    REQUIRE(b && b != a);
+    const auto toggle = [&] {
+        seat.key_state(KEY_LEFTMETA, true);
+        seat.key(KEY_GRAVE);
+        seat.key_state(KEY_LEFTMETA, false);
+    };
+    toggle();
+    REQUIRE(desktop.focused_output_handle() == left_output && !desktop.keyboard_window());
+    REQUIRE(!windows.view(*a).visible);
+    REQUIRE(connection.connect(scratch) && connection.open(scratch));
+    REQUIRE(connection.attach(scratch, ordinary_width, ordinary_height));
+    const auto s = desktop.keyboard_window();
+    REQUIRE(s && s != a && s != b);
+    REQUIRE(windows.state().window(*s)->home_workspace == seaside::scratchpad_workspace);
+    const auto scratch_box = windows.view(*s).geometry;
+    REQUIRE(hit(fixture.scene, scratch_box, *s));
+    seat.click(scratch_box.x + 1, scratch_box.y + 1);
+    REQUIRE(connection.wait(scratch, [&] { return scratch.pointer_surface == scratch.surface; }));
+    seat.key_state(KEY_LEFTALT, true);
+    seat.key(KEY_TAB);
+    seat.key_state(KEY_LEFTALT, false);
+    REQUIRE(desktop.keyboard_window() == b && desktop.focused_output_handle() == right_output);
+    toggle();
+    REQUIRE(desktop.keyboard_window() == b && desktop.focused_output_handle() == right_output);
+    REQUIRE(windows.state().output("left")->shown == 1 && !windows.view(*s).visible);
+    REQUIRE(connection.roundtrip(scratch) && connection.roundtrip(secondary));
+    const auto scratch_keys = scratch.keys;
+    const auto secondary_keys = secondary.keys;
+    seat.key(KEY_A);
+    REQUIRE(connection.roundtrip(scratch) && connection.roundtrip(secondary));
+    REQUIRE(scratch.keys == scratch_keys && secondary.keys == secondary_keys + 1);
+    REQUIRE(!scratch.keyboard_surface && !scratch.pointer_surface);
+    seat.key_state(KEY_LEFTALT, true);
+    seat.key(KEY_TAB);
+    seat.key_state(KEY_LEFTALT, false);
+    REQUIRE(desktop.keyboard_window() == a);
+
+    seat.click(200, 45);
+    toggle();
+    REQUIRE(desktop.keyboard_window() == s && desktop.focused_output_handle() == left_output);
+    REQUIRE(windows.view(*s).geometry == scratch_box);
+    REQUIRE(desktop.dispatch(action(ActionKind::move_to_workspace, 3)).value_or(false));
+    REQUIRE(windows.state().output("left")->shown == 3);
+    REQUIRE(desktop.keyboard_window() == s);
+    REQUIRE(desktop.dispatch(action(ActionKind::move_to_scratchpad)).value_or(false));
+    REQUIRE(!desktop.keyboard_window() && !windows.view(*s).visible);
+    toggle();
+    REQUIRE(desktop.keyboard_window() == s);
+    desktop.set_primary_output("right");
+    REQUIRE(!windows.view(*s).visible);
+    toggle();
+    REQUIRE(desktop.keyboard_window() == s && desktop.focused_output_handle() == right_output);
+    desktop.remove_output(right_output);
+    right.reset();
+    REQUIRE(!windows.view(*s).visible);
+    toggle();
+    REQUIRE(desktop.keyboard_window() == s && desktop.focused_output_handle() == left_output);
+    REQUIRE(!desktop.failed() && !fixture.scene.snapshot().failed);
+    desktop.remove_output(left_output);
+    return true;
+}
+
 bool run_wayland_input(const Fixture &fixture, const char *executable) {
     auto output = fixture.output();
     REQUIRE(output);
@@ -2885,6 +2969,7 @@ int main(int argc, char **argv) {
         return run_fixture(config, run_part4) && run_fixture(config, run_sparse_view_ids) &&
                        run_fixture(config, run_workspace_topology) &&
                        run_fixture(config, run_cross_output_cycle) &&
+                       run_fixture(config, run_scratchpad) &&
                        run_fixture(config, run_floating_borders) &&
                        run_fixture(config, run_floating_resize_dialogs) &&
                        run_fixture(config, run_floating_resize_limits) &&
