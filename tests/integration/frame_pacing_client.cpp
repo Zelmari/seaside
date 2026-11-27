@@ -3,11 +3,14 @@
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <list>
+#include <poll.h>
 #include <sys/mman.h>
+#include <sys/timerfd.h>
 #include <time.h>
 #include <unistd.h>
 #include <wayland-client.h>
@@ -17,6 +20,7 @@ constexpr int width = 512;
 constexpr int height = 320;
 constexpr int stride = width * sizeof(std::uint32_t);
 constexpr int bytes = stride * height;
+constexpr long period_ns = 16'666'667;
 
 struct Buffer {
     wl_buffer *proxy = nullptr;
@@ -47,6 +51,7 @@ struct Client {
     std::uint32_t *mapping = nullptr;
     clockid_t clock = -1;
     std::uint64_t frame = 0;
+    bool due = true;
     bool configured = false;
     bool close = false;
 
@@ -57,7 +62,8 @@ struct Client {
 void forget_feedback(Feedback &feedback) {
     wp_presentation_feedback_destroy(feedback.proxy);
     auto &feedbacks = feedback.client->feedbacks;
-    feedbacks.remove_if([&](const Feedback &entry) { return &entry == &feedback; });
+    const auto *key = &feedback;
+    feedbacks.remove_if([key](const Feedback &entry) { return &entry == key; });
 }
 
 constexpr wp_presentation_feedback_listener feedback_listener{
@@ -91,18 +97,18 @@ constexpr wl_callback_listener frame_listener{
                         milliseconds);
             wl_callback_destroy(callback);
             client.callback = nullptr;
-            client.draw();
         },
 };
 
 void Client::draw() {
-    if (!configured || callback || close) {
+    if (!due || !configured || callback || close) {
         return;
     }
     const auto buffer = std::ranges::find(buffers, false, &Buffer::busy);
     if (buffer == buffers.end()) {
         return;
     }
+    due = false;
     auto *stripe = buffer->pixels + (frame % height) * width;
     std::fill_n(stripe, width, (frame % 2 == 0) ? 0x00245473 : 0x006a351f);
     buffer->busy = true;
@@ -130,7 +136,6 @@ constexpr xdg_surface_listener surface_listener{
             auto &client = *static_cast<Client *>(data);
             xdg_surface_ack_configure(surface, serial);
             client.configured = true;
-            client.draw();
         },
 };
 constexpr xdg_toplevel_listener toplevel_listener{
@@ -208,8 +213,59 @@ Client::~Client() {
     }
     if (registry) {
         wl_registry_destroy(registry);
+    }
+    if (display) {
         wl_display_disconnect(display);
     }
+}
+
+bool run(Client &client, int timer) {
+    const itimerspec timing{{0, period_ns}, {0, period_ns}};
+    if (timerfd_settime(timer, 0, &timing, nullptr) < 0) {
+        return false;
+    }
+    std::array<pollfd, 2> fds{{
+        {wl_display_get_fd(client.display), POLLIN, 0},
+        {timer, POLLIN, 0},
+    }};
+    while (!client.close) {
+        while (wl_display_prepare_read(client.display) < 0) {
+            if (wl_display_dispatch_pending(client.display) < 0) {
+                return false;
+            }
+            client.draw();
+        }
+        const int flushed = wl_display_flush(client.display);
+        if (flushed < 0 && errno != EAGAIN) {
+            wl_display_cancel_read(client.display);
+            return false;
+        }
+        fds[0].events = flushed < 0 ? POLLIN | POLLOUT : POLLIN;
+        const int ready = poll(fds.data(), fds.size(), -1);
+        if (ready > 0 && (fds[0].revents & POLLIN)) {
+            if (wl_display_read_events(client.display) < 0 ||
+                wl_display_dispatch_pending(client.display) < 0) {
+                return false;
+            }
+        } else {
+            wl_display_cancel_read(client.display);
+        }
+        if (ready < 0 && errno == EINTR) {
+            continue;
+        }
+        if (ready < 0 || (fds[0].revents & (POLLERR | POLLHUP | POLLNVAL))) {
+            return false;
+        }
+        if (fds[1].revents & POLLIN) {
+            std::uint64_t ticks = 0;
+            if (read(timer, &ticks, sizeof(ticks)) != sizeof(ticks)) {
+                return false;
+            }
+            client.due = true;
+        }
+        client.draw();
+    }
+    return true;
 }
 } // namespace
 
@@ -272,13 +328,15 @@ int main(int argc, char **argv) {
     xdg_surface_add_listener(client.role, &surface_listener, &client);
     xdg_toplevel_add_listener(client.toplevel, &toplevel_listener, &client);
     wl_surface_commit(client.surface);
-    while (!client.close) {
-        if (wl_display_dispatch(client.display) < 0) {
-            std::perror("Wayland dispatch");
-            return 1;
-        }
-        // A buffer release can arrive after the frame callback.
-        client.draw();
+    const int timer = timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC);
+    if (timer < 0) {
+        std::perror("Frame pacing timer");
+        return 1;
     }
-    return 0;
+    const bool passed = run(client, timer);
+    close(timer);
+    if (!passed) {
+        std::perror("Frame pacing dispatch");
+    }
+    return passed ? 0 : 1;
 }

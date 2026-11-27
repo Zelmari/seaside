@@ -66,6 +66,23 @@ def measure(lines, start, end, period_ns):
     }
 
 
+def measure_trace(path, output_id):
+    events = [json.loads(line) for line in path.read_text().splitlines()]
+    selected = [row for row in events if row.get("output_id") == output_id]
+    commits = [row for row in selected if row["event"] == "commit"]
+    presented = [row for row in selected if row["event"] == "present"]
+    submitted = {row["commit_seq"] for row in commits
+                 if row["succeeded"] and row["presentation_mode"] is not None}
+    observed = {row["commit_seq"] for row in presented}
+    return {
+        "failed_commits": sum(not row["succeeded"] for row in commits),
+        "discarded_presents": sum(not row["succeeded"] for row in presented),
+        "matched_presents": len(submitted & observed),
+        "unmatched_submissions": len(submitted - observed),
+        "render_paths": sorted({row["presentation_mode"] for row in presented if row["succeeded"]}),
+    }
+
+
 def collect(args, pair, pair_number, traced):
     stem = f"{pair[0]}-{pair[1]}-{pair_number}" + ("-trace" if traced else "")
     app_id = f"seaside.frame-pacing.{stem}"
@@ -107,11 +124,14 @@ def collect_samples(args, pair, app_id, path, process, traced):
             end = time.clock_gettime_ns(clock)
         finally:
             if traced:
-                trace = ctl("trace", "stop")["trace"]
+                trace = ctl("debug", "render")["trace"]
+                if trace["state"] == "running":
+                    trace = ctl("trace", "stop")["trace"]
         if traced:
             export = ctl("trace", "export")
             target = args.output / f"{app_id}-{workspace}.jsonl"
             target.write_bytes(Path(export["path"]).read_bytes())
+            trace["frames"] = measure_trace(target, output["id"])
         after = ctl("debug", "render")
         time.sleep(0.25)
         statistics = measure(path.read_text().splitlines(), start, end, 1e12 / output["mode"]["refresh_millihz"])
