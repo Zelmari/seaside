@@ -304,7 +304,15 @@ int main(int argc, char **argv) {
                             XCB_ATOM_STRING, 8, sizeof(window_class), window_class);
         xcb_change_property(connection, XCB_PROP_MODE_REPLACE, window, protocols, XCB_ATOM_ATOM, 32,
                             1, &close_atom);
-        ok = update_color(connection, screen, window, 0x2496D0) &&
+        if (fullscreen) {
+            const auto state = atom(connection, "_NET_WM_STATE");
+            const auto fullscreen_state = atom(connection, "_NET_WM_STATE_FULLSCREEN");
+            ok = state && fullscreen_state &&
+                 succeeded(connection, xcb_change_property_checked(
+                                           connection, XCB_PROP_MODE_REPLACE, window, state,
+                                           XCB_ATOM_ATOM, 32, 1, &fullscreen_state));
+        }
+        ok = ok && update_color(connection, screen, window, 0x2496D0) &&
              succeeded(connection, xcb_map_window_checked(connection, window));
         if (ok && fullscreen) {
             ok = set_fullscreen(connection, screen, window, true);
