@@ -136,6 +136,21 @@ Set `[audio].default_output` and `default_input` independently. Run
 lets WirePlumber choose. `seasidectl status` shows the requested and effective
 routes and reports configured devices that are temporarily unavailable.
 
+Set `[applications].default_browser` to `"firefox"` or the installed desktop
+entry ID of another browser, for example `"chromium.desktop"`. The entry must
+handle HTTP and HTTPS URLs. Seaside also uses it for local HTML and XHTML
+when the entry advertises those MIME types. Save the config to switch browsers
+for apps in this session. Apps using the desktop portal can still ask you to
+choose what opens a link.
+
+Firefox is optional. If the requested browser is unavailable, Seaside restores
+any association it still owns to the previous default and reports the effective
+handlers under `applications.default_browser` in `seasidectl status`. Seaside
+stores the overrides and their fallbacks in `seaside-mimeapps.list` under the
+XDG config directory. An external change to a managed association takes
+precedence for that browser selection. A different configured browser uses
+the newer association as its fallback.
+
 The Arch package installs `power-profiles-daemon`. Set `[power].profile` to
 `"saver"`, `"balanced"`, or `"performance"`. An omitted setting follows the
 system policy. Run `powerprofilesctl list` to see supported profiles and
@@ -304,9 +319,10 @@ that chord, or restores built-in bindings if `chord` is omitted. Updates take
 effect live and are saved to the user configuration file.
 
 `settings.changed` reports the new configuration `revision`. Subscribe to
-`settings.effective_changed` for changes reported by the power-profile daemon.
-Its data includes `setting` set to `power.profile` and `status` with the same
-fields as `query.settings` reports under `power`. `config.recovered` marks
+`settings.effective_changed` for effective power profile or browser changes.
+Its `setting` is `power.profile` or `applications.default_browser`. Its
+`status` has the same fields as the corresponding object in `query.settings`.
+`config.recovered` marks
 the first accepted save after a `config.error`.
 
 `window.changed` reports a window’s new workspace and flags. Its data includes

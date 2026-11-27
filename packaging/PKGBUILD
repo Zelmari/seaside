@@ -20,7 +20,7 @@ makedepends=(
   'clang' 'dbus' 'gtest>=1.14.0' 'meson>=1.3.0' 'ninja'
   'nlohmann-json>=3.11.0' 'pkgconf' 'python' 'rust' 'wayland-protocols' 'wlr-protocols'
 )
-optdepends=('wf-recorder: command-line recording of an output')
+optdepends=('firefox: default browser' 'wf-recorder: command-line recording of an output')
 backup=('etc/xdg/xdg-desktop-portal-wlr/Seaside')
 _bridge_commit=b83eab900644e4c7c77982ce3d44cb490f0c5e1d
 _bridge_archive=xwayland-satellite-$_bridge_commit.tar.gz
