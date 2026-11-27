@@ -249,10 +249,12 @@ class PortalActivationTest : public testing::Test {
             const auto *value = std::getenv(key);
             const bool home = std::string_view(key).ends_with("_HOME");
             const bool assign = value && *value && (!home || *value == '/');
-            if (unset && !assign)
+            if (unset && !assign) {
                 EXPECT_NE(std::ranges::find(values, key), values.end());
-            if (!unset && assign)
+            }
+            if (!unset && assign) {
                 EXPECT_NE(std::ranges::find(values, std::string(key) + '=' + value), values.end());
+            }
         }
         if (unset) {
             EXPECT_NE(std::ranges::find(values, "DISPLAY"), values.end());
