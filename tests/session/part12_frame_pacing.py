@@ -133,10 +133,16 @@ def collect_samples(args, pair, app_id, path, process, traced):
             target.write_bytes(Path(export["path"]).read_bytes())
             trace["frames"] = measure_trace(target, output["id"])
         after = ctl("debug", "render")
+        if ctl("focus") != focus or next(
+            row for row in ctl("outputs")["outputs"] if row["id"] == focus["output_id"]
+        ) != output:
+            raise RuntimeError(f"Measurement target changed on workspace {workspace}")
         time.sleep(0.25)
         statistics = measure(path.read_text().splitlines(), start, end, 1e12 / output["mode"]["refresh_millihz"])
         sample = dict(statistics, workspace=workspace, output=output["connector"], mode=output["mode"],
-                      before=before, after=after, trace=trace if traced else None)
+                      app_id=app_id, clock=clock, start_ns=start, end_ns=end,
+                      focus=focus, workspaces=ctl("workspaces"), before=before, after=after,
+                      trace=trace if traced else None)
         print(json.dumps(sample), flush=True)
         samples.append(sample)
     return samples
