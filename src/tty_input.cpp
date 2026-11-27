@@ -9,6 +9,7 @@
 #include <math.h>
 #include <new>
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
 #include <type_traits>
 
@@ -70,12 +71,16 @@ struct TtyInputState {
     struct wlr_relative_pointer_manager_v1 *relative_pointer;
     struct wlr_pointer_constraints_v1 *constraints;
     struct wlr_pointer_constraint_v1 *constraint;
+    struct wl_protocol_logger *constraint_logger;
+    struct {
+        struct wl_client *client;
+        uint32_t id;
+    } empty_region_request;
     struct wl_listener relative_pointer_destroy;
     struct wl_listener constraints_destroy;
     struct wl_listener new_constraint;
     struct wl_listener constraint_destroy;
     struct wl_listener pointer_focus_change;
-    struct wl_listener pointer_surface_commit;
     struct wlr_cursor_shape_manager_v1 *cursor_shapes;
     struct wl_listener cursor_shapes_destroy;
     struct wl_listener request_cursor_shape;
@@ -96,6 +101,17 @@ struct TtyInputState {
     struct tty_device *pointer_grab_device;
 };
 static_assert(std::is_standard_layout_v<TtyInputState>);
+
+enum class ConstraintRegion { unchanged, normal, empty };
+
+struct constraint_region_state {
+    TtyInputState *input;
+    struct wlr_pointer_constraint_v1 *constraint;
+    struct wlr_surface_synced synced;
+    struct wl_listener commit, destroy;
+    ConstraintRegion pending, current;
+};
+static_assert(std::is_standard_layout_v<constraint_region_state>);
 
 struct tty_device {
     TtyInputState *input;
@@ -152,7 +168,11 @@ static void handle_constraint_destroy(struct wl_listener *listener, void *data) 
     leave_constraint(input, false);
 }
 
-static pixman_region32_t *constraint_region(struct wlr_pointer_constraint_v1 *constraint) {
+static const pixman_region32_t *constraint_region(struct wlr_pointer_constraint_v1 *constraint) {
+    auto *state = static_cast<const constraint_region_state *>(constraint->data);
+    if (!state || state->current == ConstraintRegion::empty) {
+        return nullptr;
+    }
     // wlroots intersects an explicit region immediately, but populates its
     // cached default region on the next surface commit.
     return pixman_region32_not_empty(&constraint->current.region)
@@ -162,9 +182,9 @@ static pixman_region32_t *constraint_region(struct wlr_pointer_constraint_v1 *co
 
 static bool constraint_contains(struct wlr_pointer_constraint_v1 *constraint, double sx,
                                 double sy) {
-    return sx >= 0 && sy >= 0 && sx < INT32_MAX && sy < INT32_MAX &&
-           pixman_region32_contains_point(constraint_region(constraint), (int32_t)sx, (int32_t)sy,
-                                          nullptr);
+    const auto *region = constraint_region(constraint);
+    return region && sx >= 0 && sy >= 0 && sx < INT32_MAX && sy < INT32_MAX &&
+           pixman_region32_contains_point(region, (int32_t)sx, (int32_t)sy, nullptr);
 }
 
 static void refresh_constraint(TtyInputState *input) {
@@ -209,31 +229,70 @@ static void refresh_constraint(TtyInputState *input) {
     }
 }
 
-static void clear_pointer_surface_watch(TtyInputState *input) {
-    wl_list_remove(&input->pointer_surface_commit.link);
-    wl_list_init(&input->pointer_surface_commit.link);
+static void handle_constraint_commit(struct wl_listener *listener, void *) noexcept {
+    struct constraint_region_state *state = wl_container_of(listener, state, commit);
+    // A surface's synced states are already committed here. Deactivating a
+    // one-shot constraint during the synced-state iteration would unlink it.
+    refresh_pointer_focus(state->input);
 }
 
-static void watch_pointer_surface(TtyInputState *input, struct wlr_surface *surface) {
-    clear_pointer_surface_watch(input);
-    if (surface && input->constraints &&
-        wlr_pointer_constraints_v1_constraint_for_surface(input->constraints, surface,
-                                                          input->seat)) {
-        wl_signal_add(&surface->events.commit, &input->pointer_surface_commit);
+static void destroy_constraint_region_state(struct wl_listener *listener, void *) noexcept {
+    struct constraint_region_state *state = wl_container_of(listener, state, destroy);
+    state->constraint->data = nullptr;
+    wl_list_remove(&state->commit.link);
+    wl_list_remove(&state->destroy.link);
+    wlr_surface_synced_finish(&state->synced);
+    delete state;
+}
+
+static const struct wlr_surface_synced_impl constraint_region_sync{
+    .state_size = sizeof(ConstraintRegion),
+    .init_state = nullptr,
+    .finish_state = nullptr,
+    .move_state =
+        [](void *destination, void *source) {
+            auto &applied = *static_cast<ConstraintRegion *>(destination);
+            auto &requested = *static_cast<ConstraintRegion *>(source);
+            if (requested != ConstraintRegion::unchanged) {
+                applied = requested;
+                requested = ConstraintRegion::unchanged;
+            }
+        },
+    .commit = nullptr,
+};
+
+static bool is_explicitly_empty(const union wl_argument &argument) {
+    auto *region = reinterpret_cast<struct wl_resource *>(argument.o);
+    return region && !pixman_region32_not_empty(wlr_region_from_resource(region));
+}
+
+static void track_constraint_region(void *data, enum wl_protocol_logger_type direction,
+                                    const struct wl_protocol_logger_message *message) noexcept {
+    if (direction != WL_PROTOCOL_LOGGER_REQUEST) {
+        return;
     }
-}
-
-static void handle_pointer_surface_commit(struct wl_listener *listener, void *data) noexcept {
-    (void)data;
-    TtyInputState *input = wl_container_of(listener, input, pointer_surface_commit);
-    // A region change is applied during wlroots' synced-state iteration.
-    // Deactivate on the later surface event because this can free a one-shot
-    // constraint and unlink its synced state.
-    refresh_pointer_focus(input);
-    struct wlr_surface *surface = input->seat->pointer_state.focused_surface;
-    if (!surface || !wlr_pointer_constraints_v1_constraint_for_surface(input->constraints, surface,
-                                                                       input->seat)) {
-        clear_pointer_surface_watch(input);
+    auto *input = static_cast<TtyInputState *>(data);
+    input->empty_region_request = {};
+    // wlroots 0.20 represents both null and explicitly empty constraint
+    // regions with an empty region. Record that distinction before dispatch.
+    struct wl_resource *resource = message->resource;
+    const char *protocol = wl_resource_get_class(resource);
+    if (message->arguments_count == 5 &&
+        wl_resource_get_user_data(resource) == input->constraints &&
+        strcmp(protocol, "zwp_pointer_constraints_v1") == 0 &&
+        is_explicitly_empty(message->arguments[3])) {
+        input->empty_region_request = {wl_resource_get_client(resource), message->arguments[0].n};
+    } else if (message->arguments_count == 1 && strcmp(message->message->name, "set_region") == 0 &&
+               (strcmp(protocol, "zwp_confined_pointer_v1") == 0 ||
+                strcmp(protocol, "zwp_locked_pointer_v1") == 0)) {
+        auto *constraint =
+            static_cast<wlr_pointer_constraint_v1 *>(wl_resource_get_user_data(resource));
+        if (constraint && constraint->pointer_constraints == input->constraints &&
+            constraint->data) {
+            auto *state = static_cast<constraint_region_state *>(constraint->data);
+            state->pending = is_explicitly_empty(message->arguments[0]) ? ConstraintRegion::empty
+                                                                        : ConstraintRegion::normal;
+        }
     }
 }
 
@@ -355,27 +414,50 @@ static void handle_pointer_focus_change(struct wl_listener *listener, void *data
     if (input->constraint && input->constraint->surface != event->new_surface) {
         leave_constraint(input, true);
     }
-    watch_pointer_surface(input, event->new_surface);
 }
 
 static void handle_new_constraint(struct wl_listener *listener, void *data) noexcept {
     TtyInputState *input = wl_container_of(listener, input, new_constraint);
     auto *constraint = static_cast<wlr_pointer_constraint_v1 *>(data);
-    if (constraint->seat == input->seat &&
-        constraint->surface == input->seat->pointer_state.focused_surface) {
-        watch_pointer_surface(input, constraint->surface);
-        refresh_constraint(input);
+    if (constraint->seat != input->seat) {
+        return;
     }
+    auto state =
+        std::unique_ptr<constraint_region_state>(new (std::nothrow) constraint_region_state{});
+    if (!state ||
+        !wlr_surface_synced_init(&state->synced, constraint->surface, &constraint_region_sync,
+                                 &state->pending, &state->current)) {
+        wl_resource_post_no_memory(constraint->resource);
+        return;
+    }
+    const auto request = input->empty_region_request;
+    if (request.client == wl_resource_get_client(constraint->resource) &&
+        request.id == wl_resource_get_id(constraint->resource)) {
+        state->current = ConstraintRegion::empty;
+    }
+    state->input = input;
+    state->constraint = constraint;
+    state->commit.notify = handle_constraint_commit;
+    state->destroy.notify = destroy_constraint_region_state;
+    wl_signal_add(&constraint->surface->events.commit, &state->commit);
+    wl_signal_add(&constraint->events.destroy, &state->destroy);
+    constraint->data = state.release();
+    refresh_constraint(input);
+}
+
+static void forget_constraint_protocol(TtyInputState *input) {
+    wl_protocol_logger_destroy(input->constraint_logger);
+    input->constraint_logger = nullptr;
+    wl_list_remove(&input->constraints_destroy.link);
+    wl_list_remove(&input->new_constraint.link);
+    input->constraints = nullptr;
 }
 
 static void handle_constraints_destroy(struct wl_listener *listener, void *data) noexcept {
     (void)data;
     TtyInputState *input = wl_container_of(listener, input, constraints_destroy);
     leave_constraint(input, false);
-    clear_pointer_surface_watch(input);
-    wl_list_remove(&input->constraints_destroy.link);
-    wl_list_remove(&input->new_constraint.link);
-    input->constraints = nullptr;
+    forget_constraint_protocol(input);
 }
 
 static void handle_relative_pointer_destroy(struct wl_listener *listener, void *data) noexcept {
@@ -1273,7 +1355,6 @@ TtyInput::create(wlr_backend *backend, TtyInputObserver &observer,
     attached.options = options;
     wl_list_init(&attached.devices);
     wl_list_init(&attached.focus_destroy.link);
-    wl_list_init(&attached.pointer_surface_commit.link);
     attached.new_input.notify = handle_new_input;
     attached.backend_destroy.notify = handle_backend_destroy;
     wl_signal_add(&backend->events.new_input, &attached.new_input);
@@ -1293,7 +1374,6 @@ static void handle_seat_destroy(struct wl_listener *listener, void *data) noexce
     leave_constraint(input, false);
     wl_list_remove(&input->seat_destroy.link);
     wl_list_remove(&input->pointer_focus_change.link);
-    clear_pointer_surface_watch(input);
     leave_cursor_surface(input);
     if (input->options.client_cursor) {
         wl_list_remove(&input->request_cursor_surface.link);
@@ -1346,22 +1426,31 @@ bool TtyInput::enable_keyboard(struct wl_display *display) noexcept {
              : nullptr;
     struct wlr_relative_pointer_manager_v1 *relative_pointer = nullptr;
     struct wlr_pointer_constraints_v1 *constraints = nullptr;
+    struct wl_protocol_logger *constraint_logger = nullptr;
     struct wlr_cursor_shape_manager_v1 *cursor_shapes = nullptr;
     const bool needs_cursor = input->options.client_cursor;
     if (seat && input->options.pointer_targets) {
         relative_pointer = wlr_relative_pointer_manager_v1_create(display);
         constraints = wlr_pointer_constraints_v1_create(display);
+        if (constraints) {
+            constraint_logger =
+                wl_display_add_protocol_logger(display, track_constraint_region, input);
+        }
     }
     if (seat && needs_cursor) {
         cursor_shapes = wlr_cursor_shape_manager_v1_create(display, 1);
     }
     if (!seat || !text_input ||
-        (input->options.pointer_targets && (!relative_pointer || !constraints)) ||
+        (input->options.pointer_targets &&
+         (!relative_pointer || !constraints || !constraint_logger)) ||
         (needs_cursor && !cursor_shapes) || !wlr_data_device_manager_create(display) ||
         !wlr_primary_selection_v1_device_manager_create(display) ||
         !wlr_ext_data_control_manager_v1_create(display, 1) ||
         !wlr_data_control_manager_v1_create(display)) {
         xkb_state_unref(shortcut_state);
+        if (constraint_logger) {
+            wl_protocol_logger_destroy(constraint_logger);
+        }
         seaside_text_input_destroy(text_input);
         wlr_seat_destroy(seat);
         if (group) {
@@ -1377,7 +1466,6 @@ bool TtyInput::enable_keyboard(struct wl_display *display) noexcept {
     input->shortcut_state = shortcut_state;
     input->seat_destroy.notify = handle_seat_destroy;
     input->pointer_focus_change.notify = handle_pointer_focus_change;
-    input->pointer_surface_commit.notify = handle_pointer_surface_commit;
     input->pointer_grab_begin.notify = handle_pointer_grab_begin;
     input->pointer_grab_end.notify = handle_pointer_grab_end;
     input->keyboard_grab_end.notify = handle_keyboard_grab_end;
@@ -1417,6 +1505,7 @@ bool TtyInput::enable_keyboard(struct wl_display *display) noexcept {
     if (relative_pointer && constraints) {
         input->relative_pointer = relative_pointer;
         input->constraints = constraints;
+        input->constraint_logger = constraint_logger;
         input->relative_pointer_destroy.notify = handle_relative_pointer_destroy;
         input->constraints_destroy.notify = handle_constraints_destroy;
         input->new_constraint.notify = handle_new_constraint;
@@ -1439,8 +1528,7 @@ TtyInput::~TtyInput() noexcept {
         forget_cursor_shapes(input);
     }
     if (input->constraints) {
-        wl_list_remove(&input->constraints_destroy.link);
-        wl_list_remove(&input->new_constraint.link);
+        forget_constraint_protocol(input);
     }
     if (input->group) {
         wl_list_remove(&input->group_key.link);

@@ -1176,6 +1176,29 @@ static void exercise_wayland_pointer(void) {
     check(scene.x >= 100 && scene.x < 105 && right.events.unconfines == 0 &&
               scene.motion_kind == SEASIDE_POINTER_CONFINED,
           "absolute motion escaped pointer confinement");
+
+    struct wl_region *empty = wl_compositor_create_region(right.events.compositor);
+    zwp_confined_pointer_v1_set_region(confine, empty);
+    round_trip(server, right.display);
+    check(right.events.unconfines == 0, "uncommitted empty region deactivated confinement");
+    wl_surface_commit(right.surface);
+    round_trip(server, right.display);
+    check(right.events.unconfines == 1, "committed empty region fell back to the input region");
+    zwp_confined_pointer_v1_set_region(confine, nullptr);
+    round_trip(server, right.display);
+    check(right.events.confines == 1, "uncommitted null region reactivated confinement");
+    wl_surface_commit(right.surface);
+    round_trip(server, right.display);
+    check(right.events.confines == 2, "committed null region did not restore confinement");
+
+    zwp_confined_pointer_v1_destroy(confine);
+    confine = zwp_pointer_constraints_v1_confine_pointer(
+        right.events.constraints, right.surface, right.events.pointer, empty,
+        ZWP_POINTER_CONSTRAINTS_V1_LIFETIME_PERSISTENT);
+    zwp_confined_pointer_v1_add_listener(confine, &confine_listener, &right.events);
+    wl_region_destroy(empty);
+    round_trip(server, right.display);
+    check(right.events.confines == 2, "initially empty region activated confinement");
     zwp_confined_pointer_v1_destroy(confine);
     round_trip(server, right.display);
     relative(&pointer, -60, -60);
