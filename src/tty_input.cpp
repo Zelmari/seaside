@@ -1035,10 +1035,11 @@ static void handle_pointer_frame(struct wl_listener *listener, void *data) noexc
         if (input->gesture_device == device && input->gesture_released) {
             const uint32_t button = input->gesture_button;
             device->consumed_buttons[button] = false;
-            --input->consumed_button_count;
             input->gesture_device = nullptr;
             input->gesture_released = false;
+            // The desktop can project a final resize before ending the drag.
             input->observer->pointer_button(0, button, false, input->modifiers);
+            --input->consumed_button_count;
             update_pointer_target(input, monotonic_msec());
         }
         wlr_seat_pointer_notify_frame(input->seat);

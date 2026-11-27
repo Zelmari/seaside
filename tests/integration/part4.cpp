@@ -2860,7 +2860,7 @@ bool run_lock_around_compositor_drag(const Fixture &fixture) {
         .locked = [](void *data, zwp_locked_pointer_v1 *) { ++*static_cast<unsigned *>(data); },
         .unlocked = [](void *, zwp_locked_pointer_v1 *) {},
     };
-    const std::unique_ptr<zwp_locked_pointer_v1, decltype(&zwp_locked_pointer_v1_destroy)> lock(
+    std::unique_ptr<zwp_locked_pointer_v1, decltype(&zwp_locked_pointer_v1_destroy)> lock(
         zwp_pointer_constraints_v1_lock_pointer(capture.constraints, capture.surface,
                                                 capture.pointer, nullptr,
                                                 ZWP_POINTER_CONSTRAINTS_V1_LIFETIME_PERSISTENT),
@@ -2890,6 +2890,8 @@ bool run_lock_around_compositor_drag(const Fixture &fixture) {
     REQUIRE(
         connection.wait(capture, [&] { return activations == 2 && capture.button_serial > 0; }));
     REQUIRE(seat.placements == 2 && seat.locked);
+    lock.reset();
+    REQUIRE(connection.roundtrip(capture) && !seat.locked);
     return true;
 }
 
