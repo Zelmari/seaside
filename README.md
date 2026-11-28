@@ -6,8 +6,9 @@ configuration, and the `seasidectl` command-line client. Dwindle is the default
 tiling layout. Scrolling columns are also available. You can add your own
 Wayland panel or keep the default empty desktop.
 
-Seaside v1 is available for Arch Linux. An Arch VirtualBox guest has verified
-TTY startup, window management, virtual display power, and real portal capture.
+Stable releases are available for Arch Linux. An Arch VirtualBox guest has
+verified TTY startup, window management, virtual display power, and real portal
+capture.
 Native AMD display, gaming, and application compatibility checks are still
 open. [Verification and support status](Specification/PUBLIC_DOCUMENTATION.md)
 
@@ -29,7 +30,7 @@ installs it with pacman. Use the same block for a first install or an upgrade.
   release_info=$(curl -fsSL 'https://api.github.com/repos/Zelmari/seaside/releases/latest' |
     jq -er '[
       .tag_name,
-      ([.assets[].name | select(test("^seaside-[A-Za-z0-9._+-]+-x86_64\\.pkg\\.tar\\.zst$"))] |
+      ([.assets[].name | select(test("^seaside-[0-9][A-Za-z0-9._+-]*-x86_64\\.pkg\\.tar\\.zst$"))] |
         if length == 1 then .[0] else error("Expected one Seaside Arch package") end)
     ] | @tsv')
   IFS=$'\t' read -r tag package <<< "$release_info"

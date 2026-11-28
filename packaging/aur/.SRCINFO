@@ -1,6 +1,6 @@
 pkgbase = seaside
 	pkgdesc = TTY-launched Wayland compositor for Arch Linux
-	pkgver = 1.0.0
+	pkgver = 1.1.0
 	pkgrel = 1
 	url = https://github.com/Zelmari/seaside
 	arch = x86_64
@@ -62,10 +62,11 @@ pkgbase = seaside
 	depends = xdg-desktop-portal-wlr>=0.8.4
 	depends = xcb-util-cursor
 	depends = xorg-xwayland
+	optdepends = firefox: default browser
 	optdepends = wf-recorder: command-line recording of an output
 	noextract = xwayland-satellite-b83eab900644e4c7c77982ce3d44cb490f0c5e1d.tar.gz
 	backup = etc/xdg/xdg-desktop-portal-wlr/Seaside
-	source = seaside-1.0.0::git+https://github.com/Zelmari/seaside.git#tag=v1
+	source = seaside-1.1.0::git+https://github.com/Zelmari/seaside.git#tag=v1.1.0
 	source = xwayland-satellite-b83eab900644e4c7c77982ce3d44cb490f0c5e1d.tar.gz::https://codeload.github.com/Supreeeme/xwayland-satellite/tar.gz/b83eab900644e4c7c77982ce3d44cb490f0c5e1d
 	sha256sums = SKIP
 	sha256sums = 45f06d0c7017d793fa20c85a6fa7e8b26ad3c681c579d455f697faddf3c57bdf
